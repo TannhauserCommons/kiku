@@ -20,7 +20,6 @@
 #ifndef Staged
   #define Staged "..\target\dist\Kiku"
 #endif
-#define Staged "..\target\dist\Kiku"
 ; Held by a running Kiku.
 #define Mutex "Local\Kiku"
 ; How long an update waits for Kiku to quit, in ms.
