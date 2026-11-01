@@ -1,10 +1,24 @@
 ; Kiku's installer: per user, no admin, into %LOCALAPPDATA%\Programs\Kiku with a Start menu shortcut.
-; It packs what scripts\build-release.ps1 staged:
-;   iscc /DVersion=0.1.0 installer\kiku.iss      -> target\dist\Kiku-0.1.0-setup.exe
+; It packs what scripts\build-release.ps1 staged, built for x64 (the default) or ARM64:
+;   iscc /DVersion=0.1.0 installer\kiku.iss                -> target\dist\Kiku-0.1.0-x64-setup.exe
+;   iscc /DVersion=0.1.0 /DArch=arm64 installer\kiku.iss   -> target\dist\Kiku-0.1.0-arm64-setup.exe
 ; Updates run it with /SILENT /SUPPRESSMSGBOXES /NORESTART: it waits for Kiku to quit, then opens it again.
 
 #ifndef Version
   #error Pass the version: iscc /DVersion=x.y.z installer\kiku.iss
+#endif
+#ifndef Arch
+  #define Arch "x64"
+#endif
+; x64 also installs on ARM64 Windows 11, which runs it emulated.
+#if Arch == "x64"
+  #define Allowed "x64compatible"
+#else
+  #define Allowed Arch
+#endif
+; CI packs each architecture's build from a folder of its own.
+#ifndef Staged
+  #define Staged "..\target\dist\Kiku"
 #endif
 #define Staged "..\target\dist\Kiku"
 ; Held by a running Kiku.
@@ -36,11 +50,11 @@ SetupIconFile=..\assets\icon\kiku.ico
 UninstallDisplayIcon={app}\kiku.exe
 UninstallDisplayName=Kiku
 WizardStyle=modern
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#Allowed}
+ArchitecturesInstallIn64BitMode={#Allowed}
 MinVersion=10.0
 OutputDir=..\target\dist
-OutputBaseFilename=Kiku-{#Version}-setup
+OutputBaseFilename=Kiku-{#Version}-{#Arch}-setup
 Compression=lzma2/max
 SolidCompression=yes
 

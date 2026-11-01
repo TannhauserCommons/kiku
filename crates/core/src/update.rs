@@ -1,6 +1,6 @@
-//! Updates, published as Kiku's releases: `<releases>/latest/download/latest.json` names the newest version
-//! and its installer, signed with an ed25519 key whose public half is compiled in. A check fetches that
-//! one file, at most once a day, and sends nothing else.
+//! Updates, published as Kiku's releases: `<releases>/latest/download/latest.json` (`latest-arm64.json` for
+//! ARM64 builds) names the newest version and its installer, signed with an ed25519 key whose public half is
+//! compiled in. A check fetches that one file, at most once a day, and sends nothing else.
 //!
 //! The releases' address (e.g. `https://github.com/<owner>/kiku/releases`, laid out as GitHub's: `latest/
 //! download/<file>` and `download/<tag>/<file>`) and the key come from `KIKU_RELEASES` and `KIKU_UPDATE_KEY`
@@ -35,6 +35,8 @@ const PUBLIC_KEY: &str = match option_env!("KIKU_UPDATE_KEY") {
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often the checker wakes to see whether a check is due and allowed.
 const WAKE_EVERY: Duration = Duration::from_secs(60 * 60);
+/// The manifest for this build's architecture; x64 keeps the name every copy from before ARM64 builds reads.
+const MANIFEST: &str = if cfg!(target_arch = "aarch64") { "latest-arm64.json" } else { "latest.json" };
 /// The manifest is a few hundred bytes; anything much bigger isn't one.
 const MANIFEST_LIMIT: u64 = 64 * 1024;
 /// What a signature is made over starts with this, so it can't be mistaken for anything else signed.
@@ -101,7 +103,7 @@ pub fn watch(allowed: impl Fn() -> bool, offer: impl Fn(Release)) {
 /// Fetches the manifest and returns the version it offers if it is newer than this one.
 pub fn check() -> Result<Option<Release>, String> {
     let key = public_key().ok_or("this build has no update key")?;
-    let url = format!("{}/latest/download/latest.json", releases());
+    let url = format!("{}/latest/download/{MANIFEST}", releases());
     let mut response = download::agent().get(&url).call().map_err(|e| format!("couldn't reach the update server: {e}"))?;
     let json = response.body_mut().with_config().limit(MANIFEST_LIMIT).read_to_string().map_err(|e| format!("couldn't read the update manifest: {e}"))?;
     let release = verify(&json, &key)?;

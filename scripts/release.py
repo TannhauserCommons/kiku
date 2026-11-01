@@ -12,10 +12,11 @@
       deploy key that publishes the source.
   public-key
       Prints the public key of KIKU_SIGNING_KEY, which builds compile in as KIKU_UPDATE_KEY.
-  manifest <installer> <version> <releases> <notes> <out>
-      Writes latest.json for the installer published as <releases>/download/v<version>/<installer's name>:
-      its size, sha256 and notes, and <releases> as moved_to, so copies built for an older address switch
-      to it; signed with KIKU_SIGNING_KEY.
+  manifest <installer> <version> <releases> <notes> <folder>
+      Writes the manifest for the installer published as <releases>/download/v<version>/<installer's name>
+      (Kiku-<version>-<arch>-setup.exe) into <folder>: latest.json for x64, latest-<arch>.json for others,
+      as crates/core/src/update.rs reads them. It holds the installer's size, sha256 and notes, and
+      <releases> as moved_to, so copies built for an older address switch to it; signed with KIKU_SIGNING_KEY.
 
 The signed text must match `Release::signed_text` in crates/core/src/update.rs.
 """
@@ -48,6 +49,13 @@ def manifest(installer, version, releases, notes):
     return release
 
 
+def manifest_name(installer, version):
+    arch = pathlib.Path(installer).name.removeprefix(f'Kiku-{version}-').removesuffix('-setup.exe')
+    if arch not in ('x64', 'arm64'):
+        sys.exit(f'{installer} is not named Kiku-{version}-<x64|arm64>-setup.exe')
+    return 'latest.json' if arch == 'x64' else f'latest-{arch}.json'
+
+
 def main(command, *args):
     if command == 'keygen':
         print(os.urandom(32).hex())
@@ -58,9 +66,9 @@ def main(command, *args):
     elif command == 'public-key':
         print(signing_key().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex())
     elif command == 'manifest' and len(args) == 5:
-        installer, version, releases, notes, out = args
+        installer, version, releases, notes, folder = args
         text = json.dumps(manifest(installer, version, releases, notes), indent=2, ensure_ascii=False) + '\n'
-        pathlib.Path(out).write_text(text, encoding='utf-8')
+        (pathlib.Path(folder) / manifest_name(installer, version)).write_text(text, encoding='utf-8')
     else:
         sys.exit(__doc__)
 

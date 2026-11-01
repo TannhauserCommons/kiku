@@ -9,6 +9,8 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
 $Project = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+# Builds are native: x64 or ARM64, as this PC is.
+$Arch = "$([Runtime.InteropServices.RuntimeInformation]::OSArchitecture)".ToLower()
 $CargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
 $Out = Join-Path $Project 'target\dist\Kiku'
 
@@ -17,8 +19,13 @@ $Out = Join-Path $Project 'target\dist\Kiku'
 $flags = "--remap-path-prefix=$Project=kiku", "--remap-path-prefix=$CargoHome=cargo", '-Clink-arg=/PDBALTPATH:%_PDB%'
 $env:CARGO_ENCODED_RUSTFLAGS = $flags -join [char]0x1f
 $env:CARGO_TARGET_DIR = Join-Path $Project 'target\dist'
-# C and C++ built by crates (SQLite, ring) keep __FILE__ relative to where they are compiled.
+# C and C++ built by crates (SQLite, ring) keep __FILE__ relative to where they are compiled. On ARM64 ring
+# needs clang, so all C is built with it, which trims paths its own way.
 $env:CFLAGS = $env:CXXFLAGS = "/d1trimfile:$Project\ /d1trimfile:$CargoHome\"
+if ($Arch -eq 'arm64') {
+    $env:CC = 'clang'
+    $env:CFLAGS = "-ffile-prefix-map=$Project\= -ffile-prefix-map=$CargoHome\="
+}
 
 # Copies a catalog component into a models folder from models\ here, or downloads it, checking each file.
 function Save-Component($catalog, $id, $models) {
@@ -50,7 +57,7 @@ foreach ($file in @('kiku.exe', 'kiku-mcp.exe', 'kiku-engine.exe' | ForEach-Obje
 # The Visual C++ runtime, app-local, since a fresh Windows may lack it: the newest copy here, as ONNX
 # Runtime needs one at least as new as the compiler it was built with.
 foreach ($name in 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
-    $copies = @(Get-Item (Join-Path $env:SystemRoot "System32\$name")) + @(Get-ChildItem "${env:ProgramFiles}*\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT\$name")
+    $copies = @(Get-Item (Join-Path $env:SystemRoot "System32\$name")) + @(Get-ChildItem "${env:ProgramFiles}*\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\$Arch\Microsoft.VC14*.CRT\$name")
     $newest = $copies | Sort-Object { $v = $_.VersionInfo; [version]::new($v.FileMajorPart, $v.FileMinorPart, $v.FileBuildPart, $v.FilePrivatePart) } | Select-Object -Last 1
     Copy-Item $newest.FullName $Out
 }

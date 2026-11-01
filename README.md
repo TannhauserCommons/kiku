@@ -3,7 +3,11 @@
 Kiku shows live captions for what each app on your PC says, such as a call, a stream
 or a video, and for your microphone. Everything runs on your PC: no account, no cloud, no telemetry.
 
-**[Download Kiku for Windows](../../releases/latest/download/Kiku-setup.exe)** (Windows 10 and 11, 64-bit)
+**Download Kiku for Windows:**
+
+- **[x64](../../releases/latest/download/Kiku-setup.exe)**: Windows 10 and 11 on most PCs (Intel or AMD)
+- **[ARM64](../../releases/latest/download/Kiku-arm64-setup.exe)**: Windows 11 on ARM, such as Snapdragon
+  laptops. Models run on the CPU there.
 
 ## Features
 
@@ -23,7 +27,7 @@ or a video, and for your microphone. Everything runs on your PC: no account, no 
 
 ## Installing
 
-Run `Kiku-setup.exe`. It installs Kiku for you alone, without admin rights. The installer isn't
+Run the installer. It installs Kiku for you alone, without admin rights. The installer isn't
 code-signed, so Windows SmartScreen may say it "protected your PC": choose **More info**, then
 **Run anyway**. Kiku checks for updates once a day if you leave that on, and asks before installing one.
 
@@ -37,7 +41,8 @@ releases. Nothing else is sent.
 ## Building from source
 
 You need Windows 10 or 11, [Rust](https://rustup.rs) (stable, MSVC), Visual Studio 2022's C++ build tools,
-CMake and git. In PowerShell 7, from the repository:
+CMake and git. Builds are for the PC's own architecture, x64 or ARM64 (which has no NVIDIA libraries). In
+PowerShell 7, from the repository:
 
 ```
 ./scripts/fetch-runtime.ps1      # sherpa-onnx's ONNX Runtime and NVIDIA's CUDA libraries, into third_party/
@@ -52,7 +57,7 @@ A release build like the published one, and its installer ([Inno Setup 6](https:
 
 ```
 ./scripts/build-release.ps1 -Test
-iscc /DVersion=0.1.0 installer/kiku.iss
+iscc /DVersion=0.1.0 /DArch=x64 installer/kiku.iss     # or /DArch=arm64 on an ARM PC
 ```
 
 `.github/workflows/release.yml` builds and publishes each release from this repository's source.

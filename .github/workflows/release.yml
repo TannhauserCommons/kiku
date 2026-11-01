@@ -1,18 +1,20 @@
-# Builds and publishes a release from this repository's source when a version tag (v1.2.3) is pushed: the
-# installer and the signed update manifest as the tag's release, and model files the app downloads from
-# here, if missing, in the models-v1 release. Runs only on tag pushes to the public repository itself,
-# never for pull requests or forks, so its signing key reaches no one else's code.
+# Builds and publishes a release from this repository's source when a version tag (v1.2.3) is pushed: each
+# architecture's installer (x64 and ARM64, each built natively) and signed update manifest as the tag's
+# release, and model files the app downloads from here, if missing, in the models-v1 release. Publishes only
+# on tag pushes to the public repository itself, never for pull requests or forks, so its signing key reaches
+# no one else's code. Run by hand (workflow_dispatch), it only builds and tests both architectures.
 # Secrets: KIKU_SIGNING_KEY (the update manifest's ed25519 key) and KIKU_PRIVATE_WORDS (for the privacy gate).
 name: release
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency: release
+concurrency: release-${{ github.ref }}
 
 defaults:
   run:
@@ -24,17 +26,26 @@ env:
 
 jobs:
   app:
-    if: ${{ !github.event.repository.private && !github.event.repository.fork }}
-    runs-on: windows-2025
+    if: ${{ !github.event.repository.fork && (github.event_name == 'workflow_dispatch' || !github.event.repository.private) }}
+    strategy:
+      # Each architecture's result stands on its own; publishing needs both anyway.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            image: windows-2025
+          - arch: arm64
+            image: windows-11-arm
+    runs-on: ${{ matrix.image }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
 
       - name: Check the tag
+        if: github.event_name == 'push'
         run: |
           $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
           if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "The tag $env:GITHUB_REF_NAME doesn't match version $version in Cargo.toml" }
-          "VERSION=$version" >> $env:GITHUB_ENV
 
       - uses: actions/cache@v4
         id: runtime
@@ -43,7 +54,7 @@ jobs:
             third_party/sherpa-onnx
             third_party/moonshine-src
             third_party/moonshine-build
-          key: runtime-${{ hashFiles('scripts/fetch-runtime.ps1', 'scripts/build-moonshine.ps1', 'patches/*') }}
+          key: runtime-${{ matrix.arch }}-${{ hashFiles('scripts/fetch-runtime.ps1', 'scripts/build-moonshine.ps1', 'patches/*') }}
 
       - name: Fetch the runtime and build Moonshine
         if: steps.runtime.outputs.cache-hit != 'true'
@@ -54,6 +65,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
 
       - name: Compile in the update key
+        if: github.event_name == 'push'
         env:
           KIKU_SIGNING_KEY: ${{ secrets.KIKU_SIGNING_KEY }}
         run: |
@@ -66,26 +78,60 @@ jobs:
           rustup update stable --no-self-update
           ./scripts/build-release.ps1 -Test
 
-      - name: Build the installer
-        run: |
-          choco install innosetup --no-progress -y
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DVersion=$env:VERSION" installer/kiku.iss
-          if ($LASTEXITCODE) { throw "ISCC failed: $LASTEXITCODE" }
+      - name: Privacy gate
+        env:
+          KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
+        run: python scripts/privacy-gate.py target/dist/Kiku
 
-      - name: Sign the update manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kiku-${{ matrix.arch }}
+          path: target/dist/Kiku
+          retention-days: 7
+
+  publish:
+    needs: app
+    if: ${{ github.event_name == 'push' && !github.event.repository.private }}
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+
+      # Into target/dist/kiku-x64 and target/dist/kiku-arm64.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kiku-*
+          path: target/dist
+
+      - name: Build the installers
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          "VERSION=$version" >> $env:GITHUB_ENV
+          choco install innosetup --no-progress -y
+          foreach ($arch in 'x64', 'arm64') {
+              & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DVersion=$version" "/DArch=$arch" "/DStaged=..\target\dist\kiku-$arch" installer/kiku.iss
+              if ($LASTEXITCODE) { throw "ISCC failed for $arch`: $LASTEXITCODE" }
+          }
+
+      - name: Sign the update manifests
         env:
           KIKU_SIGNING_KEY: ${{ secrets.KIKU_SIGNING_KEY }}
         run: |
           # The release commit's message after its title is what the update offer says changed.
           $notes = ((git log -1 --format=%b) -join "`n").Trim()
           "NOTES<<EOF`n$notes`nEOF" >> $env:GITHUB_ENV
-          uv run scripts/release.py manifest "target/dist/Kiku-$env:VERSION-setup.exe" $env:VERSION $env:KIKU_RELEASES $notes target/dist/latest.json
-          if ($LASTEXITCODE) { throw 'Signing failed' }
+          foreach ($setup in Get-ChildItem target/dist -Filter "Kiku-$env:VERSION-*-setup.exe") {
+              uv run scripts/release.py manifest $setup.FullName $env:VERSION $env:KIKU_RELEASES $notes target/dist
+              if ($LASTEXITCODE) { throw 'Signing failed' }
+          }
 
       - name: Privacy gate
         env:
           KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
-        run: python scripts/privacy-gate.py target/dist/Kiku "target/dist/Kiku-$env:VERSION-setup.exe" target/dist/latest.json
+        run: |
+          $published = Get-ChildItem target/dist -File | Where-Object Name -match '^(Kiku-.*-setup\.exe|latest.*\.json)$'
+          python scripts/privacy-gate.py @($published.FullName)
 
       - name: Publish
         env:
@@ -93,7 +139,7 @@ jobs:
         run: ./scripts/publish-release.ps1 -Version $env:VERSION -Notes $env:NOTES
 
   models:
-    needs: app
+    needs: publish
     runs-on: windows-2025
     timeout-minutes: 90
     steps:

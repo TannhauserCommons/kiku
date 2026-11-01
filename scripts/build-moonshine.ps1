@@ -24,8 +24,10 @@ foreach ($patch in Get-ChildItem (Join-Path $PSScriptRoot '..\patches\moonshine-
     if (-not $applied) { git -C $Src apply $patch.FullName }
 }
 
-# Any Visual Studio generator puts each library in a Release folder, as build.rs expects.
-cmake -S (Join-Path $Src 'core') -B $Build -A x64
+# Any Visual Studio generator puts each library in a Release folder, as build.rs expects. Built for this
+# PC's architecture, x64 or ARM64, like the runtime fetch-runtime.ps1 fetched.
+$platform = @{ X64 = 'x64'; Arm64 = 'ARM64' }["$([Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"]
+cmake -S (Join-Path $Src 'core') -B $Build -A $platform
 # Moonshine's messages carry __FILE__; trimming the source folder keeps local paths out of release builds.
 # The source folder is the one the build was set up with, read from CMake's cache.
 $configured = (Select-String -Path (Join-Path $Build 'CMakeCache.txt') -Pattern '^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$').Matches[0].Groups[1].Value
