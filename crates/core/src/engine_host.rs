@@ -1,0 +1,396 @@
+//! GPU models run in a small helper process, `kiku-engine`. NVIDIA's libraries keep about a
+//! gigabyte of memory until the process that loaded them ends, so ending the helper is the only way
+//! unloading a GPU model gives all of it back. A crash in the GPU stack also stays in the helper.
+//!
+//! The app drives the helper over its stdin and stdout in small binary frames: a kind byte, a
+//! little-endian `u32` length, then the payload. Audio goes one way without replies; polls get lines back.
+
+use std::{
+    collections::HashMap,
+    io::{self, BufReader, BufWriter, Read, Write},
+    path::{Path, PathBuf},
+    process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+use crate::engine::{load_here, Backend, Device, Engine, EngineStream, Line, ModelSpec, Result, SAMPLE_RATE};
+
+const HELPER: &str = "kiku-engine";
+/// Loading a model and hearing the test clip takes seconds; a GPU stack that hangs gets this long.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long trying an imported model may take: loading it and hearing the clip on the CPU.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Four seconds of a public domain LibriVox reading of A Tale of Two Cities, 16 kHz mono 16-bit.
+const PROBE_CLIP: &[u8] = include_bytes!("../assets/probe.wav");
+/// Windows' exit code for a process whose DLLs couldn't be found.
+const DLL_NOT_FOUND: u32 = 0xC000_0135;
+
+// Requests.
+const LOAD: u8 = 1;
+const OPEN: u8 = 2;
+const PUSH: u8 = 3;
+const POLL: u8 = 4;
+const FLUSH: u8 = 5;
+const CLOSE: u8 = 6;
+// Replies.
+const OK: u8 = 0;
+const LINES: u8 = 1;
+const ERROR: u8 = 2;
+
+/// An engine running in the helper process; dropping it ends the process.
+pub struct HostedEngine {
+    child: Mutex<Child>,
+    pipes: Mutex<Pipes>,
+    next_stream: AtomicU64,
+}
+
+struct Pipes {
+    to_helper: BufWriter<ChildStdin>,
+    from_helper: BufReader<ChildStdout>,
+}
+
+impl HostedEngine {
+    /// Starts the helper and loads `spec` in it. The helper tries the model on a short clip before
+    /// answering, so a GPU that can't run it fails here rather than mid-sentence.
+    pub fn start(spec: &ModelSpec) -> Result<Self> {
+        // Lazy is CUDA 12's default; set so a system-wide EAGER can't load every kernel up front (4.6 GB instead of 1 GB of RAM).
+        let mut child = Command::new(helper_path()?).env("CUDA_MODULE_LOADING", "LAZY").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+        let mut to_helper = BufWriter::new(child.stdin.take().ok_or("helper has no stdin")?);
+        let mut from_helper = BufReader::new(child.stdout.take().ok_or("helper has no stdout")?);
+        write_frame(&mut to_helper, LOAD, &encode_spec(spec))?;
+        // Read the reply on a thread, so a hung load can be timed out.
+        let (reply_tx, reply_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let reply = read_frame(&mut from_helper);
+            let _ = reply_tx.send((reply, from_helper));
+        });
+        let failed = |child: &mut Child, why: String| -> Result<Self> {
+            let _ = child.kill();
+            Err(match child.wait() {
+                Ok(status) if exit_code(status) == Some(DLL_NOT_FOUND) => "a GPU library is missing next to the app".into(),
+                _ => why.into(),
+            })
+        };
+        let from_helper = match reply_rx.recv_timeout(LOAD_TIMEOUT) {
+            Ok((Ok((ERROR, message)), _)) => return failed(&mut child, String::from_utf8_lossy(&message).into_owned()),
+            Ok((Ok(_), from_helper)) => from_helper,
+            Ok((Err(_), _)) | Err(mpsc::RecvTimeoutError::Disconnected) => return failed(&mut child, "the GPU helper stopped while loading".into()),
+            Err(mpsc::RecvTimeoutError::Timeout) => return failed(&mut child, format!("loading took over {} s", LOAD_TIMEOUT.as_secs())),
+        };
+        let pipes = Pipes { to_helper, from_helper };
+        Ok(Self { child: Mutex::new(child), pipes: Mutex::new(pipes), next_stream: AtomicU64::new(0) })
+    }
+
+    /// Sends a request and waits for its reply's payload; an error reply becomes an `Err`.
+    fn request(&self, kind: u8, payload: &[u8]) -> Result<Vec<u8>> {
+        let mut pipes = self.pipes.lock().unwrap();
+        write_frame(&mut pipes.to_helper, kind, payload)?;
+        let (reply, payload) = read_frame(&mut pipes.from_helper).map_err(|_| "the GPU helper stopped unexpectedly")?;
+        match reply {
+            ERROR => Err(String::from_utf8_lossy(&payload).into_owned().into()),
+            _ => Ok(payload),
+        }
+    }
+
+    /// Sends a request that gets no reply.
+    fn send(&self, kind: u8, payload: &[u8]) -> Result<()> {
+        write_frame(&mut self.pipes.lock().unwrap().to_helper, kind, payload).map_err(|_| "the GPU helper stopped unexpectedly".into())
+    }
+}
+
+impl Engine for HostedEngine {
+    fn open_stream(&self) -> Result<Box<dyn EngineStream + '_>> {
+        let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
+        self.request(OPEN, &id.to_le_bytes())?;
+        Ok(Box::new(HostedStream { engine: self, id }))
+    }
+
+    fn helper_process(&self) -> Option<u32> {
+        Some(self.child.lock().unwrap().id())
+    }
+
+    fn lost(&self) -> bool {
+        matches!(self.child.lock().unwrap().try_wait(), Ok(Some(_)))
+    }
+}
+
+impl Drop for HostedEngine {
+    fn drop(&mut self) {
+        let child = self.child.get_mut().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+struct HostedStream<'a> {
+    engine: &'a HostedEngine,
+    id: u64,
+}
+
+impl EngineStream for HostedStream<'_> {
+    fn push(&mut self, audio: &[f32]) -> Result<()> {
+        let mut payload = self.id.to_le_bytes().to_vec();
+        payload.extend(audio.iter().flat_map(|sample| sample.to_le_bytes()));
+        self.engine.send(PUSH, &payload)
+    }
+
+    fn poll(&mut self) -> Result<Vec<Line>> {
+        decode_lines(&self.engine.request(POLL, &self.id.to_le_bytes())?)
+    }
+
+    fn flush(&mut self) -> Result<Vec<Line>> {
+        decode_lines(&self.engine.request(FLUSH, &self.id.to_le_bytes())?)
+    }
+}
+
+impl Drop for HostedStream<'_> {
+    fn drop(&mut self) {
+        let _ = self.engine.send(CLOSE, &self.id.to_le_bytes());
+    }
+}
+
+/// The helper's side: answers requests on stdin until the app closes it.
+pub fn serve() {
+    load_libraries_only_from_app_folder();
+    let (mut input, mut output) = (BufReader::new(io::stdin().lock()), BufWriter::new(io::stdout().lock()));
+    // The engine lives as long as the helper, so its streams can borrow it for good.
+    let mut engine: Option<&'static dyn Engine> = None;
+    let mut streams: HashMap<u64, Box<dyn EngineStream>> = HashMap::new();
+    // A push has no reply, so its error waits for the stream's next poll.
+    let mut failed: HashMap<u64, String> = HashMap::new();
+    while let Ok((kind, payload)) = read_frame(&mut input) {
+        let id = payload.get(..8).map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()));
+        let reply = match (kind, engine) {
+            (LOAD, _) => Some(decode_spec(&payload).and_then(|spec| load_here(&spec)).and_then(|loaded| {
+                // A first run is where a GPU stack missing a library or a kernel for this card fails.
+                hear(loaded.as_ref(), &probe_clip())?;
+                engine = Some(Box::leak(loaded));
+                Ok(Vec::new())
+            })),
+            (OPEN, Some(engine)) => Some(engine.open_stream().map(|stream| {
+                streams.insert(id, stream);
+                Vec::new()
+            })),
+            (PUSH, _) => {
+                let audio: Vec<f32> = payload[8..].chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+                if let Some(Err(error)) = streams.get_mut(&id).map(|stream| stream.push(&audio)) {
+                    failed.insert(id, error.to_string());
+                }
+                None
+            }
+            (POLL | FLUSH, _) => Some(match (failed.remove(&id), streams.get_mut(&id)) {
+                (Some(error), _) => Err(error.into()),
+                (None, Some(stream)) => if kind == POLL { stream.poll() } else { stream.flush() }.map(|lines| encode_lines(&lines)),
+                (None, None) => Err("no such stream".into()),
+            }),
+            (CLOSE, _) => {
+                streams.remove(&id);
+                None
+            }
+            _ => Some(Err("no model loaded".into())),
+        };
+        let written = match reply {
+            Some(Ok(payload)) => write_frame(&mut output, if kind == POLL || kind == FLUSH { LINES } else { OK }, &payload),
+            Some(Err(error)) => write_frame(&mut output, ERROR, error.to_string().as_bytes()),
+            None => Ok(()),
+        };
+        if written.is_err() {
+            break;
+        }
+    }
+}
+
+/// What `engine` hears in `audio`: its finished lines, joined.
+pub fn hear(engine: &dyn Engine, audio: &[f32]) -> Result<String> {
+    let mut stream = engine.open_stream()?;
+    let mut lines: Vec<Line> = Vec::new();
+    let mut take = |new: Vec<Line>| {
+        for line in new {
+            lines.retain(|l| l.id != line.id);
+            lines.push(line);
+        }
+    };
+    for chunk in audio.chunks(SAMPLE_RATE as usize / 10) {
+        stream.push(chunk)?;
+        take(stream.poll()?);
+    }
+    take(stream.flush()?);
+    Ok(lines.iter().filter(|l| l.complete).map(|l| l.text.as_str()).collect::<Vec<_>>().join(" "))
+}
+
+/// The bundled test clip as samples.
+pub fn probe_clip() -> Vec<f32> {
+    PROBE_CLIP[44..].as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b) as f32 / 32768.0).collect()
+}
+
+/// Tries `backend` on the model in `dir` in a helper process, on the CPU, and returns what it heard
+/// in the test clip. sherpa-onnx ends the whole process on a model it can't read, hence the helper.
+pub fn probe(backend: Backend, dir: &Path, vad: Option<&Path>) -> Result<String> {
+    let mut command = Command::new(helper_path()?);
+    command.args(["--probe", backend.name()]).arg(dir);
+    if let Some(vad) = vad {
+        command.arg(vad);
+    }
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let (heard, error) = (read_on_thread(child.stdout.take()), read_on_thread(child.stderr.take()));
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("took over {} s", PROBE_TIMEOUT.as_secs()).into());
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let (heard, error) = (heard.join().unwrap_or_default(), error.join().unwrap_or_default());
+    match status.success() {
+        true => Ok(heard.trim().to_owned()),
+        false if !error.trim().is_empty() => Err(error.trim().to_owned().into()),
+        false => Err(format!("the model couldn't be read ({})", status).into()),
+    }
+}
+
+/// Reads all of `pipe` on a thread of its own, so a child writing more than a pipe holds (ONNX
+/// Runtime's warnings, say) never blocks waiting for it to be read.
+fn read_on_thread(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
+}
+
+/// The helper's side of [`probe`]: `--probe <backend> <dir> [vad]`. Prints what it heard.
+pub fn serve_probe(args: &[String]) -> std::process::ExitCode {
+    let heard = (|| -> Result<String> {
+        let backend = args.first().and_then(|name| Backend::from_name(name)).ok_or("unknown backend")?;
+        let dir = args.get(1).ok_or("no model folder")?.into();
+        let spec = ModelSpec { backend, dir, device: Device::Cpu, vad: args.get(2).map(Into::into) };
+        hear(load_here(&spec)?.as_ref(), &probe_clip())
+    })();
+    match heard {
+        Ok(text) => {
+            println!("{text}");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Makes the helper find DLLs only next to it and in System32, so a CUDA or cuDNN on PATH or in the
+/// working folder can never be loaded in place of the GPU pack.
+fn load_libraries_only_from_app_folder() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::LibraryLoader::{SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32};
+        unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32) };
+    }
+}
+
+fn exit_code(status: ExitStatus) -> Option<u32> {
+    status.code().map(|code| code as u32)
+}
+
+/// The helper sits next to the app, or one folder up for the examples in `target/release/examples`.
+fn helper_path() -> Result<PathBuf> {
+    let name = format!("{HELPER}{}", std::env::consts::EXE_SUFFIX);
+    let exe = std::env::current_exe()?;
+    exe.ancestors()
+        .skip(1)
+        .take(2)
+        .map(|folder| folder.join(&name))
+        .find(|path| path.is_file())
+        .ok_or_else(|| format!("{name} is missing next to the app").into())
+}
+
+fn write_frame(writer: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
+    writer.write_all(&[kind])?;
+    writer.write_all(&(payload.len() as u32).to_le_bytes())?;
+    writer.write_all(payload)?;
+    writer.flush()
+}
+
+fn read_frame(reader: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
+    let mut header = [0u8; 5];
+    reader.read_exact(&mut header)?;
+    let mut payload = vec![0u8; u32::from_le_bytes(header[1..].try_into().unwrap()) as usize];
+    reader.read_exact(&mut payload)?;
+    Ok((header[0], payload))
+}
+
+/// `backend`, `device`, the speech detector (or nothing) and the folder, a line each.
+fn encode_spec(spec: &ModelSpec) -> Vec<u8> {
+    let device = if spec.device == Device::Cuda { "cuda" } else { "cpu" };
+    let vad = spec.vad.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
+    format!("{}\n{device}\n{vad}\n{}", spec.backend.name(), spec.dir.display()).into_bytes()
+}
+
+fn decode_spec(payload: &[u8]) -> Result<ModelSpec> {
+    let text = String::from_utf8_lossy(payload);
+    let mut parts = text.splitn(4, '\n');
+    let backend = parts.next().and_then(Backend::from_name).ok_or("unknown backend")?;
+    let device = if parts.next() == Some("cuda") { Device::Cuda } else { Device::Cpu };
+    let vad = parts.next().filter(|path| !path.is_empty()).map(Into::into);
+    Ok(ModelSpec { backend, device, vad, dir: parts.next().ok_or("no model folder")?.into() })
+}
+
+/// A count, then each line's id, finished flag, text length and text.
+fn encode_lines(lines: &[Line]) -> Vec<u8> {
+    let mut bytes = (lines.len() as u32).to_le_bytes().to_vec();
+    for line in lines {
+        bytes.extend(line.id.to_le_bytes());
+        bytes.push(line.complete as u8);
+        bytes.extend((line.text.len() as u32).to_le_bytes());
+        bytes.extend(line.text.as_bytes());
+    }
+    bytes
+}
+
+fn decode_lines(bytes: &[u8]) -> Result<Vec<Line>> {
+    let mut reader = bytes;
+    let mut take = |n: usize| -> Result<&[u8]> {
+        let (head, rest) = reader.split_at_checked(n).ok_or("garbled reply from the GPU helper")?;
+        reader = rest;
+        Ok(head)
+    };
+    let count = u32::from_le_bytes(take(4)?.try_into()?);
+    (0..count)
+        .map(|_| {
+            let id = u64::from_le_bytes(take(8)?.try_into()?);
+            let complete = take(1)?[0] != 0;
+            let length = u32::from_le_bytes(take(4)?.try_into()?) as usize;
+            let text = String::from_utf8_lossy(take(length)?).into_owned();
+            Ok(Line { id, text, complete })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_and_specs_survive_the_pipe() {
+        let lines = vec![Line { id: 7, text: "Bonjour, ça va ?".into(), complete: true }, Line { id: 8, text: String::new(), complete: false }];
+        assert_eq!(decode_lines(&encode_lines(&lines)).unwrap(), lines);
+        let spec = ModelSpec { backend: Backend::Phrases(crate::engine::PhraseModel::NemoTransducer), dir: r"C:\models\sherpa\x-fp16".into(), device: Device::Cuda, vad: Some(r"C:\vad.onnx".into()) };
+        let read = decode_spec(&encode_spec(&spec)).unwrap();
+        assert_eq!((read.backend, read.device, read.dir, read.vad), (spec.backend, spec.device, spec.dir, spec.vad));
+        let mut framed = Vec::new();
+        write_frame(&mut framed, POLL, b"abc").unwrap();
+        assert_eq!(read_frame(&mut framed.as_slice()).unwrap(), (POLL, b"abc".to_vec()));
+    }
+}

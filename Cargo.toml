@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/core", "crates/app"]
+# Test crates with their own build setup, e.g. for another OS.
+exclude = ["spikes"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

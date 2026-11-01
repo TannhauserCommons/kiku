@@ -1,0 +1,767 @@
+{
+  "release": "{releases}/download/models-v1",
+  "components": [
+    {
+      "id": "silero-vad",
+      "name": "Speech detector (Silero VAD)",
+      "dir": "sherpa",
+      "licence": {
+        "spdx": "MIT",
+        "url": "https://github.com/snakers4/silero-vad",
+        "attribution": "Silero VAD by Silero Team"
+      },
+      "files": [
+        {
+          "path": "silero_vad.onnx",
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+          "size": 643854,
+          "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6"
+        }
+      ]
+    },
+    {
+      "id": "gpu-pack",
+      "name": "GPU pack (NVIDIA CUDA 12, cuDNN 9)",
+      "dir": "",
+      "root": "app",
+      "licence": {
+        "spdx": "LicenseRef-NVIDIA-CUDA-EULA AND MIT",
+        "url": "https://docs.nvidia.com/cuda/eula/index.html",
+        "attribution": "NVIDIA CUDA runtime, cuBLAS and cuDNN, downloaded from NVIDIA under its licence terms; ONNX Runtime's CUDA provider, downloaded from Microsoft's release, MIT"
+      },
+      "files": [
+        {
+          "path": "cublas64_12.dll",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.9.1.4-archive.zip",
+          "size": 102518272,
+          "sha256": "90052a83efd1b57a8e3616a6590b335855f81b814a4f16eecb7b5bf6d1b1d4eb",
+          "zip": {
+            "offset": 15971,
+            "compressed": 78125188,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cublasLt64_12.dll",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.9.1.4-archive.zip",
+          "size": 668669952,
+          "sha256": "c3a05ea244c937314afec09f87b91f814c7e27977681f6c67eb51bb06ced3a4a",
+          "zip": {
+            "offset": 78141252,
+            "compressed": 471239049,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudart64_12.dll",
+          "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.9.79-archive.zip",
+          "size": 583680,
+          "sha256": "760c38928bbe5759f7b31ed6692599eb7ec83cedd5702e84c2b72028a89837e1",
+          "zip": {
+            "offset": 15144,
+            "compressed": 174759,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudnn64_9.dll",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip",
+          "size": 270448,
+          "sha256": "7268ef53e32c2c574372326dfc9d94a26095f4ed9c89dba87cfb3ab1e40a6470",
+          "zip": {
+            "offset": 10613,
+            "compressed": 118563,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudnn_adv64_9.dll",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip",
+          "size": 270983792,
+          "sha256": "712ace96559e60b5be81a1097acb7609f601ff4cd0cdef848b013d671753b4b4",
+          "zip": {
+            "offset": 129277,
+            "compressed": 194237029,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudnn_cnn64_9.dll",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip",
+          "size": 2997872,
+          "sha256": "dff4c446c855b3ab2d486aebf4c11388cf74da14d7bd0bfafb61c3a75481313d",
+          "zip": {
+            "offset": 194366407,
+            "compressed": 1924957,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudnn_engines_precompiled64_9.dll",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip",
+          "size": 528169072,
+          "sha256": "6b603ac45fc018a96f014d0c6cdbc8f480dce2dbe33b8ca38228a4e4c531f3fe",
+          "zip": {
+            "offset": 196291481,
+            "compressed": 363232049,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudnn_engines_runtime_compiled64_9.dll",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip",
+          "size": 45452912,
+          "sha256": "f92f4776261e4409aa9f84357c40bc3626700292a1d22025746388bea43ae11b",
+          "zip": {
+            "offset": 559523652,
+            "compressed": 21308553,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudnn_engines_tensor_ir64_9.dll",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip",
+          "size": 156272,
+          "sha256": "d7380a7c4ad90590968e97b4d8b43a616e7e0070bfdeeee04c4d0be85ad52394",
+          "zip": {
+            "offset": 580832320,
+            "compressed": 68436,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudnn_ext64_9.dll",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip",
+          "size": 130160,
+          "sha256": "f20888488b701e429830e19cf59022e90a0c5dd398723162ea9f320b3ca06636",
+          "zip": {
+            "offset": 580900857,
+            "compressed": 61831,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudnn_graph64_9.dll",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip",
+          "size": 99919472,
+          "sha256": "445e8c3e44a6a6035749380009ae35ae8c2bc246428229b79545a25238bb56e2",
+          "zip": {
+            "offset": 580962791,
+            "compressed": 39118778,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudnn_heuristic64_9.dll",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip",
+          "size": 94795376,
+          "sha256": "0634af738266cd36c912e99cd3807ee452450e963bf885be204fdcfb322cfc70",
+          "zip": {
+            "offset": 620081676,
+            "compressed": 32377646,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "cudnn_ops64_9.dll",
+          "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip",
+          "size": 105686640,
+          "sha256": "390bfe103a244c714fca5a1320950ba51a3173a7fbd6664ed535ce7367891ccd",
+          "zip": {
+            "offset": 652459423,
+            "compressed": 78583972,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "onnxruntime_providers_cuda.dll",
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.28.2/onnxruntime-win-x64-gpu_cuda12-1.28.2.zip",
+          "size": 496742712,
+          "sha256": "0204055e745b092b0d946558b914b61aa395a9fa41fc6e082904c1441de3ef4d",
+          "zip": {
+            "offset": 78294013,
+            "compressed": 319428228,
+            "method": "deflate"
+          }
+        },
+        {
+          "path": "onnxruntime_providers_shared.dll",
+          "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.28.2/onnxruntime-win-x64-gpu_cuda12-1.28.2.zip",
+          "size": 21816,
+          "sha256": "f55a8a6216a63c5678f0ccca531403fd34e7325e0b43c771e134a3898c3e5120",
+          "zip": {
+            "offset": 449445918,
+            "compressed": 12346,
+            "method": "deflate"
+          }
+        }
+      ]
+    }
+  ],
+  "models": [
+    {
+      "id": "moonshine-tiny",
+      "name": "Moonshine Tiny",
+      "family": "moonshine",
+      "backend": "moonshine-tiny-streaming",
+      "languages": [
+        "en"
+      ],
+      "params": "34M",
+      "wer_percent": 6.2,
+      "licence": {
+        "spdx": "MIT",
+        "url": "https://huggingface.co/moonshine-ai/moonshine-streaming",
+        "attribution": "Moonshine streaming models by Moonshine AI"
+      },
+      "requires": [],
+      "variants": [
+        {
+          "device": "cpu",
+          "precision": "int8",
+          "dir": "en/tiny-streaming-en",
+          "ram_mb": 180,
+          "vram_mb": 0,
+          "files": [
+            {
+              "path": "adapter.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/tiny-streaming-en/quantized_26_08_21/adapter.ort",
+              "size": 1319664,
+              "sha256": "22ecc949e146c49667fda28d102d4e30749a107dc88a396292aa8f277ef1347c"
+            },
+            {
+              "path": "cross_kv.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/tiny-streaming-en/quantized_26_08_21/cross_kv.ort",
+              "size": 1287544,
+              "sha256": "143a36667b8d05fd9d04e8c337b7ee121f37ef299aea6b3d82bdb3d3401950b4"
+            },
+            {
+              "path": "decoder_kv.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/tiny-streaming-en/quantized_26_08_21/decoder_kv.ort",
+              "size": 32583720,
+              "sha256": "8852553f312adb6c9aa4d17418015049b30f412209ee569d336548c0044627de"
+            },
+            {
+              "path": "encoder.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/tiny-streaming-en/quantized_26_08_21/encoder.ort",
+              "size": 7675440,
+              "sha256": "a8414e1a5dedf9f2093d7680601dd8a9b0433e7020260eafe0e370ead91134ca"
+            },
+            {
+              "path": "frontend.model.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/tiny-streaming-en/quantized_26_08_21/frontend.model.ort",
+              "size": 23344,
+              "sha256": "5121b561417b638afce0c6c31b760e37c93cf97f80d9b0031aad1fe7b6f25d61"
+            },
+            {
+              "path": "frontend.weights.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/tiny-streaming-en/quantized_26_08_21/frontend.weights.ort",
+              "size": 2093464,
+              "sha256": "217da24ac6f522ebf02da8ef288e77d1ac68d50d4a6821433182e4fbf4204bbd"
+            },
+            {
+              "path": "streaming_config.json",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/tiny-streaming-en/quantized_26_08_21/streaming_config.json",
+              "size": 509,
+              "sha256": "74fe5ddebd63b17caf59e8a3b18c17547ff7bce1642050edbb1c3962674f8950"
+            },
+            {
+              "path": "tokenizer.bin",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/tiny-streaming-en/quantized_26_08_21/tokenizer.bin",
+              "size": 249974,
+              "sha256": "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "moonshine-small",
+      "name": "Moonshine Small",
+      "family": "moonshine",
+      "backend": "moonshine-small-streaming",
+      "languages": [
+        "en"
+      ],
+      "params": "123M",
+      "wer_percent": 3.9,
+      "licence": {
+        "spdx": "MIT",
+        "url": "https://huggingface.co/moonshine-ai/moonshine-streaming",
+        "attribution": "Moonshine streaming models by Moonshine AI"
+      },
+      "requires": [],
+      "variants": [
+        {
+          "device": "cpu",
+          "precision": "int8",
+          "dir": "en/small-streaming-en",
+          "ram_mb": 380,
+          "vram_mb": 0,
+          "files": [
+            {
+              "path": "adapter.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/adapter.ort",
+              "size": 2870368,
+              "sha256": "c665f742364febad597cc9ac1e0b341ffbee0e24a1466e2f3bde95e6e4771762"
+            },
+            {
+              "path": "cross_kv.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/cross_kv.ort",
+              "size": 5356536,
+              "sha256": "e2d3417144e9514055ebfefe8dcc4c0a55a55adcb8530435844c75c53e352bf6"
+            },
+            {
+              "path": "decoder_kv.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/decoder_kv.ort",
+              "size": 81878600,
+              "sha256": "1a05465b1dd955858dfcbee039c0020fb5dd982b0f5094c34e61735d518d771b"
+            },
+            {
+              "path": "encoder.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/encoder.ort",
+              "size": 44148576,
+              "sha256": "2d4d973e91e8aca08c51e7e7efa28a46ab265b63d809d5294d18b86bcd85b993"
+            },
+            {
+              "path": "frontend.model.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/frontend.model.ort",
+              "size": 26944,
+              "sha256": "09b1210ae30dc5f0f3e45f0ebab914c254741323114f53fbbe5ae62cca35058f"
+            },
+            {
+              "path": "frontend.weights.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/frontend.weights.ort",
+              "size": 7769464,
+              "sha256": "7ef97521bd4bad3928f5bb6808586f4fcc6e92bd5990394112eed7d4052ec338"
+            },
+            {
+              "path": "streaming_config.json",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/streaming_config.json",
+              "size": 512,
+              "sha256": "26f02b6afb22d60871a5efd85c3d38e569cc0ddb6c5eb6e93d3260152ae8a47a"
+            },
+            {
+              "path": "tokenizer.bin",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/small-streaming-en/quantized_26_08_21/tokenizer.bin",
+              "size": 249974,
+              "sha256": "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "moonshine-medium",
+      "name": "Moonshine Medium",
+      "family": "moonshine",
+      "backend": "moonshine-medium-streaming",
+      "languages": [
+        "en"
+      ],
+      "params": "245M",
+      "wer_percent": 3.5,
+      "licence": {
+        "spdx": "MIT",
+        "url": "https://huggingface.co/moonshine-ai/moonshine-streaming",
+        "attribution": "Moonshine streaming models by Moonshine AI"
+      },
+      "requires": [],
+      "variants": [
+        {
+          "device": "cpu",
+          "precision": "int8",
+          "dir": "en/medium-streaming-en",
+          "ram_mb": 580,
+          "vram_mb": 0,
+          "files": [
+            {
+              "path": "adapter.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/adapter.ort",
+              "size": 3651296,
+              "sha256": "3f2a287def57cc094367a0eec3c4f5fc36a32ec420e86764b696920991b20281"
+            },
+            {
+              "path": "cross_kv.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/cross_kv.ort",
+              "size": 11643776,
+              "sha256": "642f6e21cd305be79342207c6f9e6b681d469d55bc48c72b27b84846fb71fd1e"
+            },
+            {
+              "path": "decoder_kv.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/decoder_kv.ort",
+              "size": 146972408,
+              "sha256": "193bb366492b74fc4ad338c6778e8d8eb916aaa11b5aa264f9057f4db7759486"
+            },
+            {
+              "path": "decoder_kv_with_attention.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/decoder_kv_with_attention.ort",
+              "size": 146813344,
+              "sha256": "b5de4b5639b4155fb7956161e43196eb27a26db293f11c1d245effaf6b738118"
+            },
+            {
+              "path": "encoder.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/encoder.ort",
+              "size": 94705376,
+              "sha256": "12915e76ebac7dd287c5ea63965d06103a53ba1ce242a4a34f318f3958c60c37"
+            },
+            {
+              "path": "frontend.model.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/frontend.model.ort",
+              "size": 28720,
+              "sha256": "95768855c70c8251eeecc05fedf69999da1b8ab16f605c9f457fd3354b0ad6b5"
+            },
+            {
+              "path": "frontend.weights.ort",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/frontend.weights.ort",
+              "size": 11889560,
+              "sha256": "5ac941f490cbe035b335b99a414cc393d62d4c6f9f2423495b286870d271d709"
+            },
+            {
+              "path": "streaming_config.json",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/streaming_config.json",
+              "size": 513,
+              "sha256": "28e83b7a28e91472692a035e0dae3116422ae43aeb2bef5ed822c44ce89b88af"
+            },
+            {
+              "path": "tokenizer.bin",
+              "url": "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/0bf2f2e5aff22e6fbba4300b00a4e00bbc4f8aae/model/medium-streaming-en/quantized_26_08_21/tokenizer.bin",
+              "size": 249974,
+              "sha256": "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parakeet-tdt-v2",
+      "name": "Parakeet TDT v2",
+      "family": "parakeet",
+      "backend": "nemo-transducer",
+      "languages": [
+        "en"
+      ],
+      "params": "600M",
+      "wer_percent": 2.63,
+      "licence": {
+        "spdx": "CC-BY-4.0",
+        "url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2",
+        "attribution": "Parakeet TDT 0.6B v2 by NVIDIA, CC BY 4.0; ONNX export by the k2-fsa sherpa-onnx project"
+      },
+      "requires": [
+        "silero-vad"
+      ],
+      "variants": [
+        {
+          "device": "cpu",
+          "precision": "int8",
+          "dir": "sherpa/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+          "ram_mb": 1090,
+          "vram_mb": 0,
+          "files": [
+            {
+              "path": "decoder.int8.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2/decoder.int8.onnx",
+              "size": 7257753,
+              "sha256": "b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e"
+            },
+            {
+              "path": "encoder.int8.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2/encoder.int8.onnx",
+              "size": 652184296,
+              "sha256": "a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab"
+            },
+            {
+              "path": "joiner.int8.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2/joiner.int8.onnx",
+              "size": 1739080,
+              "sha256": "7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2"
+            },
+            {
+              "path": "tokens.txt",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2/tokens.txt",
+              "size": 9384,
+              "sha256": "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"
+            }
+          ]
+        },
+        {
+          "device": "cuda",
+          "precision": "fp16",
+          "dir": "sherpa/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16",
+          "ram_mb": 1570,
+          "vram_mb": 2530,
+          "files": [
+            {
+              "path": "decoder.fp16.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16/resolve/a6cc4e24ed264a93a17575dad416dacc4238497a/decoder.fp16.onnx",
+              "size": 14446596,
+              "sha256": "45b04b71eb29dddeeb560e13a515291615bc541f8f5e9e336004956c0ce1a538"
+            },
+            {
+              "path": "encoder.fp16.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16/resolve/a6cc4e24ed264a93a17575dad416dacc4238497a/encoder.fp16.onnx",
+              "size": 1239245548,
+              "sha256": "bb1cc16e8223472b36bd637e2f77725d62b9895eaf609fec6cc91183e2753e38"
+            },
+            {
+              "path": "joiner.fp16.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16/resolve/a6cc4e24ed264a93a17575dad416dacc4238497a/joiner.fp16.onnx",
+              "size": 3456459,
+              "sha256": "5d9d840eff9a3f3724ebce6d84c52038ee4664a08955c5a69d277f2d9733f9b1"
+            },
+            {
+              "path": "tokens.txt",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16/resolve/a6cc4e24ed264a93a17575dad416dacc4238497a/tokens.txt",
+              "size": 9384,
+              "sha256": "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parakeet-unified",
+      "name": "Parakeet Unified",
+      "family": "parakeet",
+      "backend": "nemo-transducer",
+      "languages": [
+        "en"
+      ],
+      "params": "600M",
+      "wer_percent": 2.14,
+      "licence": {
+        "spdx": "LicenseRef-NVIDIA-Open-Model-License",
+        "url": "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
+        "attribution": "Parakeet Unified EN 0.6B by NVIDIA, under the NVIDIA Open Model License; ONNX export by the k2-fsa sherpa-onnx project"
+      },
+      "requires": [
+        "silero-vad"
+      ],
+      "variants": [
+        {
+          "device": "cpu",
+          "precision": "int8",
+          "dir": "sherpa/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8",
+          "ram_mb": 1280,
+          "vram_mb": 0,
+          "files": [
+            {
+              "path": "decoder.int8.onnx",
+              "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming/resolve/8c3a10fb13408c7a7054f6898958bf1c64a8d6c7/decoder.int8.onnx",
+              "size": 7257753,
+              "sha256": "a5e223392c90e75f8144cdb5eb95af7625db389e39edef2bd1a9c872b3298fe6"
+            },
+            {
+              "path": "encoder.int8.onnx",
+              "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming/resolve/8c3a10fb13408c7a7054f6898958bf1c64a8d6c7/encoder.int8.onnx",
+              "size": 654040552,
+              "sha256": "6716910b7a0833997fec7a410494c995d70124001a0e9b66d6370d6aced577e0"
+            },
+            {
+              "path": "joiner.int8.onnx",
+              "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming/resolve/8c3a10fb13408c7a7054f6898958bf1c64a8d6c7/joiner.int8.onnx",
+              "size": 1735860,
+              "sha256": "869f43f7d24595c55581ad3bf249a935fb8a71389fbdaa7504b9f46f93140f8a"
+            },
+            {
+              "path": "tokens.txt",
+              "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming/resolve/8c3a10fb13408c7a7054f6898958bf1c64a8d6c7/tokens.txt",
+              "size": 8952,
+              "sha256": "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff"
+            }
+          ]
+        },
+        {
+          "device": "cuda",
+          "precision": "fp32",
+          "dir": "sherpa/sherpa-onnx-nemo-parakeet-unified-en-0.6b-fp32",
+          "ram_mb": 1110,
+          "vram_mb": 4760,
+          "files": [
+            {
+              "path": "decoder.onnx",
+              "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-non-streaming/resolve/e69c9fb5322532e9995b116b6f1e4b34ab0c4b13/decoder.onnx",
+              "size": 28883664,
+              "sha256": "41136a36f1673de81e1b5182f2aad09791815ec6cc9861ebaf2c56b1a374474f"
+            },
+            {
+              "path": "encoder.onnx",
+              "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-non-streaming/resolve/e69c9fb5322532e9995b116b6f1e4b34ab0c4b13/encoder.onnx",
+              "size": 41900099,
+              "sha256": "b96ad329f7190b672655c7c5020e191098705d4a736508012b89ad8ef820315a"
+            },
+            {
+              "path": "encoder.weights",
+              "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-non-streaming/resolve/e69c9fb5322532e9995b116b6f1e4b34ab0c4b13/encoder.weights",
+              "size": 2437091328,
+              "sha256": "c054b2932ee13aa39ed84982a399822f3193311fb6fd8e1e204566722614bd87"
+            },
+            {
+              "path": "joiner.onnx",
+              "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-non-streaming/resolve/e69c9fb5322532e9995b116b6f1e4b34ab0c4b13/joiner.onnx",
+              "size": 6894757,
+              "sha256": "680ddf13ab1f8a75b8d9f831980124b826dbbf4640f92cdfd30b72d4d2e811a4"
+            },
+            {
+              "path": "tokens.txt",
+              "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-non-streaming/resolve/e69c9fb5322532e9995b116b6f1e4b34ab0c4b13/tokens.txt",
+              "size": 8952,
+              "sha256": "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff"
+            }
+          ]
+        },
+        {
+          "device": "cuda",
+          "precision": "fp16",
+          "dir": "sherpa/sherpa-onnx-nemo-parakeet-unified-en-0.6b-fp16",
+          "ram_mb": 1580,
+          "vram_mb": 2540,
+          "files": [
+            {
+              "path": "decoder.fp16.onnx",
+              "url": "{release}/parakeet-unified-en-0.6b-fp16.decoder.fp16.onnx",
+              "size": 14446597,
+              "sha256": "dcaef2942782ad86e412610fd73c643b18fe3716685eff09449aa73fc1cc7f01"
+            },
+            {
+              "path": "encoder.fp16.onnx",
+              "url": "{release}/parakeet-unified-en-0.6b-fp16.encoder.fp16.onnx",
+              "size": 1240243352,
+              "sha256": "8cb8c9f419add113da58e975e109dd0f5a053ea767e6d7584bf1a0c897684a34"
+            },
+            {
+              "path": "joiner.fp16.onnx",
+              "url": "{release}/parakeet-unified-en-0.6b-fp16.joiner.fp16.onnx",
+              "size": 3450050,
+              "sha256": "b0379aea76417317bfc135263722261d6bc3968f41ea63acf3900613dcd611d1"
+            },
+            {
+              "path": "tokens.txt",
+              "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming/resolve/8c3a10fb13408c7a7054f6898958bf1c64a8d6c7/tokens.txt",
+              "size": 8952,
+              "sha256": "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parakeet-tdt-v3",
+      "name": "Parakeet TDT v3",
+      "family": "parakeet",
+      "backend": "nemo-transducer",
+      "languages": [
+        "bg",
+        "cs",
+        "da",
+        "de",
+        "el",
+        "en",
+        "es",
+        "et",
+        "fi",
+        "fr",
+        "hr",
+        "hu",
+        "it",
+        "lt",
+        "lv",
+        "mt",
+        "nl",
+        "pl",
+        "pt",
+        "ro",
+        "ru",
+        "sk",
+        "sl",
+        "sv",
+        "uk"
+      ],
+      "params": "600M",
+      "wer_percent": 3.71,
+      "licence": {
+        "spdx": "CC-BY-4.0",
+        "url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+        "attribution": "Parakeet TDT 0.6B v3 by NVIDIA, CC BY 4.0; ONNX export by the k2-fsa sherpa-onnx project"
+      },
+      "requires": [
+        "silero-vad"
+      ],
+      "variants": [
+        {
+          "device": "cpu",
+          "precision": "int8",
+          "dir": "sherpa/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+          "ram_mb": 1100,
+          "vram_mb": 0,
+          "files": [
+            {
+              "path": "decoder.int8.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/decoder.int8.onnx",
+              "size": 11845275,
+              "sha256": "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e"
+            },
+            {
+              "path": "encoder.int8.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/encoder.int8.onnx",
+              "size": 652184281,
+              "sha256": "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247"
+            },
+            {
+              "path": "joiner.int8.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/joiner.int8.onnx",
+              "size": 6355277,
+              "sha256": "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3"
+            },
+            {
+              "path": "tokens.txt",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/tokens.txt",
+              "size": 93939,
+              "sha256": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+            }
+          ]
+        },
+        {
+          "device": "cuda",
+          "precision": "fp32",
+          "dir": "sherpa/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-fp32",
+          "ram_mb": 1080,
+          "vram_mb": 3730,
+          "files": [
+            {
+              "path": "decoder.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/1a468a35cbba69418f126de829e75261dea4a4e4/decoder.onnx",
+              "size": 47233743,
+              "sha256": "d593cdb0e571f5a457ec2219af9968cbf6b0e8198e8f7839b40a8754593bf68c"
+            },
+            {
+              "path": "encoder.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/1a468a35cbba69418f126de829e75261dea4a4e4/encoder.onnx",
+              "size": 41766257,
+              "sha256": "3eed7ce424bf8339ad09233533c687e2dbd07e74ccf5027b5e7344019ea373b0"
+            },
+            {
+              "path": "encoder.weights",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/1a468a35cbba69418f126de829e75261dea4a4e4/encoder.weights",
+              "size": 2435420160,
+              "sha256": "3af3f51af5f2d01dbbf5af47d42c7962a2c205f11004254bb4f2b979862f39a8"
+            },
+            {
+              "path": "joiner.onnx",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/1a468a35cbba69418f126de829e75261dea4a4e4/joiner.onnx",
+              "size": 25286330,
+              "sha256": "b9b0bcf88ac571902e69a6536223ed2d94885e981b85045410f1403d53121a63"
+            },
+            {
+              "path": "tokens.txt",
+              "url": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/1a468a35cbba69418f126de829e75261dea4a4e4/tokens.txt",
+              "size": 93939,
+              "sha256": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

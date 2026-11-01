@@ -1,0 +1,105 @@
+# Builds and publishes a release from this repository's source when a version tag (v1.2.3) is pushed: the
+# installer and the signed update manifest as the tag's release, and model files the app downloads from
+# here, if missing, in the models-v1 release. Runs only on tag pushes to the public repository itself,
+# never for pull requests or forks, so its signing key reaches no one else's code.
+# Secrets: KIKU_SIGNING_KEY (the update manifest's ed25519 key) and KIKU_PRIVATE_WORDS (for the privacy gate).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency: release
+
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  # Where installed copies look for updates; a repository variable moves it.
+  KIKU_RELEASES: ${{ vars.KIKU_RELEASES || format('https://github.com/{0}/releases', github.repository) }}
+
+jobs:
+  app:
+    if: ${{ !github.event.repository.private && !github.event.repository.fork }}
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "The tag $env:GITHUB_REF_NAME doesn't match version $version in Cargo.toml" }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - uses: actions/cache@v4
+        id: runtime
+        with:
+          path: |
+            third_party/sherpa-onnx
+            third_party/moonshine-src
+            third_party/moonshine-build
+          key: runtime-${{ hashFiles('scripts/fetch-runtime.ps1', 'scripts/build-moonshine.ps1', 'patches/*') }}
+
+      - name: Fetch the runtime and build Moonshine
+        if: steps.runtime.outputs.cache-hit != 'true'
+        run: |
+          ./scripts/fetch-runtime.ps1 -CpuOnly
+          ./scripts/build-moonshine.ps1
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Compile in the update key
+        env:
+          KIKU_SIGNING_KEY: ${{ secrets.KIKU_SIGNING_KEY }}
+        run: |
+          $key = uv run scripts/release.py public-key
+          if ($LASTEXITCODE) { throw 'KIKU_SIGNING_KEY is not set' }
+          "KIKU_UPDATE_KEY=$key" >> $env:GITHUB_ENV
+
+      - name: Test and build
+        run: |
+          rustup update stable --no-self-update
+          ./scripts/build-release.ps1 -Test
+
+      - name: Build the installer
+        run: |
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DVersion=$env:VERSION" installer/kiku.iss
+          if ($LASTEXITCODE) { throw "ISCC failed: $LASTEXITCODE" }
+
+      - name: Sign the update manifest
+        env:
+          KIKU_SIGNING_KEY: ${{ secrets.KIKU_SIGNING_KEY }}
+        run: |
+          # The release commit's message after its title is what the update offer says changed.
+          $notes = ((git log -1 --format=%b) -join "`n").Trim()
+          "NOTES<<EOF`n$notes`nEOF" >> $env:GITHUB_ENV
+          uv run scripts/release.py manifest "target/dist/Kiku-$env:VERSION-setup.exe" $env:VERSION $env:KIKU_RELEASES $notes target/dist/latest.json
+          if ($LASTEXITCODE) { throw 'Signing failed' }
+
+      - name: Privacy gate
+        env:
+          KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
+        run: python scripts/privacy-gate.py target/dist/Kiku "target/dist/Kiku-$env:VERSION-setup.exe" target/dist/latest.json
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/publish-release.ps1 -Version $env:VERSION -Notes $env:NOTES
+
+  models:
+    needs: app
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Make and publish missing model files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/publish-models.ps1

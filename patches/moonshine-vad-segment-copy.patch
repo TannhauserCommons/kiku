@@ -1,0 +1,32 @@
+diff --git a/core/voice-activity-detector.cpp b/core/voice-activity-detector.cpp
+--- a/core/voice-activity-detector.cpp
++++ b/core/voice-activity-detector.cpp
+@@ -94,6 +94,11 @@
+                             processing_buffer.begin() + hop_size);
+   }
+   processing_remainder_audio_buffer = processing_buffer;
++  // The segment in progress gets its audio once per call rather than on every
++  // hop: copying the whole segment each 32 ms made a phrase cost quadratic time.
++  if (previous_is_voice) {
++    segments.back().audio_data = current_segment_audio_buffer;
++  }
+ }
+ 
+ void VoiceActivityDetector::clear_completed_segment_audio_data() {
+@@ -207,7 +212,6 @@
+ void VoiceActivityDetector::on_voice_continuing() {
+   VoiceActivitySegment *segment = &(segments.back());
+   const float current_time = seconds_from_sample_count(samples_processed_count);
+-  segment->audio_data = current_segment_audio_buffer;
+   segment->end_time = current_time;
+   segment->is_complete = false;
+   segment->just_updated = true;
+@@ -216,7 +220,7 @@
+ void VoiceActivityDetector::on_voice_end() {
+   VoiceActivitySegment *segment = &(segments.back());
+   const float current_time = seconds_from_sample_count(samples_processed_count);
+-  segment->audio_data = current_segment_audio_buffer;
++  segment->audio_data = std::move(current_segment_audio_buffer);
+   segment->end_time = current_time;
+   segment->is_complete = true;
+   segment->just_updated = true;

@@ -1,0 +1,3 @@
+[env]
+# sherpa-onnx (and the ONNX Runtime it ships, shared with Moonshine) comes from scripts/fetch-runtime.ps1.
+SHERPA_ONNX_LIB_DIR = { value = "third_party/sherpa-onnx/lib", relative = true }

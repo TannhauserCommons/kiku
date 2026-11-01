@@ -1,0 +1,38 @@
+diff --git a/core/CMakeLists.txt b/core/CMakeLists.txt
+index 30c4720..a362125 100644
+--- a/core/CMakeLists.txt
++++ b/core/CMakeLists.txt
+@@ -237,7 +237,10 @@ endif()
+ # Build as STATIC framework for iOS/Swift (shared frameworks cannot be embedded)
+ # Build as STATIC library for WebAssembly (Emscripten links it into the embind
+ # module in language-bindings/wasm/). Build as SHARED library for other platforms.
+-if (NOT MOONSHINE_BUILD_SHARED AND (IOS OR MOONSHINE_BUILD_SWIFT OR WIN32 OR EMSCRIPTEN))
++# MOONSHINE_BUILD_STATIC builds it STATIC everywhere, so an app can link it against
++# the ONNX Runtime it already ships instead of loading a second one.
++option(MOONSHINE_BUILD_STATIC "Build libmoonshine as a static library on every platform" OFF)
++if (NOT MOONSHINE_BUILD_SHARED AND (IOS OR MOONSHINE_BUILD_SWIFT OR WIN32 OR EMSCRIPTEN OR MOONSHINE_BUILD_STATIC))
+     add_library(moonshine STATIC
+         ${MOONSHINE_SRC_FILES}
+     )
+@@ -397,7 +400,7 @@ endif()
+ 
+ # macOS shared lib: replace linker ad-hoc signature with a full codesign pass. Linker-signed
+ # libmoonshine.dylib can trigger AMFI "CODESIGNING Invalid Page" when dlopen'd from e.g. Homebrew Python.
+-if(APPLE AND NOT IOS AND NOT MOONSHINE_BUILD_SWIFT)
++if(APPLE AND NOT IOS AND NOT MOONSHINE_BUILD_SWIFT AND NOT MOONSHINE_BUILD_STATIC)
+     add_custom_command(TARGET moonshine POST_BUILD
+         COMMAND /usr/bin/codesign --force --sign - "$<TARGET_FILE:moonshine>"
+         COMMENT "Ad-hoc codesign libmoonshine.dylib for stable dlopen on macOS"
+diff --git a/core/third-party/onnxruntime/find-ort-library-path.cmake b/core/third-party/onnxruntime/find-ort-library-path.cmake
+index 9699d99..91a3c0f 100644
+--- a/core/third-party/onnxruntime/find-ort-library-path.cmake
++++ b/core/third-party/onnxruntime/find-ort-library-path.cmake
+@@ -1,4 +1,7 @@
+-if (EMSCRIPTEN)
++# A runtime the caller already ships (e.g. sherpa-onnx's) replaces the bundled one.
++if (MOONSHINE_ORT_LIBRARY)
++    set(ONNXRUNTIME_LIB_PATH "${MOONSHINE_ORT_LIBRARY}" CACHE INTERNAL "")
++elseif (EMSCRIPTEN)
+     # WebAssembly build: link the static ORT archive produced by
+     # scripts/build-ort-wasm.sh (Microsoft does not publish a prebuilt one).
+     # The default archive is built with SIMD + multithreading. Set

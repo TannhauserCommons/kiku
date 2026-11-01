@@ -1,0 +1,90 @@
+THIRD-PARTY NOTICES FOR KIKU
+
+Kiku is built with, ships with, and downloads when you ask, the software and models below, made by
+others under their own licences. Their notices and licence terms follow.
+
+
+INCLUDED WITH KIKU
+==================
+
+ONNX Runtime 1.28 (onnxruntime.dll)
+  Copyright (c) Microsoft Corporation. MIT License (text below).
+
+sherpa-onnx 2.0 (sherpa-onnx-c-api.dll, sherpa-onnx-cxx-api.dll)
+  By the k2-fsa project (https://github.com/k2-fsa/sherpa-onnx). Apache License 2.0; its full text is
+  reproduced with the Rust crates below that use it.
+
+Moonshine 0.1 runtime (built into kiku.exe and kiku-engine.exe)
+  Copyright (c) 2025 Useful Sensors, Inc. (dba Moonshine AI). MIT License (text below). The libraries
+  it builds in are listed further down with their licences.
+
+Silero VAD (models\sherpa\silero_vad.onnx)
+  Copyright (c) 2020-present Silero Team. MIT License (text below).
+
+Lucide icons (drawn by kiku.exe)
+  Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT). All
+  other copyright (c) for Lucide are held by Lucide Contributors 2022. ISC License (text below).
+
+Microsoft Visual C++ Runtime (msvcp140*.dll, vcruntime140*.dll)
+  Copyright (c) Microsoft Corporation. Redistributed under the Microsoft Visual Studio licence terms
+  for its redistributable code.
+
+
+DOWNLOADED WHEN YOU PICK THEM
+=============================
+
+Parakeet TDT 0.6B v2 and v3 speech models
+  By NVIDIA, under the Creative Commons Attribution 4.0 International licence (CC BY 4.0,
+  https://creativecommons.org/licenses/by/4.0/). ONNX exports by the k2-fsa sherpa-onnx project,
+  downloaded from Hugging Face.
+
+Parakeet Unified EN 0.6B speech model
+  By NVIDIA, under the NVIDIA Open Model License
+  (https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/). ONNX
+  exports by the k2-fsa sherpa-onnx project, downloaded from Hugging Face. The fp16 version, published
+  with Kiku's releases, is that export with its weights stored as 16-bit numbers.
+
+Moonshine streaming speech models
+  Copyright (c) 2025 Useful Sensors, Inc. (dba Moonshine AI). MIT License (text below). Downloaded
+  from Hugging Face.
+
+GPU pack
+  NVIDIA CUDA runtime, cuBLAS and cuDNN, downloaded from NVIDIA under NVIDIA's licence terms for them
+  (https://docs.nvidia.com/cuda/eula/index.html, https://docs.nvidia.com/deeplearning/cudnn/latest/reference/eula.html).
+  ONNX Runtime's CUDA provider, downloaded from Microsoft's ONNX Runtime release: Copyright (c)
+  Microsoft Corporation, MIT License (text below).
+
+Models you add yourself keep their own licences.
+
+
+MIT LICENSE
+===========
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+ISC LICENSE
+===========
+
+Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee
+is hereby granted, provided that the above copyright notice and this permission notice appear in all
+copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE
+INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE
+FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

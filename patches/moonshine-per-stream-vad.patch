@@ -1,0 +1,83 @@
+diff --git a/core/voice-activity-detector.cpp b/core/voice-activity-detector.cpp
+index dcb96d6..66991da 100644
+--- a/core/voice-activity-detector.cpp
++++ b/core/voice-activity-detector.cpp
+@@ -1,7 +1,6 @@
+ #include "voice-activity-detector.h"
+ 
+ #include <cassert>
+-#include <mutex>
+ #include <numeric>
+ 
+ #include "debug-utils.h"
+@@ -10,17 +9,11 @@
+ namespace {
+ constexpr int32_t vad_sample_rate = 16000;
+ 
+-std::mutex vad_mutex;
+-
+ float seconds_from_sample_count(size_t sample_count) {
+   return static_cast<float>(sample_count) / vad_sample_rate;
+ }
+ }  // namespace
+ 
+-// Intentionally leaked to avoid static destruction order issues with ONNX
+-// Runtime
+-SileroVad *VoiceActivityDetector::silero_vad = nullptr;
+-
+ VoiceActivityDetector::VoiceActivityDetector(float threshold,
+                                              int32_t window_size,
+                                              int32_t hop_size,
+@@ -30,12 +23,8 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold,
+       window_size(window_size),
+       hop_size(hop_size),
+       look_behind_sample_count(look_behind_sample_count),
+-      max_segment_sample_count(max_segment_sample_count) {
+-  // We only want a single, global instance of silero_vad
+-  if (VoiceActivityDetector::silero_vad == nullptr) {
+-    VoiceActivityDetector::silero_vad = new SileroVad();
+-  }
+-
++      max_segment_sample_count(max_segment_sample_count),
++      silero_vad(std::make_unique<SileroVad>()) {
+   probability_window.resize(window_size);
+   probability_window_index = 0;
+   current_segment_audio_buffer.resize(0);
+@@ -149,11 +138,8 @@ void VoiceActivityDetector::process_audio_chunk(const float *audio_data,
+   float smoothed_probability = 0.0f;
+   if (threshold > 0.0f) {
+     float current_probability = 0.0f;
+-    {
+-      std::lock_guard<std::mutex> lock(vad_mutex);
+-      int current_flag;
+-      silero_vad->predict(audio_vec, &current_probability, &current_flag);
+-    }
++    int current_flag;
++    silero_vad->predict(audio_vec, &current_probability, &current_flag);
+     probability_window[probability_window_index] = current_probability;
+     probability_window_index =
+         (probability_window_index + 1) % probability_window.size();
+diff --git a/core/voice-activity-detector.h b/core/voice-activity-detector.h
+index 8b26642..195d4ec 100644
+--- a/core/voice-activity-detector.h
++++ b/core/voice-activity-detector.h
+@@ -1,6 +1,7 @@
+ #ifndef VOICE_ACTIVITY_DETECTOR_H
+ #define VOICE_ACTIVITY_DETECTOR_H
+ 
++#include <memory>
+ #include <string>
+ #include <vector>
+ 
+@@ -27,9 +28,8 @@ class VoiceActivityDetector {
+   const size_t look_behind_sample_count;
+   const size_t max_segment_sample_count;
+ 
+-  // Raw pointer intentionally not deleted to avoid static destruction order
+-  // issues
+-  static SileroVad *silero_vad;
++  // Silero is stateful, so each detector (one per stream) needs its own.
++  std::unique_ptr<SileroVad> silero_vad;
+ 
+   bool _is_active;
+   std::vector<float> probability_window;

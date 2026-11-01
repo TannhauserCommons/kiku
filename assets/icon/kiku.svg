@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Kiku: a jelly speech bubble whose waveform becomes a line of text.
+       kiku-24.svg and kiku-16.svg are simplified cuts for small sizes. -->
+  <defs>
+    <path id="bubble" d="M100.9 199.3 A112 90 0 1 0 59 182.9 C60 205 50 228 34 240 C64 240 92 230 100.9 199.3 Z"/>
+    <clipPath id="inside"><use href="#bubble"/></clipPath>
+    <radialGradient id="body" cx="0.5" cy="0.78" r="0.75" fx="0.5" fy="0.9">
+      <stop offset="0" stop-color="#C6FBFF"/>
+      <stop offset="0.45" stop-color="#36C4E6"/>
+      <stop offset="1" stop-color="#1281C4"/>
+    </radialGradient>
+    <linearGradient id="specular" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.98"/>
+      <stop offset="0.55" stop-color="#fff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="pearl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D4F3FB"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#02304F" flood-opacity="0.35"/>
+    </filter>
+    <filter id="blur" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="7"/></filter>
+    <filter id="haze" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.5"/></filter>
+  </defs>
+  <!-- Jelly body: lit from within at the bottom, darkening into the rim. -->
+  <use href="#bubble" fill="url(#body)" filter="url(#shadow)"/>
+  <g clip-path="url(#inside)">
+    <ellipse cx="128" cy="196" rx="86" ry="34" fill="#C8FBFF" opacity="0.7" filter="url(#blur)"/>
+    <use href="#bubble" fill="none" stroke="#073F7A" stroke-opacity="0.35" stroke-width="16" filter="url(#haze)"/>
+  </g>
+  <path d="M38 104 C40 56 82 30 128 30 C174 30 216 56 218 104 C190 88 66 88 38 104 Z" fill="url(#specular)"/>
+  <use href="#bubble" fill="none" stroke="#0A5D99" stroke-width="5"/>
+  <!-- Waveform, then a line of text. -->
+  <g fill="url(#pearl)" filter="url(#shadow)">
+    <rect x="66" y="110" width="20" height="36" rx="10"/>
+    <rect x="97" y="92" width="20" height="72" rx="10"/>
+    <rect x="128" y="105" width="20" height="46" rx="10"/>
+    <rect x="159" y="118" width="52" height="20" rx="10"/>
+  </g>
+</svg>
