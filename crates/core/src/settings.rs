@@ -54,6 +54,7 @@ pub struct Settings {
     /// The panel folds an app to one row after it has been quiet this many minutes; 0 never does.
     pub auto_fold_minutes: u32,
     pub block_answer: BlockAnswer,
+    pub your_lines: YourLines,
     /// Apps blocked always, by name: never captured or captioned.
     pub blocked: Vec<String>,
     /// Apps, by name, that get every line you say.
@@ -89,6 +90,35 @@ impl BlockAnswer {
     }
 }
 
+/// How your lines stand out among an app's lines: italic, on a highlight, or both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum YourLines {
+    Italic,
+    #[default]
+    Highlight,
+    Both,
+}
+
+impl YourLines {
+    pub const ALL: [YourLines; 3] = [YourLines::Italic, YourLines::Highlight, YourLines::Both];
+
+    pub fn italic(self) -> bool {
+        self != YourLines::Highlight
+    }
+
+    pub fn highlight(self) -> bool {
+        self != YourLines::Italic
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            YourLines::Italic => "italic",
+            YourLines::Highlight => "highlight",
+            YourLines::Both => "both",
+        }
+    }
+}
+
 impl Settings {
     pub fn choice(&self) -> Choice {
         Choice { model: catalog::by_id_or_default(&self.model), device: self.device }
@@ -111,6 +141,7 @@ impl Default for Settings {
             subtitles: SubtitleSettings::default(),
             auto_fold_minutes: 2,
             block_answer: BlockAnswer::Ask,
+            your_lines: YourLines::default(),
             blocked: Vec::new(),
             pinned: Vec::new(),
             check_updates: true,
@@ -157,6 +188,7 @@ impl Settings {
                     let answers = [BlockAnswer::Ask, BlockAnswer::Session, BlockAnswer::Always];
                     settings.block_answer = answers.into_iter().find(|answer| answer.id() == value).unwrap_or_default();
                 }
+                "your_lines" => settings.your_lines = YourLines::ALL.into_iter().find(|look| look.id() == value).unwrap_or_default(),
                 "blocked" if !value.is_empty() => settings.blocked.push(value.to_owned()),
                 "pinned" if !value.is_empty() => settings.pinned.push(value.to_owned()),
                 "check_updates" => settings.check_updates = value != "off",
@@ -185,7 +217,7 @@ impl Settings {
         let blocked: String = self.blocked.iter().map(|name| format!("blocked = {name}\n")).collect();
         let pinned: String = self.pinned.iter().map(|name| format!("pinned = {name}\n")).collect();
         format!(
-            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\n{}{blocked}{pinned}{}{}{}",
+            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\n{}{blocked}{pinned}{}{}{}",
             self.mic_threshold_db,
             self.computer_threshold_db,
             self.model,
@@ -195,6 +227,7 @@ impl Settings {
             self.keep_days,
             self.auto_fold_minutes,
             self.block_answer.id(),
+            self.your_lines.id(),
             if self.check_updates { "on" } else { "off" },
             self.opacity.window,
             self.opacity.text,
@@ -254,6 +287,7 @@ mod tests {
             subtitles: SubtitleSettings { on: true, rows: 3, ..Default::default() },
             auto_fold_minutes: 10,
             block_answer: BlockAnswer::Always,
+            your_lines: YourLines::Both,
             blocked: vec!["Discord".into(), "Steam, Inc. = client".into()],
             pinned: vec!["Slack".into()],
             check_updates: false,

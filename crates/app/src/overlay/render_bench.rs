@@ -36,7 +36,7 @@ use kiku_core::{
     catalog::{self, Choice},
     download::Downloads,
     hardware::{Gpu, Hardware},
-    settings::{BlockAnswer, Opacity},
+    settings::{BlockAnswer, Opacity, YourLines},
     subtitles::SubtitleSettings,
     theme::{Theme, Themes},
     update::Release,
@@ -138,6 +138,7 @@ fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, wid
         auto_fold: 2,
         blocked: &[],
         block_answer: BlockAnswer::Ask,
+        your_lines: YourLines::default(),
         themes: Themes::default(),
         dictation_only: false,
         shown_opacity: Opacity::default(),
@@ -504,6 +505,8 @@ fn snapshots() {
     search_found(&mut opened);
     let rows = (0..60).map(|i| format!("[14:{:02}:00] Discord: {}", i, if i == 30 { "and the signing can wait until Monday" } else { "so the meeting moved to Thursday" })).collect();
     opened.screen = Screen::SavedFile { session: 2, title: "Discord  ·  Oct 30, 14:05".into(), lines: rows, focus: Some(30) };
+    let mut scrolled = View::new();
+    scrolled.scrolls.insert(ScrollArea::Section(1), Scroll::at(0.0));
     let mut collapsed = View::new();
     collapsed.collapsed = true;
     let mut quitting = View::new();
@@ -517,6 +520,7 @@ fn snapshots() {
     for theme in [Theme::Night, Theme::Day] {
         let themes = Themes::from(theme);
         save_panel(&format!("panel-folded-{}", name(theme)), &folded, themes, 420.0);
+        save_panel(&format!("panel-scrolled-up-{}", name(theme)), &scrolled, themes, 420.0);
         save_panel(&format!("panel-block-{}", name(theme)), &block, themes, 420.0);
         save_panel(&format!("panel-history-{}", name(theme)), &history, themes, 420.0);
         save_panel(&format!("panel-history-delete-{}", name(theme)), &deleting, themes, 420.0);

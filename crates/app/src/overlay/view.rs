@@ -20,7 +20,7 @@ use kiku_core::{
     engine::Device,
     keybinds::Command,
     history::Session,
-    settings::BlockAnswer,
+    settings::{BlockAnswer, YourLines},
     theme::{Colours, Theme},
     update::Release,
     words::Scope,
@@ -122,6 +122,7 @@ pub enum Action {
     /// Unpins an app, by its place in the pinned list.
     Unpin(usize),
     SetBlockAnswer(BlockAnswer),
+    SetYourLines(YourLines),
     /// Where word rules (false) or transforms (true) apply.
     WordScope { transforms: bool, scope: Scope },
     /// Whether the model listens for the file's `@` words.
@@ -136,6 +137,8 @@ pub enum Action {
     TypeTry,
     ClearTry,
     CopyLine(LineRef),
+    /// Scrolls a section back down to its newest line, which it follows again.
+    ScrollToLatest(usize),
     /// The ✨ buttons: open a Claude chat about a line, an app, everything, or the selection.
     ShareLine(LineRef),
     ShareSection(usize),
@@ -443,7 +446,8 @@ pub struct Extent {
 }
 
 impl Extent {
-    fn max_top(&self) -> f32 {
+    /// The furthest down the content can be scrolled: its end in view.
+    pub fn max_top(&self) -> f32 {
         (self.content - self.viewport).max(0.0)
     }
 }

@@ -1,4 +1,4 @@
-//! The helper process that runs a GPU model for Kiku; see `engine_host`. Started by the app,
+//! The helper process that runs Kiku's model; see `engine_host`. Started by the app,
 //! it ends when the app closes its input or ends it. `--probe <backend> <dir> [vad]` instead tries
 //! an imported model on a test clip and prints what it heard.
 

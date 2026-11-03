@@ -71,7 +71,7 @@ use kiku_core::{
     engine::Device,
     hardware::{gb, Gpu, Hardware},
     keybinds::{Command, Key, Keybinds},
-    settings::{BlockAnswer, Opacity},
+    settings::{BlockAnswer, Opacity, YourLines},
     subtitles::SubtitleSettings,
     theme::{CustomTheme, Theme, Themes},
     update::{self, Release},
@@ -91,6 +91,8 @@ const CAPTION_GAP: f32 = 4.0;
 const CHEVRON: f32 = 20.0;
 /// How far captions sit in from a section header's left, under its app icon.
 const CAPTION_INDENT: f32 = 16.0;
+/// How far the highlight behind your lines reaches left of their text, its bar at that edge.
+const HIGHLIGHT_INSET: f32 = 10.0;
 const BUTTON: f32 = 28.0;
 /// A button in a floating toolbar.
 const TOOL_BUTTON: f32 = 24.0;
@@ -161,6 +163,7 @@ pub struct Panel<'a> {
     /// Apps not captured, which the panel leaves out.
     pub blocked: &'a [Blocked],
     pub block_answer: BlockAnswer,
+    pub your_lines: YourLines,
     /// The app's look: the panel, the settings window and captions mode.
     pub themes: Themes,
     /// Kiku only dictates: no app is captioned.
@@ -254,7 +257,7 @@ struct Fonts {
     body: IDWriteTextFormat,
     button: IDWriteTextFormat,
     caption: IDWriteTextFormat,
-    /// Your own captions: italic, so an app's section tells the app's lines from yours at a glance.
+    /// Your own captions, when they are shown in italics.
     your_caption: IDWriteTextFormat,
     small: IDWriteTextFormat,
     /// Small and semibold: badges, key caps, a chosen segment.
@@ -352,6 +355,8 @@ pub struct Renderer {
     settings_height: f32,
     /// Where the first row of the card being drawn starts; rows after it get a hairline above.
     card_first_row: Cell<f32>,
+    /// How your lines in an app's section are marked; their heights are measured again when it changes.
+    your_lines: YourLines,
 }
 
 impl Renderer {
@@ -398,6 +403,7 @@ impl Renderer {
             saved_rows: None,
             settings_height: 0.0,
             card_first_row: Cell::new(0.0),
+            your_lines: YourLines::default(),
         })
     }
 
@@ -445,6 +451,10 @@ impl Renderer {
         if surface.see_through != see_through {
             // Cached captions keep the "You:" brush's colour, so all is drawn again.
             (surface.frame, surface.see_through) = (None, see_through);
+        }
+        if self.your_lines != panel.your_lines {
+            // Italics wrap differently.
+            (self.your_lines, self.section_rows) = (panel.your_lines, Vec::new());
         }
         let frame = self.render_on(surface, size, HANDLE_STRIP, panel.dpi, &panel.themes, |renderer| {
             renderer.see_through(see_through.0, see_through.1);
@@ -745,6 +755,9 @@ impl Renderer {
                 self.fade(rect(content.left, area.top, content.right, area.top + FADE), Edge::Top, panel.height)?;
             }
             self.draw_scroll_thumb(area.right + THUMB_OFFSET, area, extent, top)?;
+            if top < extent.max_top() - 1.0 {
+                self.draw_latest_button(index, area, text_width, panel, regions)?;
+            }
             y += extent.viewport + GAP;
         }
         Ok(())
@@ -956,6 +969,18 @@ impl Renderer {
         }
     }
 
+    /// Over a section scrolled up from its newest lines, a button back down to them, at the bottom right of
+    /// its text so it leaves the lines' toolbars free.
+    fn draw_latest_button(&mut self, index: usize, area: D2D_RECT_F, text_width: f32, panel: &Panel, regions: &mut Regions) -> Result<()> {
+        if height(&area) < CONTROL + 12.0 {
+            return Ok(());
+        }
+        let middle = area.bottom - 6.0 - CONTROL / 2.0;
+        let action = Action::ScrollToLatest(index);
+        self.draw_text_button("Latest", Some(Icon::ChevronDown), action, Emphasis::Primary, area.left + text_width, middle, panel, regions)?;
+        Ok(())
+    }
+
     /// After text is selected, a button to send it to Claude, in the bottom-right corner of the captions.
     fn draw_selection_share(&mut self, panel: &Panel, content: D2D_RECT_F, regions: &mut Regions) -> Result<()> {
         if !panel.view.selection.is_some_and(|s| !s.is_empty()) {
@@ -1069,12 +1094,16 @@ impl Renderer {
         let shown: Vec<(usize, f32, f32)> =
             rows.between(top, top + height(&area)).map(|row| (row, rows.top(row), rows.height(row) - ROW_GAP)).collect();
         let origin = area.top - top;
-        self.push_clip(area);
+        // Wide enough for the highlight's bar, left of the text.
+        self.push_clip(rect(area.left - HIGHLIGHT_INSET, area.top, area.right, area.bottom));
         for (row, row_top, line_height) in shown {
             let caption = &captions[row];
             let y = origin + row_top;
             let line = LineRef::of(section, caption);
             let layout = self.caption_layout(caption, text_width)?;
+            if caption.speaker.is_some() && self.your_lines.highlight() {
+                self.draw_your_highlight(area.left, y, text_width, line_height)?;
+            }
             if let Some(&(start, end)) = selected.get(&line) {
                 self.fill_text_range(&layout, start, end, area.left, y, self.palette.selected)?;
             }
@@ -1446,18 +1475,19 @@ impl Renderer {
         }
 
         y = self.draw_heading("Your lines", content, y + SECTION_GAP)?;
+        let looks = [("Italics", YourLines::Italic), ("Highlight", YourLines::Highlight), ("Both", YourLines::Both)];
+        let looks = looks.map(|(label, look)| (label, panel.your_lines == look, Action::SetYourLines(look)));
         let pinned = &panel.captions.pinned;
-        if !pinned.is_empty() {
-            y = self.draw_card(content, y, |renderer, inner, mut y| {
-                for (index, app) in pinned.iter().enumerate() {
-                    let unpin = [("Unpin", None, Action::Unpin(index), Emphasis::Secondary)];
-                    y = renderer.draw_two_line_row(app, "Gets every line you say", &unpin, inner, y, panel, regions)?;
-                }
-                Ok(y)
-            })?;
-        }
-        let hint = "What you say also shows in the app you are in. The pin button on an app puts every line you say in it instead, whichever window is in front.";
-        self.draw_hint(hint, content, if pinned.is_empty() { y - 8.0 } else { y })
+        y = self.draw_card(content, y, |renderer, inner, mut y| {
+            y = renderer.draw_choice_row("Mark them with", &looks, inner, y, panel, regions)?;
+            for (index, app) in pinned.iter().enumerate() {
+                let unpin = [("Unpin", None, Action::Unpin(index), Emphasis::Secondary)];
+                y = renderer.draw_two_line_row(app, "Gets every line you say", &unpin, inner, y, panel, regions)?;
+            }
+            Ok(y)
+        })?;
+        let hint = "What you say also shows in the app you are in, marked so it stands apart from the app's lines. The pin button on an app puts every line you say in it instead, whichever window is in front.";
+        self.draw_hint(hint, content, y)
     }
 
     /// A blocked app over how long it is blocked for, and Unblock. Returns the y below.
@@ -2153,7 +2183,14 @@ impl Renderer {
     }
 
     fn caption_format(&self, caption: &Caption) -> &IDWriteTextFormat {
-        if caption.speaker.is_some() { &self.fonts.your_caption } else { &self.fonts.caption }
+        if caption.speaker.is_some() && self.your_lines.italic() { &self.fonts.your_caption } else { &self.fonts.caption }
+    }
+
+    /// Behind one of your lines in an app's section: a wash of the accent with a bar at its left edge.
+    fn draw_your_highlight(&self, left: f32, y: f32, text_width: f32, line_height: f32) -> Result<()> {
+        let band = rect(left - HIGHLIGHT_INSET, y - 2.0, left + text_width + 6.0, y + line_height + 2.0);
+        self.fill_rounded(band, 6.0, self.palette.yours)?;
+        self.fill_rounded(rect(band.left, band.top, band.left + 3.0, band.bottom), 1.5, self.palette.accent)
     }
 
     /// One line of text, cut with "…" if it doesn't fit in `max_width`.
@@ -2517,6 +2554,9 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::SetBlockAnswer(BlockAnswer::Ask) => "Ask each time an app is blocked".into(),
         Action::SetBlockAnswer(BlockAnswer::Session) => "Block apps until Kiku quits, without asking".into(),
         Action::SetBlockAnswer(BlockAnswer::Always) => "Block apps for good, without asking".into(),
+        Action::SetYourLines(YourLines::Italic) => "Your lines in an app are in italics".into(),
+        Action::SetYourLines(YourLines::Highlight) => "Your lines in an app sit on a highlight with a bar beside them".into(),
+        Action::SetYourLines(YourLines::Both) => "Your lines in an app are in italics, on a highlight".into(),
         Action::WordScope { transforms, scope } => {
             let what = if transforms { "Transforms change" } else { "Word rules change" };
             match scope {
@@ -2532,6 +2572,7 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::CopyWordInstructions => "Copy how the file works for ChatGPT, Claude or another assistant, then add what you want".into(),
         Action::ClearTry => "Clear".into(),
         Action::CopyLine(_) => "Copy this line".into(),
+        Action::ScrollToLatest(_) => "Back to the newest line, and follow it again".into(),
         Action::ShareLine(_) => "Ask Claude about this line".into(),
         Action::ShareSection(_) => "Ask Claude about this app's transcript".into(),
         Action::ShareAll => "Ask Claude about everything (all apps and you)".into(),

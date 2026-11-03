@@ -53,6 +53,8 @@ pub struct Palette {
     pub divider: D2D1_COLOR_F,
     /// Selected text.
     pub selected: D2D1_COLOR_F,
+    /// Behind your lines in an app's section, when they are highlighted.
+    pub yours: D2D1_COLOR_F,
     /// Covers what a prompt sits over: darkens on dark themes, frosts on light ones.
     pub shade: D2D1_COLOR_F,
     pub shadow: D2D1_COLOR_F,
@@ -79,6 +81,7 @@ impl Palette {
             text_dim: fade(self.text_dim, text),
             text_faint: fade(self.text_faint, text),
             accent: fade(self.accent, text),
+            yours: fade(self.yours, text),
             ..self.clone()
         }
     }
@@ -261,6 +264,7 @@ const fn dark(base: Base) -> Palette {
         hover: white(0.07),
         divider: white(0.07),
         selected: hex(base.accent, 0.24),
+        yours: hex(base.accent, 0.14),
         shade: hex(base.deep, 0.6),
         shadow: black(0.25),
         grip: white(0.22),
@@ -297,6 +301,7 @@ const fn light(base: Base) -> Palette {
         hover: hex(ink, 0.06),
         divider: hex(ink, 0.09),
         selected: hex(base.accent, 0.18),
+        yours: hex(base.accent, 0.12),
         shade: hex(base.top, 0.72),
         shadow: hex(ink, 0.10),
         grip: hex(ink, 0.25),

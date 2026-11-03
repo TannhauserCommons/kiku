@@ -1,6 +1,7 @@
-//! GPU models run in a small helper process, `kiku-engine`. NVIDIA's libraries keep about a
-//! gigabyte of memory until the process that loaded them ends, so ending the helper is the only way
-//! unloading a GPU model gives all of it back. A crash in the GPU stack also stays in the helper.
+//! Models run in a small helper process, `kiku-engine`, so a crash in a model's runtime (ONNX
+//! Runtime, the GPU stack) ends only the helper, and the app loads the model again. NVIDIA's
+//! libraries also keep about a gigabyte of memory until the process that loaded them ends, so ending
+//! the helper is the only way unloading a GPU model gives all of it back.
 //!
 //! The app drives the helper over its stdin and stdout in small binary frames: a kind byte, a
 //! little-endian `u32` length, then the payload. Audio goes one way without replies; polls get lines back.
@@ -80,7 +81,7 @@ impl HostedEngine {
         let from_helper = match reply_rx.recv_timeout(LOAD_TIMEOUT) {
             Ok((Ok((ERROR, message)), _)) => return failed(&mut child, String::from_utf8_lossy(&message).into_owned()),
             Ok((Ok(_), from_helper)) => from_helper,
-            Ok((Err(_), _)) | Err(mpsc::RecvTimeoutError::Disconnected) => return failed(&mut child, "the GPU helper stopped while loading".into()),
+            Ok((Err(_), _)) | Err(mpsc::RecvTimeoutError::Disconnected) => return failed(&mut child, "the model's helper stopped while loading".into()),
             Err(mpsc::RecvTimeoutError::Timeout) => return failed(&mut child, format!("loading took over {} s", LOAD_TIMEOUT.as_secs())),
         };
         let pipes = Pipes { to_helper, from_helper };
@@ -91,7 +92,7 @@ impl HostedEngine {
     fn request(&self, kind: u8, payload: &[u8]) -> Result<Vec<u8>> {
         let mut pipes = self.pipes.lock().unwrap();
         write_frame(&mut pipes.to_helper, kind, payload)?;
-        let (reply, payload) = read_frame(&mut pipes.from_helper).map_err(|_| "the GPU helper stopped unexpectedly")?;
+        let (reply, payload) = read_frame(&mut pipes.from_helper).map_err(|_| "the model's helper stopped unexpectedly")?;
         match reply {
             ERROR => Err(String::from_utf8_lossy(&payload).into_owned().into()),
             _ => Ok(payload),
@@ -100,7 +101,7 @@ impl HostedEngine {
 
     /// Sends a request that gets no reply.
     fn send(&self, kind: u8, payload: &[u8]) -> Result<()> {
-        write_frame(&mut self.pipes.lock().unwrap().to_helper, kind, payload).map_err(|_| "the GPU helper stopped unexpectedly".into())
+        write_frame(&mut self.pipes.lock().unwrap().to_helper, kind, payload).map_err(|_| "the model's helper stopped unexpectedly".into())
     }
 }
 
@@ -376,7 +377,7 @@ fn encode_lines(lines: &[Line]) -> Vec<u8> {
 fn decode_lines(bytes: &[u8]) -> Result<Vec<Line>> {
     let mut reader = bytes;
     let mut take = |n: usize| -> Result<&[u8]> {
-        let (head, rest) = reader.split_at_checked(n).ok_or("garbled reply from the GPU helper")?;
+        let (head, rest) = reader.split_at_checked(n).ok_or("garbled reply from the model's helper")?;
         reader = rest;
         Ok(head)
     };

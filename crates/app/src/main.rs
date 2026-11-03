@@ -131,6 +131,7 @@ fn main() -> Result<()> {
     // Let the decoder finish what's being said and save it before the process ends.
     controls.quitting.store(true, Ordering::Relaxed);
     let _ = decoder_finished.recv_timeout(QUIT_WAIT);
+    log::write("closed");
     Ok(())
 }
 
@@ -373,7 +374,7 @@ enum Stop {
     Switch(Box<dyn Engine>),
     /// The user stopped captioning; the model is released until they start again.
     Stopped,
-    /// The engine stopped working (its GPU helper ended); it is loaded again.
+    /// The engine stopped working (its helper process ended); it is loaded again.
     Lost,
 }
 
@@ -486,7 +487,7 @@ impl Decoder {
             was_dictating = dictating;
             if Instant::now() >= next_poll {
                 if engine.lost() {
-                    self.tell(format!("{} stopped unexpectedly (its GPU helper ended), so it's loading again.", self.controls.model().active.model.name));
+                    self.tell(format!("{} stopped unexpectedly (its helper process ended), so it's loading again.", self.controls.model().active.model.name));
                     return Stop::Lost;
                 }
                 let collect = if dictating { Collect::Dictating } else { Collect::Poll };

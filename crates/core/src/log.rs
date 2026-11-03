@@ -30,6 +30,16 @@ pub fn start() {
     let _ = fs::rename(&path, directory.join("log.old.txt"));
     *LOG.lock().unwrap() = Some(Log::new(path));
     write(format!("started {}", env!("CARGO_PKG_VERSION")));
+    // A panic ends the app at once (`panic = "abort"`), so it is written first. The panicking thread
+    // may hold the log's lock, hence `try_lock`.
+    std::panic::set_hook(Box::new(|info| {
+        if let Ok(mut log) = LOG.try_lock()
+            && let Some(log) = log.as_mut()
+        {
+            let thread = std::thread::current().name().unwrap_or("unnamed").to_owned();
+            log.write(format!("crashed on the {thread} thread: {info}"), Instant::now());
+        }
+    }));
 }
 
 /// Appends a timestamped line. Logging must never break captioning, so failures are ignored.

@@ -107,7 +107,7 @@ impl Backend {
         Backend::Phrases(PhraseModel::Moonshine),
     ];
 
-    /// A stable name, used in the catalog, `model.toml` and to tell the GPU helper what to load.
+    /// A stable name, used in the catalog, `model.toml` and to tell the helper what to load.
     pub fn name(self) -> &'static str {
         match self {
             Backend::MoonshineTinyStreaming => "moonshine-tiny-streaming",
@@ -184,8 +184,8 @@ pub struct ModelSpec {
     pub hotwords: Vec<String>,
 }
 
-/// Loads the model described by `spec`. GPU models run in a helper process (see [`crate::engine_host`]),
-/// so unloading them frees all the memory NVIDIA's libraries hold.
+/// Loads the model described by `spec` in a helper process (see [`crate::engine_host`]), so a crash
+/// in its runtime ends only the helper, and unloading a GPU model frees all the memory NVIDIA's libraries hold.
 ///
 /// ```no_run
 /// use kiku_core::engine::{load, Backend, Device, ModelSpec};
@@ -195,10 +195,7 @@ pub struct ModelSpec {
 /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 /// ```
 pub fn load(spec: &ModelSpec) -> Result<Box<dyn Engine>> {
-    match spec.device {
-        Device::Cuda => Ok(Box::new(HostedEngine::start(spec)?)),
-        Device::Cpu => load_here(spec),
-    }
+    Ok(Box::new(HostedEngine::start(spec)?))
 }
 
 /// Loads the model in this process.

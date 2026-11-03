@@ -78,7 +78,7 @@ use kiku_core::{
     download::{self, Downloads, Target as Download},
     hardware::Hardware,
     imports,
-    settings::{BlockAnswer, Opacity, Settings, MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
+    settings::{BlockAnswer, Opacity, Settings, YourLines, MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
     subtitles::SubtitleSettings,
     theme::Themes,
     transcripts,
@@ -242,6 +242,7 @@ pub fn run(
         keybinds: settings.keybinds,
         auto_fold: settings.auto_fold_minutes,
         block_answer: settings.block_answer,
+        your_lines: settings.your_lines,
         opacity: settings.opacity,
         locked_opacity: settings.locked_opacity,
         wake_discovery,
@@ -328,6 +329,7 @@ struct Window {
     /// Minutes an app is quiet before the panel folds it; 0 never.
     auto_fold: u32,
     block_answer: BlockAnswer,
+    your_lines: YourLines,
     /// The panel's opacity while unlocked, and while locked.
     opacity: Opacity,
     locked_opacity: Opacity,
@@ -384,11 +386,14 @@ impl Window {
             }
             WM_QUIT_FOR_UPDATE => {
                 self.downloads.pause_all();
-                self.quit();
+                self.quit("to install an update");
             }
             WM_SIZE => self.redraw(),
             // Logging off or shutting down: no question; the queue is kept and resumes next time.
-            WM_ENDSESSION if wparam.0 != 0 => self.downloads.pause_all(),
+            WM_ENDSESSION if wparam.0 != 0 => {
+                log::write("quitting: Windows is signing out or shutting down");
+                self.downloads.pause_all();
+            }
             WM_DRAW => self.draw(),
             WM_DPICHANGED => {
                 move_to_suggested(self.hwnd, lparam);
@@ -583,6 +588,10 @@ impl Window {
                 self.block_answer = answer;
                 self.save_settings();
             }
+            Action::SetYourLines(look) => {
+                self.your_lines = look;
+                self.save_settings();
+            }
             Action::WordScope { transforms, scope } => {
                 let mut settings = self.controls.words.settings();
                 *if transforms { &mut settings.transforms } else { &mut settings.rules } = scope;
@@ -603,6 +612,9 @@ impl Window {
             Action::CopyWordInstructions => self.copy(ASSISTANT_INSTRUCTIONS, "Copied: paste it to your assistant, then say what you want".into()),
             Action::TypeTry => self.settings.view.typing_try = true,
             Action::ClearTry => self.settings.view.try_words.clear(),
+            Action::ScrollToLatest(index) => {
+                self.view.scrolls.insert(ScrollArea::Section(index), Scroll::default());
+            }
             Action::CopyLine(line) => {
                 if let Some(text) = self.caption_text(line) {
                     self.copy(&text, "Copied the line".into());
@@ -737,7 +749,7 @@ impl Window {
             Action::QuitAndPause => {
                 self.downloads.pause_all();
                 self.view.quit_prompt = false;
-                return self.quit();
+                return self.quit("after pausing downloads until next time");
             }
             Action::KeepDownloading => self.view.quit_prompt = false,
             Action::InstallUpdate => self.install_update(),
@@ -833,7 +845,7 @@ impl Window {
             // Without a tray icon a hidden panel could not be found again, so it collapses instead.
             Action::Minimize if self.tray.is_some() => self.set_visible(false),
             Action::Minimize => self.toggle_collapsed(),
-            Action::Close => return self.quit(),
+            Action::Close => return self.quit("the panel's close button"),
         }
         self.redraw();
     }
@@ -1075,6 +1087,7 @@ impl Window {
             subtitles: self.subtitles.settings.clone(),
             auto_fold_minutes: self.auto_fold,
             block_answer: self.block_answer,
+            your_lines: self.your_lines,
             blocked: self.controls.blocked().into_iter().filter(|app| app.always).map(|app| app.name).collect(),
             pinned: self.captions.lock().unwrap().pinned.clone(),
             check_updates: self.controls.check_updates.load(Ordering::Relaxed),
@@ -1089,8 +1102,9 @@ impl Window {
     }
 
     /// Closing is posted rather than done here, so the window is destroyed outside this handler. While a
-    /// download runs it first asks whether to pause it until next time.
-    fn quit(&mut self) {
+    /// download runs it first asks whether to pause it until next time. `why` goes in the log, so a
+    /// Kiku that disappeared can be told from one that was closed.
+    fn quit(&mut self, why: &str) {
         if self.downloads.active().is_some() {
             self.view.quit_prompt = true;
             if self.subtitles.settings.on {
@@ -1104,6 +1118,7 @@ impl Window {
             }
             return self.redraw();
         }
+        log::write(format!("quitting: {why}"));
         unsafe { PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).ok() }.unwrap_or_default();
     }
 
@@ -1552,7 +1567,7 @@ impl Window {
             keys::KeyEvent::Command(Command::Lock) => self.toggle_lock(),
             keys::KeyEvent::Command(Command::Hide) => self.set_display_visible(!self.display_visible()),
             keys::KeyEvent::Command(Command::Subtitles) => self.set_subtitles(!self.subtitles.settings.on),
-            keys::KeyEvent::Command(Command::Quit) => return self.quit(),
+            keys::KeyEvent::Command(Command::Quit) => return self.quit("the quit shortcut"),
             keys::KeyEvent::Command(Command::SaveMiss) => {
                 self.controls.save_miss.store(true, Ordering::Relaxed);
                 self.notify("Saved the last 30 s of audio to the misses folder".into(), false);
@@ -1637,7 +1652,7 @@ impl Window {
                     Some(MenuChoice::ToggleSubtitles) => self.set_subtitles(!state.subtitles),
                     Some(MenuChoice::ToggleLock) => self.toggle_lock(),
                     Some(MenuChoice::ToggleStop) => self.toggle_stop(),
-                    Some(MenuChoice::Quit) => return self.quit(),
+                    Some(MenuChoice::Quit) => return self.quit("Quit in the tray menu"),
                     None => {}
                 }
                 self.redraw();
@@ -1918,6 +1933,7 @@ impl Window {
             auto_fold: self.auto_fold,
             blocked: &blocked,
             block_answer: self.block_answer,
+            your_lines: self.your_lines,
             themes: self.subtitles.themes,
             shown_opacity: self.shown_opacity(),
             opacity: self.opacity,
