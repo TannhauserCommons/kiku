@@ -336,10 +336,10 @@ pub enum Slider {
     Threshold(Input),
     /// Captions mode's pill opacity.
     PillOpacity,
-    /// The opacity of the panel's background.
-    WindowOpacity,
-    /// The opacity of the panel's text.
-    TextOpacity,
+    /// The opacity of the panel's background, while locked or unlocked.
+    WindowOpacity { locked: bool },
+    /// The opacity of the panel's text, while locked or unlocked.
+    TextOpacity { locked: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

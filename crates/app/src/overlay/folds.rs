@@ -93,7 +93,7 @@ mod tests {
         let (discord, opera) = (captions.add_app("Discord", None), captions.add_app("Opera", None));
         captions.update_app(discord, 1, std::slice::from_ref(&line), now);
         captions.update_app(opera, 2, &[line], now);
-        captions.update_mic(3, &[Line { id: 1, text: "hi".into(), complete: true }], now);
+        captions.update_mic(3, &[Line { id: 1, text: "hi".into(), complete: true }], Some("Discord"));
         (captions, discord, opera)
     }
 

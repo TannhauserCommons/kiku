@@ -36,7 +36,7 @@ use kiku_core::{
     catalog::{self, Choice},
     download::Downloads,
     hardware::{Gpu, Hardware},
-    settings::BlockAnswer,
+    settings::{BlockAnswer, Opacity},
     subtitles::SubtitleSettings,
     theme::{Theme, Themes},
     update::Release,
@@ -52,7 +52,7 @@ fn long_captions() -> Captions {
     let app = captions.add_app("Discord", None);
     for id in 0..10_000u64 {
         captions.update_app(app, 1, &[line(id, id as usize)], now);
-        captions.update_mic(2, &[line(id, id as usize + 7)], now);
+        captions.update_mic(2, &[line(id, id as usize + 7)], Some("Discord"));
     }
     captions
 }
@@ -140,8 +140,9 @@ fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, wid
         block_answer: BlockAnswer::Ask,
         themes: Themes::default(),
         dictation_only: false,
-        window_opacity: 100,
-        text_opacity: 100,
+        shown_opacity: Opacity::default(),
+        opacity: Opacity::default(),
+        locked_opacity: Opacity::default(),
         subtitles: &SUBTITLES,
         words: &WORD_RULES,
         word_settings: WordSettings::default(),
@@ -173,11 +174,11 @@ fn render_cost() {
     measure("live: nothing changed", 200, |_| draw(panel(&captions, &view, &keybinds, 560.0)));
     measure("live: footer figures changed", 200, |i| draw(Panel { usage: usage(i), ..panel(&captions, &view, &keybinds, 560.0) }));
     measure("live: last line revised", 200, |i| {
-        captions.update_mic(2, &[Line { id: 9_999, text: format!("still talking {i}"), complete: false }], Instant::now());
+        captions.update_mic(2, &[Line { id: 9_999, text: format!("still talking {i}"), complete: false }], Some("Discord"));
         draw(panel(&captions, &view, &keybinds, 560.0));
     });
     measure("live: a new line (oldest dropped)", 200, |i| {
-        captions.update_mic(2, &[line(20_000 + i as u64, i as usize)], Instant::now());
+        captions.update_mic(2, &[line(20_000 + i as u64, i as usize)], Some("Discord"));
         draw(panel(&captions, &view, &keybinds, 560.0));
     });
     measure("live: resized each frame", 50, |i| draw(panel(&captions, &view, &keybinds, 560.0 + (i % 2) as f32 * 40.0)));
@@ -254,7 +255,7 @@ fn drawing_only_what_changed_matches_drawing_everything() {
                 1 => view.hovered_line = Some(LineRef { section: 1, stream: 1, id: 9_999 }),
                 2 => {
                     let text = "a revised last line, long enough to wrap onto a second row of the panel".into();
-                    captions.update_mic(2, &[Line { id: 9_999, text, complete: false }], Instant::now());
+                    captions.update_mic(2, &[Line { id: 9_999, text, complete: false }], Some("Discord"));
                 }
                 3 => captions.update_app(1, 1, &[line(10_000, 3)], Instant::now()),
                 4 => view.hovered_line = None,
@@ -280,7 +281,7 @@ fn folding_hiding_and_prompting_drawn_only_where_changed_match_drawing_everythin
     let app = captions.add_app("Discord", None);
     for id in 0..60u64 {
         captions.update_app(app, 1, &[line(id, id as usize)], now);
-        captions.update_mic(2, &[line(id, id as usize + 7)], now);
+        captions.update_mic(2, &[line(id, id as usize + 7)], Some("Discord"));
     }
     for dpi in [96.0, 120.0, 144.0, 168.0] {
         let (mut view, mut partly, mut surface) = (View::new(), Renderer::new().unwrap(), Surface::default());
@@ -470,7 +471,7 @@ fn snapshots() {
     // A see-through background under solid text.
     for theme in [Theme::Night, Theme::Day] {
         let (mut surface, view) = (Surface::default(), View::new());
-        let shown = Panel { usage, themes: Themes::from(theme), height: 420.0, window_opacity: 30, ..panel(&captions, &view, &keybinds, 560.0) };
+        let shown = Panel { usage, themes: Themes::from(theme), height: 420.0, shown_opacity: Opacity { window: 30, text: 100 }, ..panel(&captions, &view, &keybinds, 560.0) };
         write_png(&folder.join(format!("panel-see-through-{}.png", name(theme))), renderer.render(&mut surface, &shown).unwrap().0);
     }
     let mut save_panel = |name: &str, view: &View, themes: Themes, height: f32| {
@@ -729,7 +730,7 @@ fn snapshot_captions() -> Captions {
     captions.update_app(edge, 1, &[said(0, "In this video we'll look at how glass was made in the eighteenth century.", true)], now);
     captions.pin("Discord", true);
     for (id, text) in ["Yeah, loud and clear.", "I can do the signing after lunch."].iter().enumerate() {
-        captions.update_mic(2, &[said(id as u64, text, true)], now);
+        captions.update_mic(2, &[said(id as u64, text, true)], Some("Discord"));
     }
     captions
 }

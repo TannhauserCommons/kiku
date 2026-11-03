@@ -298,12 +298,16 @@ impl Renderer {
             };
             swatches = renderer.draw_theme_colours(panel, inner, bottom + 12.0, regions)?;
             let fraction = |opacity: u8, min: u8| (opacity - min) as f32 / (100 - min) as f32;
-            let (window, text) = (panel.window_opacity, panel.text_opacity);
-            let y = bottom + 12.0 + SETTING_ROW;
-            let y = renderer.draw_slider_row("Window opacity", &format!("{window}%"), fraction(window, MIN_WINDOW_OPACITY), Slider::WindowOpacity, inner, y, regions)?;
-            renderer.draw_slider_row("Text opacity", &format!("{text}%"), fraction(text, MIN_TEXT_OPACITY), Slider::TextOpacity, inner, y, regions)
+            let mut y = bottom + 12.0 + SETTING_ROW;
+            let rows = [(false, panel.opacity, "Window opacity", "Text opacity"), (true, panel.locked_opacity, "Locked window", "Locked text")];
+            for (locked, opacity, window, text) in rows {
+                let (window_fraction, text_fraction) = (fraction(opacity.window, MIN_WINDOW_OPACITY), fraction(opacity.text, MIN_TEXT_OPACITY));
+                y = renderer.draw_slider_row(window, &format!("{}%", opacity.window), window_fraction, Slider::WindowOpacity { locked }, inner, y, regions)?;
+                y = renderer.draw_slider_row(text, &format!("{}%", opacity.text), text_fraction, Slider::TextOpacity { locked }, inner, y, regions)?;
+            }
+            Ok(y)
         })?;
-        let hint = "Changing a colour saves it as your Custom theme; the presets stay as they are.";
+        let hint = "Changing a colour saves it as your Custom theme; the presets stay as they are. Locked, clicks pass through the panel, so it can be more see-through then.";
         Ok((self.draw_hint(hint, content, y)?, swatches))
     }
 

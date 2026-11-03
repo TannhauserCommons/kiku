@@ -85,7 +85,7 @@ mod tests {
         let discord = captions.add_app("Discord", None);
         let line = |id, text: &str| Line { id, text: text.into(), complete: true };
         captions.update_app(discord, 1, &[line(0, "Are you joining?"), line(1, "We start soon.")], now);
-        captions.update_mic(2, &[line(0, "On my way.")], now);
+        captions.update_mic(2, &[line(0, "On my way.")], Some("Discord"));
         let point = |section, stream, id, offset| TextPoint { line: LineRef { section, stream, id }, offset };
 
         // From "you joining?" in Discord to "On my" in the You section, which is drawn after it.

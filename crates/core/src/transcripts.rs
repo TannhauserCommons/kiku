@@ -149,7 +149,7 @@ mod tests {
         let app = captions.add_app("Discord", None);
         let line = |id, text: &str, complete| Line { id, text: text.into(), complete };
         captions.update_app(app, 1, &[line(1, "Are you joining?", true), line(2, "still talk", false)], Instant::now());
-        captions.update_mic(2, &[line(3, "Two minutes.", true)], Instant::now());
+        captions.update_mic(2, &[line(3, "Two minutes.", true)], Some("Discord"));
 
         let text = format_transcript("heading", &captions.sections[app..=app]);
         let body: Vec<&str> = text.lines().skip(2).map(|l| l.split_once("] ").map_or(l, |(_, rest)| rest)).collect();

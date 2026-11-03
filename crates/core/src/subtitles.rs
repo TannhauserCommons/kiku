@@ -133,7 +133,7 @@ mod tests {
         let discord = captions.add_app("Discord", None);
         captions.update_app(discord, 1, &[line(1, "Joining?")], now);
         std::thread::sleep(std::time::Duration::from_millis(2));
-        captions.update_mic(2, &[line(1, "On my way.")], now);
+        captions.update_mic(2, &[line(1, "On my way.")], Some("Discord"));
         std::thread::sleep(std::time::Duration::from_millis(2));
         captions.update_app(discord, 1, &[line(2, "Cool.")], now);
         let all = newest(&captions, &Mark::default(), 5);

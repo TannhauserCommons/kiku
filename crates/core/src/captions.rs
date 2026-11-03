@@ -1,8 +1,7 @@
 //! The transcript: one section per app holding everything it said this session.
 //!
 //! Every mic line goes into the permanent "You" section. It is also shown as "You:" inside the apps
-//! you pinned, or with none pinned, the app that spoke most recently, since that is usually who you
-//! are answering.
+//! you pinned, whichever window is in front, or with none pinned, inside the app in front.
 
 use std::{
     collections::VecDeque,
@@ -14,8 +13,6 @@ use crate::engine::Line;
 
 /// Oldest lines are dropped past this, to bound memory on very long sessions.
 const MAX_LINES_PER_SECTION: usize = 10_000;
-/// How long an app counts as the one you are talking to after it last spoke.
-const CONVERSATION_WINDOW: Duration = Duration::from_secs(30);
 pub const YOU: &str = "You";
 /// The You section is created first and never removed.
 pub const YOU_SECTION: usize = 0;
@@ -139,13 +136,15 @@ impl Captions {
     }
 
     /// Applies new or revised lines from the mic's stream: to the You section, and as "You:" lines
-    /// to the pinned apps, or with none heard yet, to the app you are talking to if one spoke recently.
-    pub fn update_mic(&mut self, stream: StreamId, lines: &[Line], now: Instant) {
-        let pinned: Vec<usize> = (YOU_SECTION + 1..self.sections.len()).filter(|&index| self.is_pinned(index)).collect();
+    /// to the pinned apps, or with none heard yet, to the app labelled `in_front` (the window in front).
+    pub fn update_mic(&mut self, stream: StreamId, lines: &[Line], in_front: Option<&str>) {
+        let apps = YOU_SECTION + 1..self.sections.len();
+        let pinned: Vec<usize> = apps.clone().filter(|&index| self.is_pinned(index)).collect();
+        let in_front = apps.into_iter().find(|&index| in_front == Some(self.sections[index].label.as_str()));
         for line in lines.iter().filter(|l| !l.text.is_empty()) {
             self.sections[YOU_SECTION].upsert(stream, line, None);
             let apps = match pinned.is_empty() {
-                true => self.app_showing(stream, line.id).or_else(|| self.conversation_app(now)).into_iter().collect(),
+                true => self.app_showing(stream, line.id).or(in_front).into_iter().collect(),
                 false => pinned.clone(),
             };
             for app in apps {
@@ -183,15 +182,6 @@ impl Captions {
     /// A line being revised stays in the app it was first shown in.
     pub fn app_showing(&self, stream: StreamId, id: u64) -> Option<usize> {
         (YOU_SECTION + 1..self.sections.len()).find(|&index| self.sections[index].find(stream, id).is_some())
-    }
-
-    fn conversation_app(&self, now: Instant) -> Option<usize> {
-        self.sections
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.last_spoke.is_some_and(|t| now.duration_since(t) < CONVERSATION_WINDOW))
-            .max_by_key(|(_, s)| s.last_spoke)
-            .map(|(index, _)| index)
     }
 }
 
@@ -232,23 +222,24 @@ mod tests {
     }
 
     #[test]
-    fn mic_joins_the_app_that_spoke_last() {
+    fn mic_joins_the_app_in_front_not_the_one_that_spoke_last() {
         let (mut captions, now) = (Captions::default(), Instant::now());
         let discord = captions.add_app("Discord", None);
         let opera = captions.add_app("Opera", None);
-        captions.update_app(opera, APP, &[line(1, "Video")], now);
-        captions.update_app(discord, APP, &[line(2, "Alex: joining?")], now + Duration::from_secs(1));
-        captions.update_mic(MIC, &[line(3, "Two minutes.")], now + Duration::from_secs(2));
+        captions.update_app(discord, APP, &[line(1, "Alex: joining?")], now);
+        captions.update_app(opera, APP, &[line(2, "Video")], now + Duration::from_secs(1));
+        captions.update_mic(MIC, &[line(3, "Two minutes.")], Some("Discord"));
         assert_eq!(captions.sections[discord].captions.back().unwrap().speaker, Some(YOU));
+        assert_eq!(captions.sections[opera].captions.back().unwrap().speaker, None);
     }
 
     #[test]
-    fn mic_lines_always_land_in_you_and_in_the_app_you_are_talking_to() {
+    fn mic_lines_always_land_in_you_and_in_the_app_in_front() {
         let (mut captions, now) = (Captions::default(), Instant::now());
         let discord = captions.add_app("Discord", None);
         captions.update_app(discord, APP, &[line(1, "Joining?")], now);
-        captions.update_mic(MIC, &[line(2, "On my way.")], now);
-        captions.update_mic(MIC, &[line(3, "Anyone there?")], now + CONVERSATION_WINDOW);
+        captions.update_mic(MIC, &[line(2, "On my way.")], Some("Discord"));
+        captions.update_mic(MIC, &[line(3, "Anyone there?")], Some("Notepad"));
         let texts = |section: usize| captions.sections[section].captions.iter().map(|c| c.display_text()).collect::<Vec<_>>();
         assert_eq!(texts(YOU_SECTION), ["On my way.", "Anyone there?"]);
         assert_eq!(texts(discord), ["Joining?", "You: On my way."]);
@@ -256,19 +247,19 @@ mod tests {
     }
 
     #[test]
-    fn pinned_apps_get_every_mic_line_and_the_last_speaker_none() {
+    fn pinned_apps_get_every_mic_line_and_the_app_in_front_none() {
         let (mut captions, now) = (Captions::default(), Instant::now());
         let discord = captions.add_app("Discord", None);
         let browser = captions.add_app("Browser", None);
         captions.pin("Discord", true);
         captions.update_app(browser, APP, &[line(1, "A song.")], now);
-        captions.update_mic(MIC, &[line(2, "Still here.")], now + CONVERSATION_WINDOW * 4);
+        captions.update_mic(MIC, &[line(2, "Still here.")], Some("Browser"));
         let texts = |section: usize| captions.sections[section].captions.iter().map(|c| c.display_text()).collect::<Vec<_>>();
-        assert_eq!(texts(discord), ["You: Still here."], "however long Discord was quiet");
+        assert_eq!(texts(discord), ["You: Still here."], "whichever window is in front");
         assert_eq!(texts(browser), ["A song."]);
 
         captions.pin("Discord", false);
-        captions.update_mic(MIC, &[line(3, "Hello?")], now);
+        captions.update_mic(MIC, &[line(3, "Hello?")], Some("Browser"));
         assert_eq!(captions.sections[browser].captions.back().unwrap().display_text(), "You: Hello?");
     }
 
@@ -290,7 +281,7 @@ mod tests {
         let (mut captions, now) = (Captions::default(), Instant::now());
         let app = captions.add_app("App", None);
         captions.update_app(app, APP, &[line(0, "from the app")], now);
-        captions.update_mic(MIC, &[line(0, "from you")], now);
+        captions.update_mic(MIC, &[line(0, "from you")], Some("App"));
         let texts: Vec<&str> = captions.sections[app].captions.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, ["from the app", "from you"]);
     }
@@ -310,9 +301,9 @@ mod tests {
         let (mut captions, now) = (Captions::default(), Instant::now());
         assert_eq!(captions.said(1), None);
         let app = captions.add_app("Discord", None);
-        captions.update_mic(MIC, &[line(1, "Earlier.")], now);
+        captions.update_mic(MIC, &[line(1, "Earlier.")], None);
         captions.update_app(app, APP, &[line(1, "What now?")], now);
-        captions.update_mic(MIC, &[line(2, "I can reapply paste.")], now);
+        captions.update_mic(MIC, &[line(2, "I can reapply paste.")], None);
         assert_eq!(captions.said(1).as_deref(), Some("I can reapply paste."));
         assert_eq!(captions.said(2).as_deref(), Some("Earlier. I can reapply paste."));
         assert_eq!(captions.said(5).as_deref(), Some("Earlier. I can reapply paste."));
@@ -334,9 +325,9 @@ mod tests {
 
     #[test]
     fn dropped_lines_are_counted() {
-        let (mut captions, now) = (Captions::default(), Instant::now());
+        let mut captions = Captions::default();
         let lines: Vec<Line> = (0..MAX_LINES_PER_SECTION as u64 + 5).map(|id| line(id, "x")).collect();
-        captions.update_mic(MIC, &lines, now);
+        captions.update_mic(MIC, &lines, None);
         let you = &captions.sections[YOU_SECTION];
         assert_eq!((you.captions.len(), you.dropped()), (MAX_LINES_PER_SECTION, 5));
         assert_eq!(you.captions[0].id, 5);

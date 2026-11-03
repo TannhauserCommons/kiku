@@ -71,7 +71,7 @@ use kiku_core::{
     engine::Device,
     hardware::{gb, Gpu, Hardware},
     keybinds::{Command, Key, Keybinds},
-    settings::BlockAnswer,
+    settings::{BlockAnswer, Opacity},
     subtitles::SubtitleSettings,
     theme::{CustomTheme, Theme, Themes},
     update::{self, Release},
@@ -165,9 +165,10 @@ pub struct Panel<'a> {
     pub themes: Themes,
     /// Kiku only dictates: no app is captioned.
     pub dictation_only: bool,
-    /// The opacity of the panel's background and of its text, in percent.
-    pub window_opacity: u8,
-    pub text_opacity: u8,
+    /// The panel's opacity now, and its settings while unlocked and while locked.
+    pub shown_opacity: Opacity,
+    pub opacity: Opacity,
+    pub locked_opacity: Opacity,
     pub subtitles: &'a SubtitleSettings,
     /// The word rules file as last read, and where its rules and transforms apply.
     pub words: &'a Words,
@@ -440,7 +441,7 @@ impl Renderer {
     pub fn render<'s>(&mut self, surface: &'s mut Surface, panel: &Panel) -> Result<(&'s mut Frame, Regions)> {
         let mut regions = Regions::default();
         let size = (panel.width + HANDLE_STRIP, panel.height);
-        let see_through = (panel.window_opacity, panel.text_opacity);
+        let see_through = (panel.shown_opacity.window, panel.shown_opacity.text);
         if surface.see_through != see_through {
             // Cached captions keep the "You:" brush's colour, so all is drawn again.
             (surface.frame, surface.see_through) = (None, see_through);
@@ -1455,7 +1456,7 @@ impl Renderer {
                 Ok(y)
             })?;
         }
-        let hint = "What you say also shows in the app that spoke in the last 30 seconds. The pin button on an app puts every line you say in it instead, however long it is quiet.";
+        let hint = "What you say also shows in the app you are in. The pin button on an app puts every line you say in it instead, whichever window is in front.";
         self.draw_hint(hint, content, if pinned.is_empty() { y - 8.0 } else { y })
     }
 
@@ -2510,9 +2511,9 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::CancelBlock => "Keep captioning it".into(),
         Action::DontAskToBlock => "Use this answer for every app from now on; Settings > Apps can ask again".into(),
         Action::Unblock(_) => "Capture and caption this app again".into(),
-        Action::Pin(index) if panel.captions.is_pinned(index) => "Unpin: your lines go to the app that spoke last again".into(),
-        Action::Pin(_) => "Pin: put every line you say in this app".into(),
-        Action::Unpin(_) => "Your lines go to the app that spoke last again".into(),
+        Action::Pin(index) if panel.captions.is_pinned(index) => "Unpin: your lines go to the app you are in again".into(),
+        Action::Pin(_) => "Pin: put every line you say in this app, whichever window is in front".into(),
+        Action::Unpin(_) => "Your lines go to the app you are in again".into(),
         Action::SetBlockAnswer(BlockAnswer::Ask) => "Ask each time an app is blocked".into(),
         Action::SetBlockAnswer(BlockAnswer::Session) => "Block apps until Kiku quits, without asking".into(),
         Action::SetBlockAnswer(BlockAnswer::Always) => "Block apps for good, without asking".into(),

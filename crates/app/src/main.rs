@@ -814,10 +814,11 @@ impl Decoder {
             }
             // Rules apply to each revision of a line in progress again; dictation types the words as heard.
             let shown = self.as_captions(&lines, &sources.labels[index]);
+            let in_front = section.is_none().then(overlay::focused_app).flatten();
             let mut captions = self.captions.lock().unwrap();
             match section {
                 Some(section) => captions.update_app(section, stream.id, &shown, now),
-                None => captions.update_mic(stream.id, &shown, now),
+                None => captions.update_mic(stream.id, &shown, in_front.as_deref()),
             }
             self.recorder.borrow_mut().note(&self.controls, &captions, stream.id, section, &shown);
             if mic && matches!(collect, Collect::Dictating | Collect::FlushMic) {

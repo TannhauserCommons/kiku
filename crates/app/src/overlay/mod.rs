@@ -27,6 +27,8 @@ mod tray;
 pub mod usage;
 mod view;
 
+pub use keys::focused_app;
+
 use std::{
     cell::{Cell, RefCell},
     path::{Path, PathBuf},
@@ -76,7 +78,7 @@ use kiku_core::{
     download::{self, Downloads, Target as Download},
     hardware::Hardware,
     imports,
-    settings::{BlockAnswer, Settings, MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
+    settings::{BlockAnswer, Opacity, Settings, MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
     subtitles::SubtitleSettings,
     theme::Themes,
     transcripts,
@@ -240,8 +242,8 @@ pub fn run(
         keybinds: settings.keybinds,
         auto_fold: settings.auto_fold_minutes,
         block_answer: settings.block_answer,
-        window_opacity: settings.window_opacity,
-        text_opacity: settings.text_opacity,
+        opacity: settings.opacity,
+        locked_opacity: settings.locked_opacity,
         wake_discovery,
         captured: Vec::new(),
         captured_down: Vec::new(),
@@ -326,9 +328,9 @@ struct Window {
     /// Minutes an app is quiet before the panel folds it; 0 never.
     auto_fold: u32,
     block_answer: BlockAnswer,
-    /// The opacity of the panel's background and of its text, in percent.
-    window_opacity: u8,
-    text_opacity: u8,
+    /// The panel's opacity while unlocked, and while locked.
+    opacity: Opacity,
+    locked_opacity: Opacity,
     wake_discovery: Sender<()>,
     /// While setting the captions key: every key pressed so far, and the ones still down.
     captured: Vec<Key>,
@@ -908,6 +910,8 @@ impl Window {
                 self.dragging = None;
                 unsafe { ReleaseCapture().ok() }.unwrap_or_default();
                 self.save_settings();
+                // The panel showed a locked opacity while it was dragged.
+                self.redraw();
             }
             WM_LBUTTONUP => {
                 self.settings.view.pressed = None;
@@ -1016,18 +1020,28 @@ impl Window {
                 let percent = (fraction_at(&track, x) * 100.0).round() as u8;
                 std::mem::replace(&mut self.subtitles.settings.opacity, percent) != percent
             }
-            Slider::WindowOpacity => {
+            Slider::WindowOpacity { locked } => {
                 let percent = MIN_WINDOW_OPACITY + (fraction_at(&track, x) * (100 - MIN_WINDOW_OPACITY) as f32).round() as u8;
-                std::mem::replace(&mut self.window_opacity, percent) != percent
+                std::mem::replace(&mut self.opacity_mut(locked).window, percent) != percent
             }
-            Slider::TextOpacity => {
+            Slider::TextOpacity { locked } => {
                 let percent = MIN_TEXT_OPACITY + (fraction_at(&track, x) * (100 - MIN_TEXT_OPACITY) as f32).round() as u8;
-                std::mem::replace(&mut self.text_opacity, percent) != percent
+                std::mem::replace(&mut self.opacity_mut(locked).text, percent) != percent
             }
         };
         if changed {
             self.redraw();
         }
+    }
+
+    fn opacity_mut(&mut self, locked: bool) -> &mut Opacity {
+        if locked { &mut self.locked_opacity } else { &mut self.opacity }
+    }
+
+    /// The panel's opacity now: the locked one while locked, or while its slider is dragged, to preview it.
+    fn shown_opacity(&self) -> Opacity {
+        let dragging_locked = matches!(self.dragging, Some(Slider::WindowOpacity { locked: true } | Slider::TextOpacity { locked: true }));
+        if self.view.locked || dragging_locked { self.locked_opacity } else { self.opacity }
     }
 
     /// Takes the latest levels; redraws only if a meter moved.
@@ -1064,8 +1078,8 @@ impl Window {
             blocked: self.controls.blocked().into_iter().filter(|app| app.always).map(|app| app.name).collect(),
             pinned: self.captions.lock().unwrap().pinned.clone(),
             check_updates: self.controls.check_updates.load(Ordering::Relaxed),
-            window_opacity: self.window_opacity,
-            text_opacity: self.text_opacity,
+            opacity: self.opacity,
+            locked_opacity: self.locked_opacity,
             dictation_only: self.controls.dictation_only.load(Ordering::Relaxed),
             words: self.controls.words.settings(),
         };
@@ -1905,8 +1919,9 @@ impl Window {
             blocked: &blocked,
             block_answer: self.block_answer,
             themes: self.subtitles.themes,
-            window_opacity: self.window_opacity,
-            text_opacity: self.text_opacity,
+            shown_opacity: self.shown_opacity(),
+            opacity: self.opacity,
+            locked_opacity: self.locked_opacity,
             subtitles: &self.subtitles.settings,
             words: &words,
             word_settings: self.controls.words.settings(),

@@ -19,6 +19,21 @@ pub const MIN_WINDOW_OPACITY: u8 = 10;
 /// The panel's text is never less opaque than this, in percent, so it stays readable.
 pub const MIN_TEXT_OPACITY: u8 = 25;
 
+/// How see-through the panel is: its background and its text, in percent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Opacity {
+    /// From [`MIN_WINDOW_OPACITY`] to 100.
+    pub window: u8,
+    /// From [`MIN_TEXT_OPACITY`] to 100.
+    pub text: u8,
+}
+
+impl Default for Opacity {
+    fn default() -> Self {
+        Self { window: 100, text: 100 }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub mic_threshold_db: f32,
@@ -45,10 +60,10 @@ pub struct Settings {
     pub pinned: Vec<String>,
     /// Once a day, ask the update server whether a newer Kiku is out.
     pub check_updates: bool,
-    /// The opacity of the panel's background in percent, from [`MIN_WINDOW_OPACITY`] to 100.
-    pub window_opacity: u8,
-    /// The opacity of the panel's text and icons in percent, from [`MIN_TEXT_OPACITY`] to 100.
-    pub text_opacity: u8,
+    /// The panel's opacity while it is unlocked.
+    pub opacity: Opacity,
+    /// The panel's opacity while it is locked and clicks pass through it; unsaved, it is `opacity`.
+    pub locked_opacity: Opacity,
     /// No app is captioned, and the mic is heard only while dictating.
     pub dictation_only: bool,
     /// Where word rules and transforms apply.
@@ -99,8 +114,8 @@ impl Default for Settings {
             blocked: Vec::new(),
             pinned: Vec::new(),
             check_updates: true,
-            window_opacity: 100,
-            text_opacity: 100,
+            opacity: Opacity::default(),
+            locked_opacity: Opacity::default(),
             dictation_only: false,
             words: WordSettings::default(),
         }
@@ -125,6 +140,7 @@ impl Settings {
     fn parse(text: &str) -> Self {
         let lines: Vec<(&str, &str)> = text.lines().filter_map(|line| line.split_once('=')).map(|(key, value)| (key.trim(), value.trim())).collect();
         let (mut settings, mut subtitles) = (Self::default(), Vec::new());
+        let (mut locked_window, mut locked_text) = (None, None);
         for &(key, value) in &lines {
             match key {
                 "mic_threshold_db" => settings.mic_threshold_db = threshold_db(value).unwrap_or(settings.mic_threshold_db),
@@ -145,8 +161,10 @@ impl Settings {
                 "pinned" if !value.is_empty() => settings.pinned.push(value.to_owned()),
                 "check_updates" => settings.check_updates = value != "off",
                 "dictation_only" => settings.dictation_only = value == "on",
-                "window_opacity" => settings.window_opacity = percent(value, MIN_WINDOW_OPACITY).unwrap_or(settings.window_opacity),
-                "text_opacity" => settings.text_opacity = percent(value, MIN_TEXT_OPACITY).unwrap_or(settings.text_opacity),
+                "window_opacity" => settings.opacity.window = percent(value, MIN_WINDOW_OPACITY).unwrap_or(settings.opacity.window),
+                "text_opacity" => settings.opacity.text = percent(value, MIN_TEXT_OPACITY).unwrap_or(settings.opacity.text),
+                "locked_window_opacity" => locked_window = percent(value, MIN_WINDOW_OPACITY),
+                "locked_text_opacity" => locked_text = percent(value, MIN_TEXT_OPACITY),
                 // Read together below, with the captions colours of older settings.
                 key if key == "theme" || key.starts_with("custom.") => {}
                 key if key.starts_with("subtitles.") => subtitles.push((key, value)),
@@ -154,6 +172,10 @@ impl Settings {
                 key => settings.keybinds.apply_setting(key, value),
             }
         }
+        settings.locked_opacity = Opacity {
+            window: locked_window.unwrap_or(settings.opacity.window),
+            text: locked_text.unwrap_or(settings.opacity.text),
+        };
         settings.subtitles.apply_settings(&subtitles);
         settings.themes = Themes::from_settings(&lines);
         settings
@@ -163,7 +185,7 @@ impl Settings {
         let blocked: String = self.blocked.iter().map(|name| format!("blocked = {name}\n")).collect();
         let pinned: String = self.pinned.iter().map(|name| format!("pinned = {name}\n")).collect();
         format!(
-            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\ndictation_only = {}\n{}{blocked}{pinned}{}{}{}",
+            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\n{}{blocked}{pinned}{}{}{}",
             self.mic_threshold_db,
             self.computer_threshold_db,
             self.model,
@@ -174,8 +196,10 @@ impl Settings {
             self.auto_fold_minutes,
             self.block_answer.id(),
             if self.check_updates { "on" } else { "off" },
-            self.window_opacity,
-            self.text_opacity,
+            self.opacity.window,
+            self.opacity.text,
+            self.locked_opacity.window,
+            self.locked_opacity.text,
             if self.dictation_only { "on" } else { "off" },
             self.themes.to_settings(),
             self.keybinds.to_settings(),
@@ -233,8 +257,8 @@ mod tests {
             blocked: vec!["Discord".into(), "Steam, Inc. = client".into()],
             pinned: vec!["Slack".into()],
             check_updates: false,
-            window_opacity: 60,
-            text_opacity: 90,
+            opacity: Opacity { window: 60, text: 90 },
+            locked_opacity: Opacity { window: 20, text: 70 },
             dictation_only: true,
             words: WordSettings { rules: crate::words::Scope::Captions, transforms: crate::words::Scope::Both, hotwords: false },
         };
@@ -242,5 +266,7 @@ mod tests {
         assert_eq!(Settings::parse("mic_threshold_db = loud\nunknown = 1"), Settings::default());
         assert_eq!(Settings::parse("mic_threshold_db = NaN\ncomputer_threshold_db = 50").computer_threshold_db, THRESHOLD_MAX_DB);
         assert_eq!(Settings::parse("mic_threshold_db = NaN").mic_threshold_db, Settings::default().mic_threshold_db);
+        let older = Settings::parse("window_opacity = 40\ntext_opacity = 80");
+        assert_eq!(older.locked_opacity, older.opacity, "locked follows unlocked until set");
     }
 }

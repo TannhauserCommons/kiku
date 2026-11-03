@@ -38,7 +38,7 @@ pub struct NewLine {
     pub mic: bool,
     /// The app's name, or "You" for the mic.
     pub source: String,
-    /// For mic lines, the app you were talking to, if one had spoken recently.
+    /// For mic lines, the app you were talking to: a pinned one, or the app in front.
     pub talking_to: Option<String>,
     pub text: String,
     /// Saved with a save button, so kept when old lines are deleted.
