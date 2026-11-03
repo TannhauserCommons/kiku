@@ -23,7 +23,8 @@ use windows::{
             DirectWrite::{
                 DWriteCreateFactory, IDWriteFactory, IDWriteInlineObject, IDWriteTextFormat, IDWriteTextLayout, IDWriteTextLayout1,
                 DWRITE_FACTORY_TYPE_SHARED, DWRITE_TEXT_ALIGNMENT_CENTER,
-                DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+                DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_TRIMMING,
                 DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
             },
@@ -42,6 +43,7 @@ mod design;
 mod history;
 mod icon;
 mod subtitles;
+mod words;
 
 use design::*;
 pub use icon::{Icon, IconSet};
@@ -58,7 +60,7 @@ use super::{
     usage::Usage,
     view::{
         Action, BlockPrompt, CaptionRegion, Corner, Dropdown, Extent, ImportStatus, LineRef, Paint, Rebind, Regions, Screen, Scroll, ScrollArea,
-        SetupStep, Slider, Tab, Target, View,
+        SetupStep, Slider, Tab, Target, UpdateCheck, View,
     },
 };
 use kiku_core::{
@@ -73,6 +75,7 @@ use kiku_core::{
     subtitles::SubtitleSettings,
     theme::{CustomTheme, Theme, Themes},
     update::{self, Release},
+    words::{Scope, WordSettings, Words},
 };
 use std::time::Instant;
 
@@ -160,7 +163,15 @@ pub struct Panel<'a> {
     pub block_answer: BlockAnswer,
     /// The app's look: the panel, the settings window and captions mode.
     pub themes: Themes,
+    /// Kiku only dictates: no app is captioned.
+    pub dictation_only: bool,
+    /// The opacity of the panel's background and of its text, in percent.
+    pub window_opacity: u8,
+    pub text_opacity: u8,
     pub subtitles: &'a SubtitleSettings,
+    /// The word rules file as last read, and where its rules and transforms apply.
+    pub words: &'a Words,
+    pub word_settings: WordSettings,
     pub settings_open: bool,
     pub usage: Option<Usage>,
     pub meters: [Meter; 2],
@@ -242,6 +253,8 @@ struct Fonts {
     body: IDWriteTextFormat,
     button: IDWriteTextFormat,
     caption: IDWriteTextFormat,
+    /// Your own captions: italic, so an app's section tells the app's lines from yours at a glance.
+    your_caption: IDWriteTextFormat,
     small: IDWriteTextFormat,
     /// Small and semibold: badges, key caps, a chosen segment.
     strong: IDWriteTextFormat,
@@ -291,6 +304,8 @@ pub struct Surface {
     layouts: Layouts,
     /// The themes `drawn` was drawn in.
     themes: Option<Themes>,
+    /// The opacities of the background and the text `drawn` was drawn with.
+    see_through: (u8, u8),
 }
 
 impl Surface {
@@ -311,6 +326,10 @@ pub struct Renderer {
     fonts: Fonts,
     /// The colours of the frame being drawn, worked out when the themes change.
     palette: Rc<Palette>,
+    /// The themes' palette as it is, before the panel's opacities change it.
+    themed: Rc<Palette>,
+    /// The window's background is see-through, so scrolled text is cut at the edges instead of faded.
+    see_through: bool,
     themes: Themes,
     /// The Custom theme's palette, kept for its tile while a preset shows.
     custom_palette: Option<(CustomTheme, Rc<Palette>)>,
@@ -343,7 +362,7 @@ impl Renderer {
         let palette = Rc::new(design::preset(themes.chosen()).clone());
         let brush = unsafe { target.CreateSolidColorBrush(&palette.text, None)? };
         let speaker_brush = unsafe { target.CreateSolidColorBrush(&palette.accent, None)? };
-        let format = |family, size, weight| text_format(&dwrite, family, size, weight);
+        let format = |family, size, weight| text_format(&dwrite, family, size, weight, DWRITE_FONT_STYLE_NORMAL);
         let (ui, display) = ui_families(&dwrite)?;
         let fonts = Fonts {
             title: format(display, TITLE_SIZE, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
@@ -352,6 +371,7 @@ impl Renderer {
             body: format(ui, BODY_SIZE, DWRITE_FONT_WEIGHT_NORMAL)?,
             button: format(ui, BUTTON_SIZE, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             caption: format(ui, CAPTION_SIZE, DWRITE_FONT_WEIGHT_NORMAL)?,
+            your_caption: text_format(&dwrite, ui, CAPTION_SIZE, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_ITALIC)?,
             small: format(ui, SMALL_SIZE, DWRITE_FONT_WEIGHT_NORMAL)?,
             strong: format(ui, SMALL_SIZE, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             overline: format(ui, OVERLINE_SIZE, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
@@ -362,6 +382,8 @@ impl Renderer {
             brush,
             speaker_brush,
             fonts,
+            themed: palette.clone(),
+            see_through: false,
             palette,
             themes,
             custom_palette: None,
@@ -384,9 +406,19 @@ impl Renderer {
             return;
         }
         self.themes = *themes;
-        self.palette = match themes.custom().filter(|_| themes.chosen() == Theme::Custom) {
+        self.themed = match themes.custom().filter(|_| themes.chosen() == Theme::Custom) {
             Some(custom) => self.custom_palette(custom),
             None => Rc::new(design::preset(themes.chosen()).clone()),
+        };
+        self.see_through(100, 100);
+    }
+
+    /// Draws with the window's background at `window` percent opacity and the text at `text`.
+    fn see_through(&mut self, window: u8, text: u8) {
+        self.see_through = window < 100;
+        self.palette = match (window, text) {
+            (100, 100) => self.themed.clone(),
+            _ => Rc::new(self.themed.see_through(window as f32 / 100.0, text as f32 / 100.0)),
         };
         unsafe { self.speaker_brush.SetColor(&self.palette.accent) };
     }
@@ -408,7 +440,17 @@ impl Renderer {
     pub fn render<'s>(&mut self, surface: &'s mut Surface, panel: &Panel) -> Result<(&'s mut Frame, Regions)> {
         let mut regions = Regions::default();
         let size = (panel.width + HANDLE_STRIP, panel.height);
-        let frame = self.render_on(surface, size, HANDLE_STRIP, panel.dpi, &panel.themes, |renderer| renderer.draw_panel(panel, &mut regions))?;
+        let see_through = (panel.window_opacity, panel.text_opacity);
+        if surface.see_through != see_through {
+            // Cached captions keep the "You:" brush's colour, so all is drawn again.
+            (surface.frame, surface.see_through) = (None, see_through);
+        }
+        let frame = self.render_on(surface, size, HANDLE_STRIP, panel.dpi, &panel.themes, |renderer| {
+            renderer.see_through(see_through.0, see_through.1);
+            let drawn = renderer.draw_panel(panel, &mut regions);
+            renderer.see_through(100, 100);
+            drawn
+        })?;
         Ok((frame, regions))
     }
 
@@ -949,7 +991,8 @@ impl Renderer {
             }
             let mut groups = vec![share];
             if index != YOU_SECTION {
-                groups.push(vec![(Icon::EyeOff, Action::Hide(index), Tone::Dim), (Icon::Ban, Action::Block(index), Tone::Dim)]);
+                let pin = if panel.captions.is_pinned(index) { Tone::Accent } else { Tone::Dim };
+                groups.push(vec![(Icon::Pin, Action::Pin(index), pin), (Icon::EyeOff, Action::Hide(index), Tone::Dim), (Icon::Ban, Action::Block(index), Tone::Dim)]);
             }
             right = self.draw_toolbar(&groups, header.right - TOOLBAR_INSET, middle, panel, regions)? - 6.0;
         }
@@ -1030,7 +1073,7 @@ impl Renderer {
             let caption = &captions[row];
             let y = origin + row_top;
             let line = LineRef::of(section, caption);
-            let layout = self.layout(&self.fonts.caption, &caption.display_text(), text_width)?;
+            let layout = self.caption_layout(caption, text_width)?;
             if let Some(&(start, end)) = selected.get(&line) {
                 self.fill_text_range(&layout, start, end, area.left, y, self.palette.selected)?;
             }
@@ -1065,7 +1108,7 @@ impl Renderer {
         let rows = &self.section_rows[section].rows;
         let Some(row) = rows.between(top, top + 1.0).next() else { return Ok(top) };
         let mut line_top = rows.top(row);
-        let layout = self.layout(&self.fonts.caption, &captions[row].display_text(), text_width)?;
+        let layout = self.caption_layout(&captions[row], text_width)?;
         for line_height in line_heights(&layout)? {
             if line_top >= top - 0.5 {
                 return Ok(line_top);
@@ -1284,6 +1327,7 @@ impl Renderer {
             (None, Tab::General) => self.draw_general_settings(panel, content, y, regions)?,
             (None, Tab::Listening) => self.draw_listening_settings(panel, content, y, regions)?,
             (None, Tab::Apps) => self.draw_app_settings(panel, content, y, regions)?,
+            (None, Tab::Words) => self.draw_word_settings(panel, content, y, regions)?,
             (None, Tab::Appearance) => {
                 let (y, swatches) = self.draw_theme_card(panel, content, y, regions)?;
                 let (bottom, font) = self.draw_subtitle_settings(panel, content, y + SECTION_GAP, regions)?;
@@ -1399,7 +1443,20 @@ impl Renderer {
             let none = "No apps are blocked. The block button on an app stops capturing and captioning it; what it said before stays in History.";
             y = self.draw_hint(none, content, y)?;
         }
-        Ok(y)
+
+        y = self.draw_heading("Your lines", content, y + SECTION_GAP)?;
+        let pinned = &panel.captions.pinned;
+        if !pinned.is_empty() {
+            y = self.draw_card(content, y, |renderer, inner, mut y| {
+                for (index, app) in pinned.iter().enumerate() {
+                    let unpin = [("Unpin", None, Action::Unpin(index), Emphasis::Secondary)];
+                    y = renderer.draw_two_line_row(app, "Gets every line you say", &unpin, inner, y, panel, regions)?;
+                }
+                Ok(y)
+            })?;
+        }
+        let hint = "What you say also shows in the app that spoke in the last 30 seconds. The pin button on an app puts every line you say in it instead, however long it is quiet.";
+        self.draw_hint(hint, content, if pinned.is_empty() { y - 8.0 } else { y })
     }
 
     /// A blocked app over how long it is blocked for, and Unblock. Returns the y below.
@@ -1419,7 +1476,8 @@ impl Renderer {
 
     /// Save mode, updates, then the way back into setup. Returns the y below.
     fn draw_general_settings(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
-        let y = self.draw_transcript_settings(panel, content, y, regions)?;
+        let y = self.draw_mode_settings(panel, content, y, regions)?;
+        let y = self.draw_transcript_settings(panel, content, y + SECTION_GAP, regions)?;
         let y = self.draw_update_settings(panel, content, y + SECTION_GAP, regions)?;
         let y = self.draw_heading("Setup", content, y + SECTION_GAP)?;
         self.draw_card(content, y, |renderer, inner, y| {
@@ -1428,19 +1486,39 @@ impl Renderer {
         })
     }
 
+    /// Captions and dictation, or dictation only. Returns the y below.
+    fn draw_mode_settings(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
+        let y = self.draw_heading("Mode", content, y)?;
+        let only = panel.dictation_only;
+        let y = self.draw_card(content, y, |renderer, inner, y| {
+            let modes = [("Captions and dictation", !only, Action::DictationOnly(false)), ("Dictation only", only, Action::DictationOnly(true))];
+            renderer.draw_choice_row("Kiku does", &modes, inner, y, panel, regions)
+        })?;
+        let hint = format!("Dictation only captions no apps and hears your mic only while you hold {}.", panel.keybinds.hold_name());
+        self.draw_hint(&hint, content, y)
+    }
+
     /// Whether Kiku checks for updates, and what a check sends. Returns the y below.
     fn draw_update_settings(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
         let y = self.draw_heading("Updates", content, y)?;
         let on = panel.check_updates;
+        let version = format!("Kiku {}", env!("CARGO_PKG_VERSION"));
         let y = self.draw_card(content, y, |renderer, inner, y| {
-            renderer.draw_toggle_row("Check for updates", on, Action::CheckUpdates(!on), inner, y, panel, regions)
+            if !update::available() {
+                return renderer.draw_two_line_row(&version, "This build doesn't check for updates", &[], inner, y, panel, regions);
+            }
+            let y = renderer.draw_toggle_row("Check once a day", on, Action::CheckUpdates(!on), inner, y, panel, regions)?;
+            let (state, button) = match &panel.view.update_check {
+                Some(UpdateCheck::Checking) => ("Checking…".to_owned(), "Checking…"),
+                Some(UpdateCheck::Latest) => ("The latest version".to_owned(), "Check now"),
+                Some(UpdateCheck::Failed(why)) => (format!("Couldn't check: {why}"), "Try again"),
+                None => ("The version you have".to_owned(), "Check now"),
+            };
+            let check = [(button, None, Action::CheckUpdatesNow, Emphasis::Secondary)];
+            renderer.draw_two_line_row(&version, &state, &check, inner, y, panel, regions)
         })?;
-        let version = env!("CARGO_PKG_VERSION");
-        let hint = match update::available() {
-            true => format!("Kiku {version}. Once a day Kiku reads the latest version from its releases page; nothing else is sent."),
-            false => format!("Kiku {version}. This build doesn't check for updates."),
-        };
-        self.draw_hint(&hint, content, y)
+        let hint = "A check reads the latest version from Kiku's releases page; nothing else is sent.";
+        self.draw_hint(hint, content, y)
     }
 
     /// Save mode, and in auto mode its own settings. Returns the y below.
@@ -2040,9 +2118,9 @@ impl Renderer {
     }
 
     /// Where in a caption's text a point falls, as a UTF-16 offset; `x` and `y` are relative to the text's top-left.
-    pub fn text_offset(&self, text: &str, width: f32, x: f32, y: f32) -> Result<u32> {
+    pub fn text_offset(&self, caption: &Caption, width: f32, x: f32, y: f32) -> Result<u32> {
         // Outside a frame there is no surface's cache to use, and a cache kept here would never be pruned.
-        let layout = self.new_layout(&self.fonts.caption, text, width.max(1.0), false)?;
+        let layout = self.new_layout(self.caption_format(caption), &caption.display_text(), width.max(1.0), false)?;
         let (mut trailing, mut inside, mut hit) = (Default::default(), Default::default(), DWRITE_HIT_TEST_METRICS::default());
         unsafe { layout.HitTestPoint(x, y, &mut trailing, &mut inside, &mut hit)? };
         Ok(hit.textPosition + if trailing.as_bool() { hit.length } else { 0 })
@@ -2065,7 +2143,16 @@ impl Renderer {
     }
 
     fn caption_height(&self, caption: &Caption, width: f32) -> Result<f32> {
-        height_of(&self.layout(&self.fonts.caption, &caption.display_text(), width)?)
+        height_of(&self.caption_layout(caption, width)?)
+    }
+
+    /// A caption laid out as shown: "You: …" in italics when it is yours.
+    fn caption_layout(&self, caption: &Caption, width: f32) -> Result<IDWriteTextLayout> {
+        self.layout(self.caption_format(caption), &caption.display_text(), width)
+    }
+
+    fn caption_format(&self, caption: &Caption) -> &IDWriteTextFormat {
+        if caption.speaker.is_some() { &self.fonts.your_caption } else { &self.fonts.caption }
     }
 
     /// One line of text, cut with "…" if it doesn't fit in `max_width`.
@@ -2160,6 +2247,10 @@ impl Renderer {
     /// Fades what is drawn in `area` of a window `window_height` tall into the window's background at
     /// `edge`, its top or bottom: solid there, see-through at the other side.
     fn fade(&self, area: D2D_RECT_F, edge: Edge, window_height: f32) -> Result<()> {
+        // Background drawn over a see-through background would show as a band.
+        if self.see_through {
+            return Ok(());
+        }
         let (solid, clear) = match edge {
             Edge::Top => (background_at(&self.palette, area.top, window_height), background_at(&self.palette, area.bottom, window_height)),
             Edge::Bottom => (background_at(&self.palette, area.bottom, window_height), background_at(&self.palette, area.top, window_height)),
@@ -2382,6 +2473,7 @@ fn tab_icon(tab: Tab) -> Icon {
         Tab::General => Icon::Sliders,
         Tab::Listening => Icon::Mic,
         Tab::Apps => Icon::Apps,
+        Tab::Words => Icon::SpellCheck,
         Tab::Appearance => Icon::Palette,
         Tab::Shortcuts => Icon::Keyboard,
     }
@@ -2418,9 +2510,26 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::CancelBlock => "Keep captioning it".into(),
         Action::DontAskToBlock => "Use this answer for every app from now on; Settings > Apps can ask again".into(),
         Action::Unblock(_) => "Capture and caption this app again".into(),
+        Action::Pin(index) if panel.captions.is_pinned(index) => "Unpin: your lines go to the app that spoke last again".into(),
+        Action::Pin(_) => "Pin: put every line you say in this app".into(),
+        Action::Unpin(_) => "Your lines go to the app that spoke last again".into(),
         Action::SetBlockAnswer(BlockAnswer::Ask) => "Ask each time an app is blocked".into(),
         Action::SetBlockAnswer(BlockAnswer::Session) => "Block apps until Kiku quits, without asking".into(),
         Action::SetBlockAnswer(BlockAnswer::Always) => "Block apps for good, without asking".into(),
+        Action::WordScope { transforms, scope } => {
+            let what = if transforms { "Transforms change" } else { "Word rules change" };
+            match scope {
+                Scope::Captions => format!("{what} captions only, not what dictation types"),
+                Scope::Dictation => format!("{what} only what dictation types or pastes"),
+                Scope::Both => format!("{what} captions and what dictation types"),
+            }
+        }
+        Action::WordHotwords(true) => "Help Parakeet Unified hear the @ words; it decodes a little slower while there are any".into(),
+        Action::WordHotwords(false) => "Decode as if there were no @ words".into(),
+        Action::RemoveWordEntry(_) => "Take it out of the file".into(),
+        Action::OpenWords => "Open words.txt in your text editor".into(),
+        Action::CopyWordInstructions => "Copy how the file works for ChatGPT, Claude or another assistant, then add what you want".into(),
+        Action::ClearTry => "Clear".into(),
         Action::CopyLine(_) => "Copy this line".into(),
         Action::ShareLine(_) => "Ask Claude about this line".into(),
         Action::ShareSection(_) => "Ask Claude about this app's transcript".into(),
@@ -2453,6 +2562,9 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::UseRecommended => "Use the model recommended for this PC".into(),
         Action::SetupNext | Action::SetupBack | Action::SkipSetup | Action::QuitAndPause | Action::KeepDownloading => return None,
         Action::InstallUpdate | Action::UpdateLater => return None,
+        Action::DictationOnly(false) => "Caption apps and your mic, and dictate while the key is held".into(),
+        Action::DictationOnly(true) => "Only dictate: no captions, and the mic heard only while the key is held".into(),
+        Action::CheckUpdatesNow => "Look for a newer Kiku now".into(),
         Action::CheckUpdates(true) => "Look once a day whether a newer Kiku is out".into(),
         Action::CheckUpdates(false) => "Never look for a newer Kiku".into(),
         Action::Rebind(_) => "Click, then press the new keys (Esc cancels)".into(),
@@ -2506,7 +2618,7 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::ShareResults => "Ask Claude about every line found".into(),
         Action::RunSql => "Run the query (Enter)".into(),
         Action::Example(index) => EXAMPLES[index].1.into(),
-        Action::OpenSaved(_) | Action::OpenResult(_) | Action::Type(_) | Action::SetWho(_) | Action::SubtitleFont(_) | Action::ShowTab(_) => return None,
+        Action::OpenSaved(_) | Action::OpenResult(_) | Action::Type(_) | Action::TypeTry | Action::SetWho(_) | Action::SubtitleFont(_) | Action::ShowTab(_) => return None,
     })
 }
 
@@ -2645,13 +2757,13 @@ fn ui_families(dwrite: &IDWriteFactory) -> Result<(&'static str, &'static str)> 
     Ok(if exists.as_bool() { ("Segoe UI Variable Text", "Segoe UI Variable Display") } else { ("Segoe UI", "Segoe UI") })
 }
 
-fn text_format(dwrite: &IDWriteFactory, family: &str, size: f32, weight: DWRITE_FONT_WEIGHT) -> Result<IDWriteTextFormat> {
+fn text_format(dwrite: &IDWriteFactory, family: &str, size: f32, weight: DWRITE_FONT_WEIGHT, style: DWRITE_FONT_STYLE) -> Result<IDWriteTextFormat> {
     unsafe {
         dwrite.CreateTextFormat(
             &HSTRING::from(family),
             None,
             weight,
-            DWRITE_FONT_STYLE_NORMAL,
+            style,
             DWRITE_FONT_STRETCH_NORMAL,
             size,
             &HSTRING::from("en-us"),

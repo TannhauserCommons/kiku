@@ -25,7 +25,7 @@ use kiku::{
 use kiku_core::{
     captions::{Captions, StreamId, YOU, YOU_SECTION},
     controls::{Controls, Gate, Input, THRESHOLD_MIN_DB},
-    engine::{self, Device, Engine, EngineStream, Result, POLL_INTERVAL},
+    engine::{self, Device, Engine, EngineStream, Line, ModelSpec, Result, POLL_INTERVAL},
     hardware::Hardware,
     log,
     misses::{self, Recent},
@@ -35,6 +35,7 @@ use kiku_core::{
     settings::Settings,
     status::StatusFile,
     update,
+    words::Output,
 };
 
 /// Audio this old when it reaches the decoder means captions are lagging; worth a log line.
@@ -79,13 +80,17 @@ fn main() -> Result<()> {
     log::write(format!("{hardware:?}"));
     catalog::set_gpu_memory_mb(hardware.gpu.as_ref().map_or(0, |gpu| gpu.vram_mb));
     let first_run = !kiku_core::settings::exist();
-    let captions = Arc::new(Mutex::new(Captions::default()));
     let settings = Settings::load();
+    let captions = Arc::new(Mutex::new(Captions { pinned: settings.pinned.clone(), ..Captions::default() }));
     let controls = Arc::new(Controls::new(settings.mic_threshold_db, settings.computer_threshold_db, settings.choice()));
     controls.keep_days.store(settings.keep_days, Ordering::Relaxed);
     controls.auto_save.store(settings.auto_save, Ordering::Relaxed);
     controls.save_mic_only.store(settings.save_mic_only, Ordering::Relaxed);
     controls.check_updates.store(settings.check_updates, Ordering::Relaxed);
+    controls.dictation_only.store(settings.dictation_only, Ordering::Relaxed);
+    controls.words.set_settings(settings.words);
+    controls.words.refresh();
+    controls.set_hotwords(controls.words.hotwords());
     for app in &settings.blocked {
         controls.block(app, true);
     }
@@ -213,6 +218,7 @@ impl Discovery {
                         processes.iter().any(|p| p.pid == *pid)
                             && running.quiet_since.is_none_or(|since| now < since + QUIET_RELEASE)
                             && !controls.is_blocked(name)
+                            && !controls.dictation_only.load(Ordering::Relaxed)
                     }
                     // The default mic changed or was unplugged: the mic moves to the new default.
                     Target::Mic { .. } => wanted.contains(&running.target),
@@ -233,13 +239,16 @@ impl Discovery {
         Some(releases.chain(retries).fold(now + SAFETY_NET_INTERVAL, Instant::min))
     }
 
-    /// The default mic and every app playing audio that isn't blocked.
+    /// The default mic and every app playing audio that isn't blocked; only the mic in dictation only mode.
     fn wanted(&self, sessions: &mut Sessions, processes: &[Process]) -> Vec<Target> {
+        let mic = default_microphone().map(|device| Target::Mic { device });
+        if self.controls.dictation_only.load(Ordering::Relaxed) {
+            return mic.into_iter().collect();
+        }
         let apps = sessions.playing_apps(processes).unwrap_or_else(|error| {
             log::write(format!("audio session lookup failed: {error}"));
             Vec::new()
         });
-        let mic = default_microphone().map(|device| Target::Mic { device });
         let apps = apps.into_iter().filter(|app| !self.controls.is_blocked(&app.name));
         mic.into_iter().chain(apps.map(|app| Target::App { pid: app.pid, name: app.name })).collect()
     }
@@ -494,11 +503,19 @@ impl Decoder {
                 }
                 self.recorder.borrow_mut().tick(&self.controls);
                 self.report_status(sources);
+                if self.controls.words.refresh() {
+                    overlay.refresh();
+                }
+                // New hotwords apply from the next phrase, unless turning them on or off needs a reload.
+                self.controls.set_hotwords(self.controls.words.hotwords());
+                let active = self.controls.model().active;
+                let reload = self.controls.take_changed_hotwords().is_some_and(|words| !engine.set_hotwords(&active.hotwords(words)));
                 // A pick still downloading waits, and captions go on meanwhile.
-                if self.controls.model().pending.is_some_and(runnable) || self.gpu_move_due() {
+                if self.controls.model().pending.is_some_and(runnable) || self.gpu_move_due() || reload {
                     self.finish_speech(engine, &mut streams, sources, overlay);
                 }
-                if let Some(next) = self.load_requested_model().or_else(|| self.move_to_gpu()) {
+                let reloaded = || reload.then(|| self.reload()).flatten();
+                if let Some(next) = self.load_requested_model().or_else(|| self.move_to_gpu()).or_else(reloaded) {
                     overlay.refresh();
                     return Stop::Switch(next);
                 }
@@ -624,17 +641,17 @@ impl Decoder {
 
     fn load_where_possible(&self, choice: Choice) -> Result<(Box<dyn Engine>, Option<String>)> {
         if choice.device() != Device::Cuda {
-            return load_logged(choice).map(|engine| (engine, None));
+            return load_logged(choice, self.controls.hotwords()).map(|engine| (engine, None));
         }
         let (why, what_to_do) = match self.gpu_unready(choice) {
             Some(unready) => unready,
-            None => match load_logged(choice) {
+            None => match load_logged(choice, self.controls.hotwords()) {
                 Ok(engine) => return Ok((engine, None)),
                 Err(error) => (format!("the GPU test failed: {error}"), "Settings → Listening can switch it to the CPU."),
             },
         };
         self.tell(format!("{} couldn't use the GPU ({why}), so it's running on the CPU. {what_to_do}", choice.model.name));
-        load_logged(choice.on_cpu()).map(|engine| (engine, Some(why)))
+        load_logged(choice.on_cpu(), self.controls.hotwords()).map(|engine| (engine, Some(why)))
     }
 
     /// Logs `notice` and has the panel show it (with a tray balloon if hidden), unless it was the last one.
@@ -652,6 +669,11 @@ impl Decoder {
         if !self.gpu_move_due() {
             return None;
         }
+        self.reload()
+    }
+
+    /// Loads the current model again; it keeps running if that fails.
+    fn reload(&self) -> Option<Box<dyn Engine>> {
         let active = self.controls.model().active;
         let (engine, gpu_fallback) = self.load(active).ok()?;
         self.controls.finish_switch(active, Ok(gpu_fallback));
@@ -692,17 +714,19 @@ impl Decoder {
 
     /// Gates a chunk by its input's sensitivity, reports its level, and hands it to its stream, unless
     /// it is silence the stream's speech detector is done with. While dictating the mic isn't gated:
-    /// holding the key says you are talking.
+    /// holding the key says you are talking. In dictation only mode the mic is heard only then.
     fn feed<'e>(&self, engine: &'e dyn Engine, sources: &mut Sources, streams: &mut [Option<Stream<'e>>], mut chunk: Chunk) {
         let input = if sources.sections[chunk.source].is_some() { Input::Computer } else { Input::Mic };
+        let dictating = self.controls.dictating.load(Ordering::Relaxed);
         let threshold = match input {
-            Input::Mic if self.controls.dictating.load(Ordering::Relaxed) => THRESHOLD_MIN_DB,
+            Input::Mic if dictating => THRESHOLD_MIN_DB,
             _ => self.controls.threshold_db(input),
         };
         let gate = &mut sources.gates[chunk.source];
         let level = gate.apply(&mut chunk.samples, threshold);
         self.controls.report_level(input, level);
-        if gate.idle() {
+        let unheard = input == Input::Mic && !dictating && self.controls.dictation_only.load(Ordering::Relaxed);
+        if gate.idle() || unheard {
             return;
         }
         sources.recent[chunk.source].push(&chunk.samples);
@@ -788,18 +812,25 @@ impl Decoder {
             if lines.is_empty() {
                 continue;
             }
+            // Rules apply to each revision of a line in progress again; dictation types the words as heard.
+            let shown = self.as_captions(&lines, &sources.labels[index]);
             let mut captions = self.captions.lock().unwrap();
             match section {
-                Some(section) => captions.update_app(section, stream.id, &lines, now),
-                None => captions.update_mic(stream.id, &lines, now),
+                Some(section) => captions.update_app(section, stream.id, &shown, now),
+                None => captions.update_mic(stream.id, &shown, now),
             }
-            self.recorder.borrow_mut().note(&self.controls, &captions, stream.id, section, &lines);
+            self.recorder.borrow_mut().note(&self.controls, &captions, stream.id, section, &shown);
             if mic && matches!(collect, Collect::Dictating | Collect::FlushMic) {
                 lines.iter().filter(|l| l.complete && !l.text.is_empty()).for_each(|l| self.controls.queue_typing(l.text.clone()));
             }
             changed = true;
         }
         changed
+    }
+
+    /// Lines as captions show them, after the word rules for the app labelled `label` ("You" for the mic).
+    fn as_captions(&self, lines: &[Line], label: &str) -> Vec<Line> {
+        lines.iter().map(|line| Line { text: self.controls.words.apply(&line.text, label, Output::Captions), ..line.clone() }).collect()
     }
 }
 
@@ -809,9 +840,9 @@ fn reopen<'e>(engine: &'e dyn Engine, sources: &mut Sources, slot: &mut Option<S
     *slot = sources.open(engine, index);
 }
 
-fn load_logged(choice: Choice) -> Result<Box<dyn Engine>> {
+fn load_logged(choice: Choice, hotwords: Vec<String>) -> Result<Box<dyn Engine>> {
     let start = Instant::now();
-    let loaded = engine::load(&choice.spec());
+    let loaded = engine::load(&ModelSpec { hotwords: choice.hotwords(hotwords), ..choice.spec() });
     match &loaded {
         Ok(_) => log::write(format!("loaded {} on {:?} in {:.1} s", choice.model.name, choice.device(), start.elapsed().as_secs_f32())),
         Err(error) => log::write(format!("{} on {:?} failed to load: {error}", choice.model.name, choice.device())),

@@ -35,7 +35,7 @@ use std::{
 };
 
 use windows::{
-    core::{w, Result, PCWSTR},
+    core::{w, Result, HSTRING, PCWSTR},
     Win32::{
         Foundation::{GetLastError, D2DERR_RECREATE_TARGET, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::ScreenToClient,
@@ -46,7 +46,7 @@ use windows::{
             Threading::CreateMutexW,
         },
         UI::{
-            Shell::{FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH},
+            Shell::{FileOpenDialog, IFileOpenDialog, ShellExecuteW, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH},
             HiDpi::{GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
             Input::KeyboardAndMouse::{
                 GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, VIRTUAL_KEY,
@@ -57,7 +57,7 @@ use windows::{
                 GetWindowRect, IsWindowVisible, KillTimer, PostMessageW, PostQuitMessage, SetForegroundWindow, SetTimer,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
                 GWLP_USERDATA, GWL_EXSTYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, MINMAXINFO, MSG,
-                SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
+                SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNORMAL, SW_SHOWNOACTIVATE,
                 SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_APP, WM_DESTROY, WM_DPICHANGED, WM_GETMINMAXINFO,
                 WA_INACTIVE, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_ENDSESSION, WM_DISPLAYCHANGE, WM_KEYDOWN, WM_LBUTTONDBLCLK, WNDPROC, CS_DBLCLKS, WM_NCMOUSEMOVE, WM_SETCURSOR, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, GetCursorPos, LoadCursorW, SetCursor, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY, WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONUP,
                 WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -68,7 +68,7 @@ use windows::{
 };
 
 use kiku_core::{
-    captions::{Captions, YOU_SECTION},
+    captions::{Caption, Captions, YOU_SECTION},
     controls::{Controls, Input, SaveRequest, THRESHOLD_MIN_DB},
     keybinds::{Command, Key, Keybinds},
     log,
@@ -76,11 +76,12 @@ use kiku_core::{
     download::{self, Downloads, Target as Download},
     hardware::Hardware,
     imports,
-    settings::{BlockAnswer, Settings},
+    settings::{BlockAnswer, Settings, MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
     subtitles::SubtitleSettings,
     theme::Themes,
     transcripts,
     update::{self, Release},
+    words::{Output, WordSettings, ASSISTANT_INSTRUCTIONS},
 };
 use app_icon::register_class;
 use finder::{example_sql, line_text, table_text, Reply, Request, Searcher, TextBox};
@@ -93,7 +94,7 @@ use usage::{Usage, UsageMeter};
 use selection::{Selection, TextPoint};
 use view::{
     Action, BlockPrompt, Corner, Dropdown, ImportStatus, LineRef, Notice, Rebind, Screen, Scroll, ScrollArea, SetupStep, Slider, Tab, Target,
-    View,
+    UpdateCheck, View,
 };
 
 /// Custom messages: `WM_APP + 2` is the tray's, `+ 3` the captions key's and `+ 6` captions mode's windows'.
@@ -239,6 +240,8 @@ pub fn run(
         keybinds: settings.keybinds,
         auto_fold: settings.auto_fold_minutes,
         block_answer: settings.block_answer,
+        window_opacity: settings.window_opacity,
+        text_opacity: settings.text_opacity,
         wake_discovery,
         captured: Vec::new(),
         captured_down: Vec::new(),
@@ -323,6 +326,9 @@ struct Window {
     /// Minutes an app is quiet before the panel folds it; 0 never.
     auto_fold: u32,
     block_answer: BlockAnswer,
+    /// The opacity of the panel's background and of its text, in percent.
+    window_opacity: u8,
+    text_opacity: u8,
     wake_discovery: Sender<()>,
     /// While setting the captions key: every key pressed so far, and the ones still down.
     captured: Vec<Key>,
@@ -364,6 +370,13 @@ impl Window {
                 }
                 if let Some(release) = self.controls.take_update() {
                     self.offer_update(release);
+                }
+                if let Some(found) = self.controls.take_checked() {
+                    self.settings.view.update_check = match found {
+                        Ok(true) => None,
+                        Ok(false) => Some(UpdateCheck::Latest),
+                        Err(why) => Some(UpdateCheck::Failed(why)),
+                    };
                 }
                 self.redraw();
             }
@@ -494,6 +507,9 @@ impl Window {
         if !matches!(action, Action::DeleteSession(_)) {
             self.view.finder.deleting = None;
         }
+        if !matches!(action, Action::TypeTry | Action::ClearTry) {
+            self.settings.view.typing_try = false;
+        }
         // Only a second press of Delete deletes.
         let confirming = std::mem::take(&mut self.settings.view.confirm_delete);
         match action {
@@ -545,10 +561,46 @@ impl Window {
                     self.notify(format!("Captioning {} again", app.name), false);
                 }
             }
+            Action::Pin(index) if index != YOU_SECTION => {
+                let mut captions = self.captions.lock().unwrap();
+                let (label, pinned) = (captions.sections[index].label.clone(), captions.is_pinned(index));
+                captions.pin(&label, !pinned);
+                drop(captions);
+                self.save_settings();
+            }
+            Action::Pin(_) => {}
+            Action::Unpin(index) => {
+                let mut captions = self.captions.lock().unwrap();
+                if let Some(label) = captions.pinned.get(index).cloned() {
+                    captions.pin(&label, false);
+                }
+                drop(captions);
+                self.save_settings();
+            }
             Action::SetBlockAnswer(answer) => {
                 self.block_answer = answer;
                 self.save_settings();
             }
+            Action::WordScope { transforms, scope } => {
+                let mut settings = self.controls.words.settings();
+                *if transforms { &mut settings.transforms } else { &mut settings.rules } = scope;
+                self.controls.words.set_settings(settings);
+                self.save_settings();
+            }
+            Action::WordHotwords(on) => {
+                self.controls.words.set_settings(WordSettings { hotwords: on, ..self.controls.words.settings() });
+                self.save_settings();
+            }
+            Action::RemoveWordEntry(index) => {
+                let words = self.controls.words.words();
+                if let Some(Err(error)) = words.entries().get(index).map(|entry| self.controls.words.remove(entry)) {
+                    self.notify(format!("Couldn't change words.txt: {}", plain_error(&error)), true);
+                }
+            }
+            Action::OpenWords => self.open_words(),
+            Action::CopyWordInstructions => self.copy(ASSISTANT_INSTRUCTIONS, "Copied: paste it to your assistant, then say what you want".into()),
+            Action::TypeTry => self.settings.view.typing_try = true,
+            Action::ClearTry => self.settings.view.try_words.clear(),
             Action::CopyLine(line) => {
                 if let Some(text) = self.caption_text(line) {
                     self.copy(&text, "Copied the line".into());
@@ -609,6 +661,7 @@ impl Window {
                     self.finish_rebinding(None);
                 }
                 self.settings.show_tab(tab);
+                self.controls.words.refresh();
                 self.watch_meters();
             }
             Action::ToggleStop => self.toggle_stop(),
@@ -690,6 +743,12 @@ impl Window {
             Action::CheckUpdates(on) => {
                 self.controls.check_updates.store(on, Ordering::Relaxed);
                 self.save_settings();
+            }
+            Action::CheckUpdatesNow => self.check_for_update(),
+            Action::DictationOnly(on) => {
+                self.controls.dictation_only.store(on, Ordering::Relaxed);
+                self.save_settings();
+                let _ = self.wake_discovery.send(());
             }
             Action::ShowSubtitles(on) => self.set_subtitles(on),
             Action::SubtitleRows(rows) => self.restyle(|settings| settings.rows = rows),
@@ -822,7 +881,7 @@ impl Window {
                 // An open list's field and the space between its rows, or between a palette's colours.
                 Some(Target::Card) => {}
                 _ => {
-                    self.settings.view.open_dropdown = None;
+                    (self.settings.view.open_dropdown, self.settings.view.typing_try) = (None, false);
                     self.redraw();
                 }
             },
@@ -876,6 +935,15 @@ impl Window {
                 self.redraw();
             }
             WM_KEYDOWN if self.settings.view.open_dropdown == Some(Dropdown::Font) => self.font_list_key(VIRTUAL_KEY(wparam.0 as u16)),
+            WM_CHAR if self.settings.view.typing_try => {
+                self.settings.view.try_words.type_unit(wparam.0 as u16);
+                self.redraw();
+            }
+            WM_KEYDOWN if self.settings.view.typing_try => self.try_box_key(VIRTUAL_KEY(wparam.0 as u16)),
+            WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && self.settings.view.typing_try => {
+                self.settings.view.typing_try = false;
+                self.redraw();
+            }
             WM_KEYDOWN if wparam.0 == VK_ESCAPE.0 as usize => self.close_settings(),
             WM_CLOSE => self.close_settings(),
             _ => return None,
@@ -908,6 +976,31 @@ impl Window {
         self.redraw();
     }
 
+    /// A key pressed while typing in the Words tab's Try box: editing keys edit it, and Escape empties it, then leaves it.
+    fn try_box_key(&mut self, key: VIRTUAL_KEY) {
+        let (ctrl, hwnd) = (ctrl_held(), self.hwnd);
+        let view = &mut self.settings.view;
+        if !view.try_words.edit(key, ctrl, || clipboard::text(hwnd)) {
+            match key {
+                VK_ESCAPE if !view.try_words.text.is_empty() => view.try_words.clear(),
+                VK_ESCAPE => view.typing_try = false,
+                _ => return,
+            }
+        }
+        self.redraw();
+    }
+
+    /// Opens `words.txt` in the user's editor, made with a short header if it is missing.
+    fn open_words(&mut self) {
+        let opened = self.controls.words.create().map(|path| unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(path.as_os_str()), None, None, SW_SHOWNORMAL) });
+        match opened {
+            // ShellExecute returns a value above 32 on success.
+            Ok(instance) if instance.0 as isize > 32 => {}
+            Ok(_) => self.notify("Couldn't open words.txt: no app opens text files".into(), true),
+            Err(error) => self.notify(format!("Couldn't make words.txt: {}", plain_error(&error)), true),
+        }
+    }
+
     /// Sets what the dragged slider sets; it is saved when the drag ends.
     fn drag_slider(&mut self, lparam: LPARAM) {
         let Some(slider) = self.dragging else { return };
@@ -919,9 +1012,17 @@ impl Window {
                 self.controls.set_threshold_db(input, threshold_at(&track, x));
                 self.controls.threshold_db(input) != before
             }
-            Slider::Opacity => {
+            Slider::PillOpacity => {
                 let percent = (fraction_at(&track, x) * 100.0).round() as u8;
                 std::mem::replace(&mut self.subtitles.settings.opacity, percent) != percent
+            }
+            Slider::WindowOpacity => {
+                let percent = MIN_WINDOW_OPACITY + (fraction_at(&track, x) * (100 - MIN_WINDOW_OPACITY) as f32).round() as u8;
+                std::mem::replace(&mut self.window_opacity, percent) != percent
+            }
+            Slider::TextOpacity => {
+                let percent = MIN_TEXT_OPACITY + (fraction_at(&track, x) * (100 - MIN_TEXT_OPACITY) as f32).round() as u8;
+                std::mem::replace(&mut self.text_opacity, percent) != percent
             }
         };
         if changed {
@@ -961,7 +1062,12 @@ impl Window {
             auto_fold_minutes: self.auto_fold,
             block_answer: self.block_answer,
             blocked: self.controls.blocked().into_iter().filter(|app| app.always).map(|app| app.name).collect(),
+            pinned: self.captions.lock().unwrap().pinned.clone(),
             check_updates: self.controls.check_updates.load(Ordering::Relaxed),
+            window_opacity: self.window_opacity,
+            text_opacity: self.text_opacity,
+            dictation_only: self.controls.dictation_only.load(Ordering::Relaxed),
+            words: self.controls.words.settings(),
         };
         if let Err(error) = settings.save() {
             self.notify(format!("Couldn't save settings: {}", plain_error(&error)), true);
@@ -985,6 +1091,23 @@ impl Window {
             return self.redraw();
         }
         unsafe { PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).ok() }.unwrap_or_default();
+    }
+
+    /// Checks for a newer version on a thread of its own; one found is offered over the panel.
+    fn check_for_update(&mut self) {
+        if self.settings.view.update_check == Some(UpdateCheck::Checking) {
+            return;
+        }
+        self.settings.view.update_check = Some(UpdateCheck::Checking);
+        let (controls, handle) = (self.controls.clone(), Handle(self.hwnd.0 as isize));
+        std::thread::spawn(move || {
+            let found = update::check_now().map(|release| release.map(|release| controls.offer_update(release)).is_some());
+            if let Err(why) = &found {
+                log::write(format!("Update check failed: {why}"));
+            }
+            controls.post_checked(found);
+            handle.refresh();
+        });
     }
 
     /// Asks over the panel whether to install a newer version, with a balloon while the panel is hidden.
@@ -1117,9 +1240,13 @@ impl Window {
 
     /// A caption as shown, e.g. "You: on my way".
     fn caption_text(&self, line: LineRef) -> Option<String> {
+        self.caption(line).map(|caption| caption.display_text())
+    }
+
+    fn caption(&self, line: LineRef) -> Option<Caption> {
         let captions = self.captions.lock().unwrap();
         let lines = &captions.sections[line.section].captions;
-        Some(lines[line.position(lines)?].display_text())
+        Some(lines[line.position(lines)?].clone())
     }
 
     /// Pressing on caption text starts a selection; pressing anywhere else clears it.
@@ -1162,9 +1289,9 @@ impl Window {
     /// counts as the `nearest` caption.
     fn text_point(&self, x: f32, y: f32, nearest: bool) -> Option<TextPoint> {
         let region = if nearest { self.view.regions.nearest_caption(x, y)? } else { self.view.regions.caption_at(x, y)? };
-        let text = self.caption_text(region.line)?;
+        let caption = self.caption(region.line)?;
         let y = y.clamp(region.visible.top, region.visible.bottom - 0.5);
-        let offset = self.renderer.text_offset(&text, region.width, x - region.x, y - region.y).ok()?;
+        let offset = self.renderer.text_offset(&caption, region.width, x - region.x, y - region.y).ok()?;
         Some(TextPoint { line: region.line, offset })
     }
 
@@ -1193,6 +1320,7 @@ impl Window {
         let Some(said) = self.captions.lock().unwrap().said(lines) else {
             return self.notify("Nothing heard from your mic yet".into(), false);
         };
+        let said = self.controls.words.apply_to_caption(&said, &keys::focused_app().unwrap_or_default());
         if let Err(error) = self.paste(erase, &said) {
             return self.notify(format!("Couldn't paste: {}", plain_error(&error)), true);
         }
@@ -1228,7 +1356,13 @@ impl Window {
 
     /// Types dictated lines as they finish.
     fn type_dictation(&mut self) {
-        for line in self.controls.take_typing() {
+        let lines = self.controls.take_typing();
+        let app = if lines.is_empty() { String::new() } else { keys::focused_app().unwrap_or_default() };
+        for line in lines {
+            let line = self.controls.words.apply(&line, &app, Output::Dictation);
+            if line.is_empty() {
+                continue;
+            }
             let text = dictated(&line);
             keys::type_text(&text);
             self.typed = Some(Typed { erase: keys::Erase::Typed(text.chars().count()), lines: 0, at: Instant::now() });
@@ -1744,6 +1878,7 @@ impl Window {
         let scale = self.scale();
         let blocked = self.controls.blocked();
         let import = self.import.lock().unwrap().clone();
+        let words = self.controls.words.words();
         let captions = self.captions.lock().unwrap();
         self.schedule_next_change(&captions);
         let height = match self.view.collapsed {
@@ -1765,11 +1900,16 @@ impl Window {
             save_mic_only: self.controls.save_mic_only.load(Ordering::Relaxed),
             keep_days: self.controls.keep_days.load(Ordering::Relaxed),
             check_updates: self.controls.check_updates.load(Ordering::Relaxed),
+            dictation_only: self.controls.dictation_only.load(Ordering::Relaxed),
             auto_fold: self.auto_fold,
             blocked: &blocked,
             block_answer: self.block_answer,
             themes: self.subtitles.themes,
+            window_opacity: self.window_opacity,
+            text_opacity: self.text_opacity,
             subtitles: &self.subtitles.settings,
+            words: &words,
+            word_settings: self.controls.words.settings(),
             settings_open: self.settings.is_open(),
             usage: self.usage,
             meters: self.meters(),

@@ -51,6 +51,9 @@ pub struct Model {
     /// Components it needs, e.g. [`VAD`].
     #[serde(default)]
     pub requires: Vec<String>,
+    /// Listens for hotwords; only where they were measured to help without costing accuracy.
+    #[serde(default)]
+    pub hotwords: bool,
     pub variants: Vec<Variant>,
 }
 
@@ -306,7 +309,7 @@ impl Model {
     /// Where to load `variant` from, with its speech detector if it needs one.
     pub fn spec(&self, variant: &Variant) -> ModelSpec {
         let vad = self.requires.iter().any(|r| r == VAD).then(|| component(VAD).file_path(0));
-        ModelSpec { backend: self.backend, dir: variant.path(), device: variant.device, vad }
+        ModelSpec { backend: self.backend, dir: variant.path(), device: variant.device, vad, hotwords: Vec::new() }
     }
 }
 
@@ -432,6 +435,11 @@ impl Choice {
 
     pub fn spec(&self) -> ModelSpec {
         self.model.spec(self.variant())
+    }
+
+    /// `words`, if the model listens for hotwords; otherwise none.
+    pub fn hotwords(&self, words: Vec<String>) -> Vec<String> {
+        if self.model.hotwords { words } else { Vec::new() }
     }
 
     /// The same model on the CPU.

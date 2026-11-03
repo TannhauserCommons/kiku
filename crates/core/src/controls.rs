@@ -9,7 +9,7 @@ use std::sync::{
 /// Transcripts are kept this many days unless settings say otherwise.
 pub const DEFAULT_KEEP_DAYS: u32 = 30;
 
-use crate::{catalog::Choice, engine::SAMPLE_RATE, update::Release};
+use crate::{catalog::Choice, engine::SAMPLE_RATE, update::Release, words::WordBook};
 
 /// Slider range for sensitivity thresholds, in dBFS. The minimum means "let everything through".
 pub const THRESHOLD_MIN_DB: f32 = -70.0;
@@ -63,8 +63,16 @@ pub struct Controls {
     notice: Mutex<Option<String>>,
     /// Whether to check for updates (Settings → General).
     pub check_updates: AtomicBool,
+    /// Dictation only: no app is captured, and the mic is heard only while the captions key is held.
+    pub dictation_only: AtomicBool,
     /// A newer version the update check found, waiting for the panel to offer it.
     update: Mutex<Option<Release>>,
+    /// What a check asked for by hand found: whether there is a newer version, or why it failed.
+    checked: Mutex<Option<Result<bool, String>>>,
+    /// Word rules for captions and dictation, from `words.txt`, and where they apply.
+    pub words: WordBook,
+    /// The words the model listens for, and whether they changed since the decoder last took them.
+    hotwords: Mutex<(Vec<String>, bool)>,
 }
 
 /// An app that isn't captured or captioned: until Kiku quits, or always (saved in settings).
@@ -121,7 +129,11 @@ impl Controls {
             model: Mutex::new(ModelState { active: model, pending: None, failed: None, failure: None, loaded: false, gpu_fallback: None }),
             notice: Mutex::new(None),
             check_updates: AtomicBool::new(true),
+            dictation_only: AtomicBool::new(false),
             update: Mutex::new(None),
+            checked: Mutex::new(None),
+            words: WordBook::default(),
+            hotwords: Mutex::new((Vec::new(), false)),
         }
     }
 
@@ -179,6 +191,33 @@ impl Controls {
 
     pub fn take_update(&self) -> Option<Release> {
         self.update.lock().unwrap().take()
+    }
+
+    pub fn post_checked(&self, found: Result<bool, String>) {
+        *self.checked.lock().unwrap() = Some(found);
+    }
+
+    pub fn take_checked(&self) -> Option<Result<bool, String>> {
+        self.checked.lock().unwrap().take()
+    }
+
+    /// Sets the words the model listens for (see `ModelSpec::hotwords`); the decoder hands them on.
+    pub fn set_hotwords(&self, words: Vec<String>) {
+        let mut hotwords = self.hotwords.lock().unwrap();
+        if hotwords.0 != words {
+            *hotwords = (words, true);
+        }
+    }
+
+    /// The words to load a model with.
+    pub fn hotwords(&self) -> Vec<String> {
+        self.hotwords.lock().unwrap().0.clone()
+    }
+
+    /// The words, if they changed since last taken.
+    pub fn take_changed_hotwords(&self) -> Option<Vec<String>> {
+        let mut hotwords = self.hotwords.lock().unwrap();
+        std::mem::take(&mut hotwords.1).then(|| hotwords.0.clone())
     }
 
     pub fn set_helper_process(&self, pid: Option<u32>) {
@@ -344,6 +383,18 @@ mod tests {
 
     fn block(amplitude: f32) -> Vec<f32> {
         vec![amplitude; SAMPLE_RATE as usize / 10]
+    }
+
+    #[test]
+    fn changed_hotwords_are_taken_once() {
+        let choice = Choice { model: crate::catalog::by_id_or_default(crate::catalog::DEFAULT_ID), device: crate::engine::Device::Cpu };
+        let controls = Controls::new(THRESHOLD_MIN_DB, THRESHOLD_MIN_DB, choice);
+        controls.set_hotwords(vec!["Kiku".into()]);
+        assert_eq!(controls.take_changed_hotwords(), Some(vec!["Kiku".into()]));
+        assert_eq!(controls.take_changed_hotwords(), None);
+        controls.set_hotwords(vec!["Kiku".into()]);
+        assert_eq!(controls.take_changed_hotwords(), None, "the same words are no change");
+        assert_eq!(controls.hotwords(), ["Kiku"]);
     }
 
     #[test]

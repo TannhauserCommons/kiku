@@ -233,8 +233,8 @@ fn owned_string(text: windows::core::PWSTR) -> String {
     owned
 }
 
-/// "opera.exe" -> "Opera".
-fn display_name(exe: &str) -> String {
+/// "opera.exe" -> "Opera": an app's name as its captions are labelled.
+pub fn display_name(exe: &str) -> String {
     let stem = exe.strip_suffix(".exe").or_else(|| exe.strip_suffix(".EXE")).unwrap_or(exe);
     let mut chars = stem.chars();
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()

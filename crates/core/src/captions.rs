@@ -1,7 +1,8 @@
 //! The transcript: one section per app holding everything it said this session.
 //!
-//! Every mic line goes into the permanent "You" section. It is also shown as "You:" inside the app
-//! that spoke most recently, since that is usually who you are answering.
+//! Every mic line goes into the permanent "You" section. It is also shown as "You:" inside the apps
+//! you pinned, or with none pinned, the app that spoke most recently, since that is usually who you
+//! are answering.
 
 use std::{
     collections::VecDeque,
@@ -107,11 +108,13 @@ impl Section {
 #[derive(Clone, Debug)]
 pub struct Captions {
     pub sections: Vec<Section>,
+    /// Apps, by label, that get every mic line once they have a section.
+    pub pinned: Vec<String>,
 }
 
 impl Default for Captions {
     fn default() -> Self {
-        Self { sections: vec![Section::new(YOU, None)] }
+        Self { sections: vec![Section::new(YOU, None)], pinned: Vec::new() }
     }
 }
 
@@ -136,13 +139,31 @@ impl Captions {
     }
 
     /// Applies new or revised lines from the mic's stream: to the You section, and as "You:" lines
-    /// to the app you are talking to, if one spoke recently.
+    /// to the pinned apps, or with none heard yet, to the app you are talking to if one spoke recently.
     pub fn update_mic(&mut self, stream: StreamId, lines: &[Line], now: Instant) {
+        let pinned: Vec<usize> = (YOU_SECTION + 1..self.sections.len()).filter(|&index| self.is_pinned(index)).collect();
         for line in lines.iter().filter(|l| !l.text.is_empty()) {
             self.sections[YOU_SECTION].upsert(stream, line, None);
-            if let Some(app) = self.app_showing(stream, line.id).or_else(|| self.conversation_app(now)) {
+            let apps = match pinned.is_empty() {
+                true => self.app_showing(stream, line.id).or_else(|| self.conversation_app(now)).into_iter().collect(),
+                false => pinned.clone(),
+            };
+            for app in apps {
                 self.sections[app].upsert(stream, line, Some(YOU));
             }
+        }
+    }
+
+    /// Whether the section at `index` gets every mic line.
+    pub fn is_pinned(&self, index: usize) -> bool {
+        index != YOU_SECTION && self.pinned.contains(&self.sections[index].label)
+    }
+
+    /// Pins or unpins the app labelled `label`.
+    pub fn pin(&mut self, label: &str, on: bool) {
+        self.pinned.retain(|pinned| pinned != label);
+        if on {
+            self.pinned.push(label.to_owned());
         }
     }
 
@@ -232,6 +253,23 @@ mod tests {
         assert_eq!(texts(YOU_SECTION), ["On my way.", "Anyone there?"]);
         assert_eq!(texts(discord), ["Joining?", "You: On my way."]);
         assert_eq!(captions.visible().last().unwrap().0, YOU_SECTION, "You is drawn last");
+    }
+
+    #[test]
+    fn pinned_apps_get_every_mic_line_and_the_last_speaker_none() {
+        let (mut captions, now) = (Captions::default(), Instant::now());
+        let discord = captions.add_app("Discord", None);
+        let browser = captions.add_app("Browser", None);
+        captions.pin("Discord", true);
+        captions.update_app(browser, APP, &[line(1, "A song.")], now);
+        captions.update_mic(MIC, &[line(2, "Still here.")], now + CONVERSATION_WINDOW * 4);
+        let texts = |section: usize| captions.sections[section].captions.iter().map(|c| c.display_text()).collect::<Vec<_>>();
+        assert_eq!(texts(discord), ["You: Still here."], "however long Discord was quiet");
+        assert_eq!(texts(browser), ["A song."]);
+
+        captions.pin("Discord", false);
+        captions.update_mic(MIC, &[line(3, "Hello?")], now);
+        assert_eq!(captions.sections[browser].captions.back().unwrap().display_text(), "You: Hello?");
     }
 
     #[test]

@@ -11,7 +11,10 @@ use windows::{
             Common::{D2D1_COLOR_F, D2D_RECT_F},
             ID2D1RenderTarget,
         },
-        DirectWrite::{IDWriteLocalizedStrings, IDWriteTextFormat, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_RANGE},
+        DirectWrite::{
+            IDWriteLocalizedStrings, IDWriteTextFormat, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_TEXT_RANGE,
+        },
     },
 };
 
@@ -28,6 +31,7 @@ use crate::overlay::{
 use kiku_core::{
     captions::YOU,
     keybinds::Command,
+    settings::{MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
     subtitles::{Look, MAX_ROWS, PRESET_FONTS},
     theme::{Colours, Theme, Themes},
 };
@@ -263,7 +267,7 @@ impl Renderer {
         {
             return Ok(format.clone());
         }
-        let format = text_format(&self.dwrite, &look.font, look.size as f32, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
+        let format = text_format(&self.dwrite, &look.font, look.size as f32, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL)?;
         *cached = Some((look.font.clone(), look.size, format.clone()));
         Ok(format)
     }
@@ -293,7 +297,11 @@ impl Renderer {
                 None => renderer.draw_new_theme_tile(custom, panel, regions)?,
             };
             swatches = renderer.draw_theme_colours(panel, inner, bottom + 12.0, regions)?;
-            Ok(bottom + 12.0 + SETTING_ROW)
+            let fraction = |opacity: u8, min: u8| (opacity - min) as f32 / (100 - min) as f32;
+            let (window, text) = (panel.window_opacity, panel.text_opacity);
+            let y = bottom + 12.0 + SETTING_ROW;
+            let y = renderer.draw_slider_row("Window opacity", &format!("{window}%"), fraction(window, MIN_WINDOW_OPACITY), Slider::WindowOpacity, inner, y, regions)?;
+            renderer.draw_slider_row("Text opacity", &format!("{text}%"), fraction(text, MIN_TEXT_OPACITY), Slider::TextOpacity, inner, y, regions)
         })?;
         let hint = "Changing a colour saves it as your Custom theme; the presets stay as they are.";
         Ok((self.draw_hint(hint, content, y)?, swatches))
@@ -410,7 +418,9 @@ impl Renderer {
             y = renderer.draw_choice_row("Rows", &rows, inner, y, panel, regions)?;
             let fade = settings.auto_hide;
             y = renderer.draw_toggle_row("Fade out after 4 s quiet", fade, Action::SubtitleAutoHide(!fade), inner, y, panel, regions)?;
-            y = renderer.draw_opacity_row(settings.opacity, inner, y, regions)?;
+            let opacity = settings.opacity;
+            let value = if opacity == 0 { "Text only".to_owned() } else { format!("{opacity}% solid") };
+            y = renderer.draw_slider_row("Pill opacity", &value, opacity as f32 / 100.0, Slider::PillOpacity, inner, y, regions)?;
             renderer.draw_row_label("Font", inner, y)?;
             font = renderer.draw_dropdown_button(&look.font, Action::ToggleDropdown(Dropdown::Font), inner.right, y, panel, regions)?;
             y += SETTING_ROW;
@@ -436,20 +446,19 @@ impl Renderer {
         Ok(tile.bottom)
     }
 
-    /// "Pill opacity" and a slider for the pills' opacity, from text alone to solid. Returns the y below.
-    fn draw_opacity_row(&mut self, opacity: u8, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
+    /// `label`, a slider at `fraction` setting what `slider` sets, and its `value` at the end. Returns the y below.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_slider_row(&mut self, label: &str, value: &str, fraction: f32, slider: Slider, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
         const VALUE: f32 = 72.0;
         let middle = y + SETTING_ROW / 2.0;
-        self.draw_row_label("Pill opacity", content, y)?;
-        let value = if opacity == 0 { "Text only".to_owned() } else { format!("{opacity}% solid") };
-        let value = self.layout(&self.fonts.small, &value, f32::MAX)?;
+        self.draw_row_label(label, content, y)?;
+        let value = self.layout(&self.fonts.small, value, f32::MAX)?;
         self.draw_layout(&value, content.right - metrics(&value)?.width, middle - height_of(&value)? / 2.0, self.palette.text_dim)?;
         let (left, right) = (content.left + 120.0, content.right - VALUE - KNOB / 2.0);
         let track = rect(left, middle - TRACK / 2.0, right, middle + TRACK / 2.0);
-        let fraction = opacity as f32 / 100.0;
         self.draw_slider(track, fraction, &[(0.0, fraction, self.palette.accent)])?;
         // The clickable band is taller than the track so it is easy to grab.
-        regions.targets.push((rect(left, middle - 12.0, right, middle + 12.0), Target::Slider(Slider::Opacity)));
+        regions.targets.push((rect(left, middle - 12.0, right, middle + 12.0), Target::Slider(slider)));
         Ok(y + SETTING_ROW)
     }
 

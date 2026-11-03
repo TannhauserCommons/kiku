@@ -11,7 +11,13 @@ use crate::{
     subtitles::SubtitleSettings,
     theme::Themes,
     transcripts,
+    words::WordSettings,
 };
+
+/// The panel's background is never less opaque than this, in percent, so it still catches clicks.
+pub const MIN_WINDOW_OPACITY: u8 = 10;
+/// The panel's text is never less opaque than this, in percent, so it stays readable.
+pub const MIN_TEXT_OPACITY: u8 = 25;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -35,8 +41,18 @@ pub struct Settings {
     pub block_answer: BlockAnswer,
     /// Apps blocked always, by name: never captured or captioned.
     pub blocked: Vec<String>,
+    /// Apps, by name, that get every line you say.
+    pub pinned: Vec<String>,
     /// Once a day, ask the update server whether a newer Kiku is out.
     pub check_updates: bool,
+    /// The opacity of the panel's background in percent, from [`MIN_WINDOW_OPACITY`] to 100.
+    pub window_opacity: u8,
+    /// The opacity of the panel's text and icons in percent, from [`MIN_TEXT_OPACITY`] to 100.
+    pub text_opacity: u8,
+    /// No app is captioned, and the mic is heard only while dictating.
+    pub dictation_only: bool,
+    /// Where word rules and transforms apply.
+    pub words: WordSettings,
 }
 
 /// What an app header's block button does: ask, or block without asking until Kiku quits or always.
@@ -81,7 +97,12 @@ impl Default for Settings {
             auto_fold_minutes: 2,
             block_answer: BlockAnswer::Ask,
             blocked: Vec::new(),
+            pinned: Vec::new(),
             check_updates: true,
+            window_opacity: 100,
+            text_opacity: 100,
+            dictation_only: false,
+            words: WordSettings::default(),
         }
     }
 }
@@ -121,10 +142,15 @@ impl Settings {
                     settings.block_answer = answers.into_iter().find(|answer| answer.id() == value).unwrap_or_default();
                 }
                 "blocked" if !value.is_empty() => settings.blocked.push(value.to_owned()),
+                "pinned" if !value.is_empty() => settings.pinned.push(value.to_owned()),
                 "check_updates" => settings.check_updates = value != "off",
+                "dictation_only" => settings.dictation_only = value == "on",
+                "window_opacity" => settings.window_opacity = percent(value, MIN_WINDOW_OPACITY).unwrap_or(settings.window_opacity),
+                "text_opacity" => settings.text_opacity = percent(value, MIN_TEXT_OPACITY).unwrap_or(settings.text_opacity),
                 // Read together below, with the captions colours of older settings.
                 key if key == "theme" || key.starts_with("custom.") => {}
                 key if key.starts_with("subtitles.") => subtitles.push((key, value)),
+                key if key.starts_with("words.") => settings.words.apply_setting(key, value),
                 key => settings.keybinds.apply_setting(key, value),
             }
         }
@@ -135,8 +161,9 @@ impl Settings {
 
     fn to_text(&self) -> String {
         let blocked: String = self.blocked.iter().map(|name| format!("blocked = {name}\n")).collect();
+        let pinned: String = self.pinned.iter().map(|name| format!("pinned = {name}\n")).collect();
         format!(
-            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\ncheck_updates = {}\n{}{blocked}{}{}",
+            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\ndictation_only = {}\n{}{blocked}{pinned}{}{}{}",
             self.mic_threshold_db,
             self.computer_threshold_db,
             self.model,
@@ -147,9 +174,13 @@ impl Settings {
             self.auto_fold_minutes,
             self.block_answer.id(),
             if self.check_updates { "on" } else { "off" },
+            self.window_opacity,
+            self.text_opacity,
+            if self.dictation_only { "on" } else { "off" },
             self.themes.to_settings(),
             self.keybinds.to_settings(),
-            self.subtitles.to_settings()
+            self.subtitles.to_settings(),
+            self.words.to_settings()
         )
     }
 }
@@ -166,6 +197,11 @@ fn threshold_db(value: &str) -> Option<f32> {
 
 fn path() -> PathBuf {
     paths::data_dir().join("settings.txt")
+}
+
+/// A percentage from `min` to 100, from its settings value.
+fn percent(value: &str, min: u8) -> Option<u8> {
+    value.parse::<u8>().ok().map(|percent| percent.clamp(min, 100))
 }
 
 #[cfg(test)]
@@ -195,7 +231,12 @@ mod tests {
             auto_fold_minutes: 10,
             block_answer: BlockAnswer::Always,
             blocked: vec!["Discord".into(), "Steam, Inc. = client".into()],
+            pinned: vec!["Slack".into()],
             check_updates: false,
+            window_opacity: 60,
+            text_opacity: 90,
+            dictation_only: true,
+            words: WordSettings { rules: crate::words::Scope::Captions, transforms: crate::words::Scope::Both, hotwords: false },
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
         assert_eq!(Settings::parse("mic_threshold_db = loud\nunknown = 1"), Settings::default());

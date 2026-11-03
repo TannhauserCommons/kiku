@@ -37,6 +37,12 @@ pub trait Engine: Send + Sync {
     fn lost(&self) -> bool {
         false
     }
+
+    /// Changes the words to listen for (see [`ModelSpec::hotwords`]) from the next phrase on. Returns false
+    /// when that needs the model loaded again with them: turning hotwords on or off changes how it decodes.
+    fn set_hotwords(&self, _words: &[String]) -> bool {
+        true
+    }
 }
 
 /// One live audio source being transcribed.
@@ -173,6 +179,9 @@ pub struct ModelSpec {
     pub device: Device,
     /// The speech detector, for models that transcribe whole phrases.
     pub vad: Option<PathBuf>,
+    /// Words to listen for, e.g. names the model would otherwise mishear. NeMo transducers decode
+    /// with beam search when there are any; other models ignore them.
+    pub hotwords: Vec<String>,
 }
 
 /// Loads the model described by `spec`. GPU models run in a helper process (see [`crate::engine_host`]),
@@ -180,7 +189,7 @@ pub struct ModelSpec {
 ///
 /// ```no_run
 /// use kiku_core::engine::{load, Backend, Device, ModelSpec};
-/// let spec = ModelSpec { backend: Backend::MoonshineTinyStreaming, dir: "models/en/tiny-streaming-en".into(), device: Device::Cpu, vad: None };
+/// let spec = ModelSpec { backend: Backend::MoonshineTinyStreaming, dir: "models/en/tiny-streaming-en".into(), device: Device::Cpu, vad: None, hotwords: Vec::new() };
 /// let engine = load(&spec)?;
 /// let mut stream = engine.open_stream()?;
 /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())

@@ -64,6 +64,7 @@ impl Imported {
             wer_percent: None,
             licence: None,
             requires: if backend.needs_vad() { vec![VAD.into()] } else { Vec::new() },
+            hotwords: false,
             variants,
         })
     }

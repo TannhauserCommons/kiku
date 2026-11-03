@@ -2,11 +2,19 @@
 //!
 //! A speech detector cuts the audio into phrases, and each is shown once it ends. That trades a second or two of delay for accuracy and costs nothing in silence.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    hash::{DefaultHasher, Hash, Hasher},
+    path::Path,
+    sync::Mutex,
+};
 
-use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, VadModelConfig, VoiceActivityDetector};
+use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineStream, VadModelConfig, VoiceActivityDetector};
 
-use crate::engine::{Device, Engine, EngineStream, Line, ModelSpec, PhraseModel, Result, SAMPLE_RATE};
+use crate::{
+    engine::{Device, Engine, EngineStream, Line, ModelSpec, PhraseModel, Result, SAMPLE_RATE},
+    transcripts,
+};
 
 /// Inference threads on the CPU; the 600M model is too slow on one.
 const THREADS: i32 = 2;
@@ -18,10 +26,15 @@ const LEAD_IN_SAMPLES: i64 = SAMPLE_RATE as i64 / 2;
 /// Audio kept after where the detector says a phrase ends: it calls a fading last word silence,
 /// and the model needs a moment after the last word to finish it.
 const TRAIL_SAMPLES: i64 = SAMPLE_RATE as i64 / 2;
+/// How strongly beam search favours a hotword's tokens.
+const HOTWORDS_SCORE: f32 = 1.5;
 
 pub struct PhraseEngine {
     recognizer: OfflineRecognizer,
     vad: VadModelConfig,
+    kind: PhraseModel,
+    /// The words to listen for, as sherpa-onnx takes them per stream, while the recognizer decodes for them.
+    hotwords: Option<Mutex<String>>,
 }
 
 impl PhraseEngine {
@@ -58,18 +71,32 @@ impl PhraseEngine {
                 model.moonshine.cached_decoder = Some(file("cached_decode")?);
             }
         }
-        model.tokens = Some(tokens_file(&spec.dir)?);
+        let tokens = tokens_file(&spec.dir)?;
+        model.tokens = Some(tokens.clone());
         model.num_threads = THREADS;
         model.provider = Some(provider(spec.device).into());
+        let hotwords = (kind == PhraseModel::NemoTransducer && !spec.hotwords.is_empty()).then(|| hotwords_text(&spec.hotwords));
+        if hotwords.is_some() {
+            decode_for_hotwords(&mut config, Path::new(&tokens))?;
+        }
         let recognizer = OfflineRecognizer::create(&config).ok_or("the model failed to load")?;
-        Ok(Self { recognizer, vad: vad_config(spec.vad.as_deref().ok_or("no speech detector given")?)? })
+        let vad = vad_config(spec.vad.as_deref().ok_or("no speech detector given")?)?;
+        Ok(Self { recognizer, vad, kind, hotwords: hotwords.map(Mutex::new) })
+    }
+
+    /// A stream for one phrase, listening for the hotwords if there are any.
+    fn create_stream(&self) -> OfflineStream {
+        match &self.hotwords {
+            Some(hotwords) => self.recognizer.create_stream_with_hotwords(&hotwords.lock().unwrap()),
+            None => self.recognizer.create_stream(),
+        }
     }
 }
 
 impl Engine for PhraseEngine {
     fn open_stream(&self) -> Result<Box<dyn EngineStream + '_>> {
         Ok(Box::new(PhraseStream {
-            recognizer: &self.recognizer,
+            engine: self,
             vad: VoiceActivityDetector::create(&self.vad, MAX_PHRASE_SECONDS * 2.0).ok_or("speech detector failed to load")?,
             pending: Vec::new(),
             heard: History::default(),
@@ -77,11 +104,22 @@ impl Engine for PhraseEngine {
             line: 0,
         }))
     }
+
+    fn set_hotwords(&self, words: &[String]) -> bool {
+        match &self.hotwords {
+            Some(hotwords) if !words.is_empty() => {
+                *hotwords.lock().unwrap() = hotwords_text(words);
+                true
+            }
+            Some(_) => false,
+            None => words.is_empty() || self.kind != PhraseModel::NemoTransducer,
+        }
+    }
 }
 
 /// Phrases cut by the speech detector, each transcribed once complete.
 struct PhraseStream<'a> {
-    recognizer: &'a OfflineRecognizer,
+    engine: &'a PhraseEngine,
     vad: VoiceActivityDetector,
     /// Audio not yet a whole detector window.
     pending: Vec<f32>,
@@ -128,9 +166,9 @@ impl EngineStream for PhraseStream<'_> {
 
 impl PhraseStream<'_> {
     fn transcribe(&self, samples: &[f32]) -> String {
-        let stream = self.recognizer.create_stream();
+        let stream = self.engine.create_stream();
         stream.accept_waveform(SAMPLE_RATE as i32, samples);
-        self.recognizer.decode(&stream);
+        self.engine.recognizer.decode(&stream);
         stream.get_result().map(|r| r.text.trim().to_owned()).unwrap_or_default()
     }
 }
@@ -199,6 +237,41 @@ fn tokens_file(dir: &Path) -> Result<String> {
     found.map(|path| path.to_string_lossy().into_owned()).ok_or_else(|| format!("no tokens.txt in {}", dir.display()).into())
 }
 
+/// sherpa-onnx's per-stream hotwords: a phrase per `/`-separated line, its words split by spaces.
+/// Pieces it would read as a line break or a score (`:2.0`) are left out.
+fn hotwords_text(words: &[String]) -> String {
+    let phrases = words.iter().map(|word| word.replace('/', " ").split_whitespace().filter(|piece| !piece.starts_with(':')).collect::<Vec<_>>().join(" "));
+    phrases.filter(|phrase| !phrase.is_empty()).collect::<Vec<_>>().join("/")
+}
+
+/// Has the recognizer decode with modified beam search, which hotwords need. sherpa-onnx splits a
+/// hotword into the model's tokens with a SentencePiece vocabulary, which the downloads lack, so one
+/// is made from `tokens.txt` and kept in the temporary folder, named by its contents.
+fn decode_for_hotwords(config: &mut OfflineRecognizerConfig, tokens: &Path) -> Result<()> {
+    let vocab = bpe_vocab(&fs::read_to_string(tokens)?);
+    let mut hasher = DefaultHasher::new();
+    vocab.hash(&mut hasher);
+    let path = std::env::temp_dir().join(format!("kiku-{:016x}.vocab", hasher.finish()));
+    if !path.is_file() {
+        transcripts::replace(&path, &vocab)?;
+    }
+    config.decoding_method = Some("modified_beam_search".into());
+    config.hotwords_score = HOTWORDS_SCORE;
+    config.model_config.modeling_unit = Some("bpe".into());
+    config.model_config.bpe_vocab = Some(path.to_string_lossy().into_owned());
+    Ok(())
+}
+
+/// A SentencePiece vocabulary (`piece score` lines) from `tokens.txt` (`piece id` lines). A BPE
+/// tokenizer's ids follow its merges, scored about minus the id, so pieces are chosen as it would.
+fn bpe_vocab(tokens: &str) -> String {
+    let piece = |line: &str| match line.split_whitespace().collect::<Vec<_>>()[..] {
+        [piece, id] => Some(format!("{piece} -{}\n", id.parse::<u32>().ok()?)),
+        _ => None,
+    };
+    tokens.lines().filter_map(piece).collect()
+}
+
 /// The speech detector settings sherpa-onnx's own Parakeet examples use, with a longer phrase limit,
 /// a shorter shortest one, and phrases cut only at longer pauses so each has more context.
 fn vad_config(model: &Path) -> Result<VadModelConfig> {
@@ -229,5 +302,16 @@ mod tests {
         for (name, part) in [("encoder.weights", "encoder"), ("uncached_decode.onnx", "cached_decode"), ("encoder.onnx", "encode"), ("silero_vad.onnx", "model")] {
             assert!(!is_part(name, part), "{name}");
         }
+    }
+
+    #[test]
+    fn hotwords_become_sherpa_lines() {
+        let words = ["Kiku", " New  York ", "AC/DC", "x :2.0", "", ":3"].map(String::from);
+        assert_eq!(hotwords_text(&words), "Kiku/New York/AC DC/x");
+    }
+
+    #[test]
+    fn tokens_become_a_scored_vocabulary() {
+        assert_eq!(bpe_vocab("<unk> 0\n▁t 1\nbroken\nx y\n<blk> 1024\n"), "<unk> -0\n▁t -1\n<blk> -1024\n");
     }
 }

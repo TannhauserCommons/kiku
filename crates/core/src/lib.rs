@@ -20,3 +20,4 @@ pub mod subtitles;
 pub mod theme;
 pub mod transcripts;
 pub mod update;
+pub mod words;

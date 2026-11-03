@@ -9,7 +9,7 @@ const CHUNK: usize = SAMPLE_RATE as usize / 10;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let spec = ModelSpec { backend: Backend::MoonshineTinyStreaming, dir: args[1].clone().into(), device: Device::Cpu, vad: None };
+    let spec = ModelSpec { backend: Backend::MoonshineTinyStreaming, dir: args[1].clone().into(), device: Device::Cpu, vad: None, hotwords: Vec::new() };
     let (a, b) = (read_wav(&args[2]), read_wav(&args[3]));
 
     let shared = load(&spec).unwrap();

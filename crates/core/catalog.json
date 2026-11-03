@@ -525,6 +525,7 @@
       "name": "Parakeet Unified",
       "family": "parakeet",
       "backend": "nemo-transducer",
+      "hotwords": true,
       "languages": [
         "en"
       ],

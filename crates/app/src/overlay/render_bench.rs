@@ -25,7 +25,7 @@ use super::{
     finder::{Found, TextBox, Who},
     render::{Frame, Icon, Meter, Panel, Renderer, Speaker, SubtitleLine, SubtitleScene, Surface},
     usage::Usage,
-    view::{Action, BlockPrompt, Dropdown, ImportStatus, LineRef, Screen, ScrollArea, SetupStep, Tab, Target, View},
+    view::{Action, BlockPrompt, Dropdown, ImportStatus, LineRef, Screen, Scroll, ScrollArea, SetupStep, Tab, Target, View},
 };
 use kiku_core::{
     captions::Captions,
@@ -40,6 +40,7 @@ use kiku_core::{
     subtitles::SubtitleSettings,
     theme::{Theme, Themes},
     update::Release,
+    words::{WordSettings, Words},
 };
 
 const WORDS: [&str; 16] =
@@ -112,6 +113,9 @@ fn hidden_window() -> HWND {
 static SUBTITLES: std::sync::LazyLock<SubtitleSettings> = std::sync::LazyLock::new(SubtitleSettings::default);
 static HARDWARE: std::sync::LazyLock<Hardware> = std::sync::LazyLock::new(Hardware::default);
 static DOWNLOADS: std::sync::LazyLock<Downloads> = std::sync::LazyLock::new(|| Downloads::start(|| {}));
+static WORD_RULES: std::sync::LazyLock<Words> = std::sync::LazyLock::new(|| Words::parse(SNAPSHOT_WORDS));
+/// A word rules file with an entry of each kind, sections and a line it skips.
+const SNAPSHOT_WORDS: &str = "# mine\nkicku => Kiku\num =>\n@ Tannhauser\n! capitalise\nnot a rule\n[Discord]\ngg => good game\n! no-trailing-punctuation\n";
 
 fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, width: f32) -> Panel<'a> {
     let choice = Choice { model: catalog::by_id_or_default(catalog::DEFAULT_ID), device: Device::Cpu };
@@ -135,7 +139,12 @@ fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, wid
         blocked: &[],
         block_answer: BlockAnswer::Ask,
         themes: Themes::default(),
+        dictation_only: false,
+        window_opacity: 100,
+        text_opacity: 100,
         subtitles: &SUBTITLES,
+        words: &WORD_RULES,
+        word_settings: WordSettings::default(),
         settings_open: false,
         usage: None,
         meters: [meter(Input::Mic), meter(Input::Computer)],
@@ -371,7 +380,7 @@ fn settings_drawing_only_what_changed_matches_drawing_everything() {
     let (captions, keybinds) = (Captions::default(), Keybinds::default());
     for dpi in [96.0, 144.0] {
         let (mut view, mut partly, mut surface, mut themes) = (View::new(), Renderer::new().unwrap(), Surface::default(), Themes::default());
-        for step in 0..9 {
+        for step in 0..11 {
             match step {
                 1 => view.hovered = Some(Action::ShowTab(Tab::Listening)),
                 2 => view.tab = Tab::Listening,
@@ -381,6 +390,8 @@ fn settings_drawing_only_what_changed_matches_drawing_everything() {
                 5 => (view.tab, view.open_dropdown) = (Tab::Shortcuts, None),
                 6 => view.tab = Tab::General,
                 8 => (view.tab, themes) = (Tab::Appearance, custom_themes()),
+                9 => view.tab = Tab::Words,
+                10 => (view.typing_try, view.hovered) = (true, Some(Action::RemoveWordEntry(1))),
                 _ => {}
             }
             let panel = settings_window(Panel { dpi, themes, ..panel(&captions, &view, &keybinds, 560.0) });
@@ -456,6 +467,12 @@ fn snapshots() {
     let (_, regions) = renderer.render(&mut Surface::default(), &panel(&captions, &tip, &keybinds, 560.0)).unwrap();
     let button = regions.rect_of(Target::Click(Action::ShowSaved)).unwrap();
     (tip.hovered, tip.tip, tip.pointer) = (Some(Action::ShowSaved), true, (button.left + 4.0, button.top + 4.0));
+    // A see-through background under solid text.
+    for theme in [Theme::Night, Theme::Day] {
+        let (mut surface, view) = (Surface::default(), View::new());
+        let shown = Panel { usage, themes: Themes::from(theme), height: 420.0, window_opacity: 30, ..panel(&captions, &view, &keybinds, 560.0) };
+        write_png(&folder.join(format!("panel-see-through-{}.png", name(theme))), renderer.render(&mut surface, &shown).unwrap().0);
+    }
     let mut save_panel = |name: &str, view: &View, themes: Themes, height: f32| {
         let mut surface = Surface::default();
         let (frame, _) = renderer.render(&mut surface, &Panel { usage, themes, height, ..panel(&captions, view, &keybinds, 560.0) }).unwrap();
@@ -526,12 +543,28 @@ fn snapshots() {
             ("general", Tab::General, None),
             ("listening", Tab::Listening, None),
             ("apps", Tab::Apps, None),
+            ("words", Tab::Words, None),
             ("appearance-palette", Tab::Appearance, Some(Dropdown::Colour(super::view::Paint::Background))),
             ("shortcuts", Tab::Shortcuts, None),
         ] {
             save_settings(&format!("{tab_name}-{}", name(theme)), tab, dropdown, Themes::from(theme));
         }
     }
+    // The Words tab trying a line, typed in, and with an empty file.
+    let mut trying = View::new();
+    (trying.tab, trying.typing_try) = (Tab::Words, true);
+    trying.try_words.set("um, gg kicku.");
+    for theme in [Theme::Night, Theme::Day] {
+        let themes = Themes::from(theme);
+        save_settings_window(&mut renderer, &folder.join(format!("settings-words-try-{}.png", name(theme))), Panel { themes, ..panel(&captions, &trying, &keybinds, 560.0) });
+    }
+    let mut entries = View::new();
+    entries.tab = Tab::Words;
+    entries.scrolls.insert(ScrollArea::Settings, Scroll::at(f32::MAX));
+    save_settings_window(&mut renderer, &folder.join("settings-words-entries-night.png"), panel(&captions, &entries, &keybinds, 560.0));
+    let (empty, mut words_tab) = (Words::default(), View::new());
+    words_tab.tab = Tab::Words;
+    save_settings_window(&mut renderer, &folder.join("settings-words-empty-night.png"), Panel { words: &empty, ..panel(&captions, &words_tab, &keybinds, 560.0) });
     // The font list just opened on an installed font from the middle of the list, then searched.
     let mut fonts = View::new();
     (fonts.tab, fonts.fonts) = (Tab::Appearance, renderer.font_families().unwrap());
@@ -694,6 +727,7 @@ fn snapshot_captions() -> Captions {
     }
     captions.update_app(discord, 1, &[said(3, "I think it's on the old", false)], now);
     captions.update_app(edge, 1, &[said(0, "In this video we'll look at how glass was made in the eighteenth century.", true)], now);
+    captions.pin("Discord", true);
     for (id, text) in ["Yeah, loud and clear.", "I can do the signing after lunch."].iter().enumerate() {
         captions.update_mic(2, &[said(id as u64, text, true)], now);
     }

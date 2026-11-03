@@ -61,6 +61,33 @@ pub struct Palette {
     pub swatch_rim: D2D1_COLOR_F,
 }
 
+impl Palette {
+    /// This palette with the window's background at `window` opacity and the text and icons at `text`,
+    /// from 0 to 1; surfaces drawn over the background keep theirs.
+    pub fn see_through(&self, window: f32, text: f32) -> Palette {
+        let glass = |glass: Glass| Glass {
+            top: fade(glass.top, window),
+            bottom: fade(glass.bottom, window),
+            rim_top: fade(glass.rim_top, window),
+            rim_bottom: fade(glass.rim_bottom, window),
+        };
+        Palette {
+            window: glass(self.window),
+            title_band: glass(self.title_band),
+            edge: fade(self.edge, window),
+            text: fade(self.text, text),
+            text_dim: fade(self.text_dim, text),
+            text_faint: fade(self.text_faint, text),
+            accent: fade(self.accent, text),
+            ..self.clone()
+        }
+    }
+}
+
+const fn fade(colour: D2D1_COLOR_F, by: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { a: colour.a * by, ..colour }
+}
+
 /// The palette of a preset `theme`; Custom's is [`custom`]'s.
 pub fn preset(theme: Theme) -> &'static Palette {
     &PRESETS[preset_index(theme)]

@@ -22,13 +22,17 @@ use windows::{
                 VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_Z,
             },
             WindowsAndMessaging::{
-                CallNextHookEx, GetClassNameW, GetForegroundWindow, GetMessageW, PeekMessageW, PostMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
+                CallNextHookEx, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, PeekMessageW, PostMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
                 KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_UP, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_APP, WM_QUIT,
             },
         },
     },
 };
 
+use crate::{
+    processes::{root_of, snapshot},
+    sessions::display_name,
+};
 use kiku_core::keybinds::{Command, Key, Keybinds};
 
 /// Posted to the overlay with a [`KeyEvent`] packed by [`KeyEvent::to_message`].
@@ -292,6 +296,13 @@ fn erase_keys(what: Erase) -> Vec<INPUT> {
             (0..chars).flat_map(|_| [key_input(VK_BACK, false), key_input(VK_BACK, true)]).collect()
         }
     }
+}
+
+/// The app being typed into, named as its captions would be, for its word rules.
+pub fn focused_app() -> Option<String> {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid)) };
+    root_of(pid, &snapshot()).map(|root| display_name(&root.exe))
 }
 
 fn terminal_in_front() -> bool {

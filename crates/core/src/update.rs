@@ -100,6 +100,12 @@ pub fn watch(allowed: impl Fn() -> bool, offer: impl Fn(Release)) {
     }
 }
 
+/// Checks at once, as the check-now button asks; it counts as the day's check.
+pub fn check_now() -> Result<Option<Release>, String> {
+    mark_checked();
+    check()
+}
+
 /// Fetches the manifest and returns the version it offers if it is newer than this one.
 pub fn check() -> Result<Option<Release>, String> {
     let key = public_key().ok_or("this build has no update key")?;

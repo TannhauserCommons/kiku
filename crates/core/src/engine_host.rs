@@ -37,6 +37,7 @@ const PUSH: u8 = 3;
 const POLL: u8 = 4;
 const FLUSH: u8 = 5;
 const CLOSE: u8 = 6;
+const HOTWORDS: u8 = 7;
 // Replies.
 const OK: u8 = 0;
 const LINES: u8 = 1;
@@ -117,6 +118,11 @@ impl Engine for HostedEngine {
     fn lost(&self) -> bool {
         matches!(self.child.lock().unwrap().try_wait(), Ok(Some(_)))
     }
+
+    fn set_hotwords(&self, words: &[String]) -> bool {
+        // A helper that can't answer is lost; loading again starts a new one.
+        self.request(HOTWORDS, words.join("\n").as_bytes()).is_ok_and(|reply| reply == [1])
+    }
 }
 
 impl Drop for HostedEngine {
@@ -192,6 +198,7 @@ pub fn serve() {
                 streams.remove(&id);
                 None
             }
+            (HOTWORDS, Some(engine)) => Some(Ok(vec![engine.set_hotwords(&payload_lines(&payload)) as u8])),
             _ => Some(Err("no model loaded".into())),
         };
         let written = match reply {
@@ -275,7 +282,7 @@ pub fn serve_probe(args: &[String]) -> std::process::ExitCode {
     let heard = (|| -> Result<String> {
         let backend = args.first().and_then(|name| Backend::from_name(name)).ok_or("unknown backend")?;
         let dir = args.get(1).ok_or("no model folder")?.into();
-        let spec = ModelSpec { backend, dir, device: Device::Cpu, vad: args.get(2).map(Into::into) };
+        let spec = ModelSpec { backend, dir, device: Device::Cpu, vad: args.get(2).map(Into::into), hotwords: Vec::new() };
         hear(load_here(&spec)?.as_ref(), &probe_clip())
     })();
     match heard {
@@ -331,20 +338,27 @@ fn read_frame(reader: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
     Ok((header[0], payload))
 }
 
-/// `backend`, `device`, the speech detector (or nothing) and the folder, a line each.
+/// `backend`, `device`, the speech detector (or nothing), the folder and the hotwords, a line each.
 fn encode_spec(spec: &ModelSpec) -> Vec<u8> {
     let device = if spec.device == Device::Cuda { "cuda" } else { "cpu" };
     let vad = spec.vad.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
-    format!("{}\n{device}\n{vad}\n{}", spec.backend.name(), spec.dir.display()).into_bytes()
+    let hotwords: String = spec.hotwords.iter().map(|word| format!("\n{word}")).collect();
+    format!("{}\n{device}\n{vad}\n{}{hotwords}", spec.backend.name(), spec.dir.display()).into_bytes()
 }
 
 fn decode_spec(payload: &[u8]) -> Result<ModelSpec> {
-    let text = String::from_utf8_lossy(payload);
-    let mut parts = text.splitn(4, '\n');
-    let backend = parts.next().and_then(Backend::from_name).ok_or("unknown backend")?;
-    let device = if parts.next() == Some("cuda") { Device::Cuda } else { Device::Cpu };
+    let mut parts = payload_lines(payload).into_iter();
+    let backend = parts.next().as_deref().and_then(Backend::from_name).ok_or("unknown backend")?;
+    let device = if parts.next().as_deref() == Some("cuda") { Device::Cuda } else { Device::Cpu };
     let vad = parts.next().filter(|path| !path.is_empty()).map(Into::into);
-    Ok(ModelSpec { backend, device, vad, dir: parts.next().ok_or("no model folder")?.into() })
+    let dir = parts.next().ok_or("no model folder")?.into();
+    Ok(ModelSpec { backend, device, vad, dir, hotwords: parts.collect() })
+}
+
+/// A payload's lines; a hotword is one line.
+fn payload_lines(payload: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(payload);
+    if text.is_empty() { Vec::new() } else { text.split('\n').map(str::to_owned).collect() }
 }
 
 /// A count, then each line's id, finished flag, text length and text.
@@ -386,9 +400,12 @@ mod tests {
     fn lines_and_specs_survive_the_pipe() {
         let lines = vec![Line { id: 7, text: "Bonjour, ça va ?".into(), complete: true }, Line { id: 8, text: String::new(), complete: false }];
         assert_eq!(decode_lines(&encode_lines(&lines)).unwrap(), lines);
-        let spec = ModelSpec { backend: Backend::Phrases(crate::engine::PhraseModel::NemoTransducer), dir: r"C:\models\sherpa\x-fp16".into(), device: Device::Cuda, vad: Some(r"C:\vad.onnx".into()) };
-        let read = decode_spec(&encode_spec(&spec)).unwrap();
-        assert_eq!((read.backend, read.device, read.dir, read.vad), (spec.backend, spec.device, spec.dir, spec.vad));
+        let mut spec = ModelSpec { backend: Backend::Phrases(crate::engine::PhraseModel::NemoTransducer), dir: r"C:\models\sherpa\x-fp16".into(), device: Device::Cuda, vad: Some(r"C:\vad.onnx".into()), hotwords: Vec::new() };
+        for hotwords in [vec![], vec!["Kiku".into(), "Tannhauser Commons".into()]] {
+            spec.hotwords = hotwords;
+            let read = decode_spec(&encode_spec(&spec)).unwrap();
+            assert_eq!((read.backend, read.device, &read.dir, &read.vad, &read.hotwords), (spec.backend, spec.device, &spec.dir, &spec.vad, &spec.hotwords));
+        }
         let mut framed = Vec::new();
         write_frame(&mut framed, POLL, b"abc").unwrap();
         assert_eq!(read_frame(&mut framed.as_slice()).unwrap(), (POLL, b"abc".to_vec()));

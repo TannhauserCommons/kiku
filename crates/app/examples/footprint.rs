@@ -4,6 +4,7 @@
 //!
 //! Usage:
 //!   footprint <model id> <cpu|gpu> <set folder> [realtime utterances, default 10] [--json results.jsonl]
+//!             [--hotwords "Kiku,Tannhauser Commons"]
 //!   footprint --table results.jsonl        prints a Markdown table of saved runs
 //! The set folder holds `<id>.wav` (16 kHz mono 16-bit) and `<id>.txt` (reference text) pairs, e.g. 200
 //! LibriSpeech test-clean utterances.
@@ -17,7 +18,7 @@ use std::{
 
 use kiku::overlay::usage::UsageMeter;
 use kiku_core::{
-    engine::{load, Device, EngineStream, POLL_INTERVAL, SAMPLE_RATE},
+    engine::{load, Device, EngineStream, ModelSpec, POLL_INTERVAL, SAMPLE_RATE},
     catalog,
 };
 use serde_json::{json, Value};
@@ -48,13 +49,15 @@ fn main() {
     let variant = if precision.is_empty() { model.variant(device) } else { model.variant_with(device, precision).expect("the model has that build") };
     let set = load_set(Path::new(&args[2]));
     let realtime_count: usize = args.get(3).filter(|a| !a.starts_with("--")).map_or(10, |n| n.parse().unwrap());
-    let json_out = args.iter().position(|a| a == "--json").map(|i| PathBuf::from(&args[i + 1]));
+    let option = |name: &str| args.iter().position(|a| a == name).map(|i| args[i + 1].clone());
+    let json_out = option("--json").map(PathBuf::from);
+    let hotwords: Vec<String> = option("--hotwords").map_or_else(Vec::new, |words| words.split(',').map(|w| w.trim().to_owned()).collect());
 
     let start = memory(None);
     let mut usage = UsageMeter::new();
     let baseline = memory(None);
     let load_start = Instant::now();
-    let engine = load(&model.spec(variant)).expect("model loads");
+    let engine = load(&ModelSpec { hotwords: hotwords.clone(), ..model.spec(variant) }).expect("model loads");
     let load_s = load_start.elapsed().as_secs_f64();
     let mut stream = engine.open_stream().unwrap();
     let helper = engine.helper_process();
@@ -93,6 +96,7 @@ fn main() {
         "model": model.id,
         "device": if device == Device::Cuda { "gpu" } else { "cpu" },
         "precision": variant.precision,
+        "hotwords": hotwords.len(),
         "utterances": set.len(),
         "audio_minutes": round(audio_s / 60.0, 1),
         "wer_percent": round(100.0 * errors as f64 / reference_words.max(1) as f64, 2),

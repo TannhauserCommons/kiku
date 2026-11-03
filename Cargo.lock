@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "kiku"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "kiku-core",
  "serde_json",
@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "kiku-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dirs",

@@ -23,6 +23,7 @@ use kiku_core::{
     settings::BlockAnswer,
     theme::{Colours, Theme},
     update::Release,
+    words::Scope,
 };
 
 /// What the panel is showing.
@@ -41,6 +42,7 @@ pub enum Tab {
     General,
     Listening,
     Apps,
+    Words,
     Appearance,
     Shortcuts,
 }
@@ -78,13 +80,14 @@ impl SetupStep {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::General, Tab::Listening, Tab::Apps, Tab::Appearance, Tab::Shortcuts];
+    pub const ALL: [Tab; 6] = [Tab::General, Tab::Listening, Tab::Apps, Tab::Words, Tab::Appearance, Tab::Shortcuts];
 
     pub fn name(self) -> &'static str {
         match self {
             Tab::General => "General",
             Tab::Listening => "Listening",
             Tab::Apps => "Apps",
+            Tab::Words => "Words",
             Tab::Appearance => "Appearance",
             Tab::Shortcuts => "Shortcuts",
         }
@@ -114,7 +117,24 @@ pub enum Action {
     DontAskToBlock,
     /// Unblocks an app, by its place in the blocked list.
     Unblock(usize),
+    /// Pins or unpins the app at a section index: a pinned app gets every line you say.
+    Pin(usize),
+    /// Unpins an app, by its place in the pinned list.
+    Unpin(usize),
     SetBlockAnswer(BlockAnswer),
+    /// Where word rules (false) or transforms (true) apply.
+    WordScope { transforms: bool, scope: Scope },
+    /// Whether the model listens for the file's `@` words.
+    WordHotwords(bool),
+    /// Removes an entry from the word rules file, by its place in the file's entries.
+    RemoveWordEntry(usize),
+    /// Opens the word rules file, made first if missing.
+    OpenWords,
+    /// Copies how to edit the word rules file, for an assistant.
+    CopyWordInstructions,
+    /// Keys go to the Words tab's Try box until it is left; and emptying it.
+    TypeTry,
+    ClearTry,
     CopyLine(LineRef),
     /// The ✨ buttons: open a Claude chat about a line, an app, everything, or the selection.
     ShareLine(LineRef),
@@ -178,6 +198,10 @@ pub enum Action {
     UpdateLater,
     /// Check for updates once a day (true) or never.
     CheckUpdates(bool),
+    /// Checks for a newer version now.
+    CheckUpdatesNow,
+    /// Only dictation (true), or captions and dictation.
+    DictationOnly(bool),
     ShowLive,
     OpenSaved(usize),
     /// Deletes a past session, by its place in the list, when pressed a second time.
@@ -297,13 +321,25 @@ pub enum Target {
     Slider(Slider),
 }
 
+/// A check for updates asked for by hand: running, or what it found when nothing newer is out.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpdateCheck {
+    Checking,
+    Latest,
+    Failed(String),
+}
+
 /// What a slider sets.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Slider {
     /// An input's sensitivity threshold.
     Threshold(Input),
     /// Captions mode's pill opacity.
-    Opacity,
+    PillOpacity,
+    /// The opacity of the panel's background.
+    WindowOpacity,
+    /// The opacity of the panel's text.
+    TextOpacity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -499,6 +535,8 @@ pub struct View {
     pub quit_prompt: bool,
     /// A newer version, offered over the panel.
     pub update: Option<Release>,
+    /// Where a check asked for by hand is.
+    pub update_check: Option<UpdateCheck>,
     /// Files waiting for a second press of Delete.
     pub confirm_delete: Option<Download>,
     /// The settings window is walking through setup, at this step.
@@ -518,6 +556,9 @@ pub struct View {
     /// What is typed in the font list's search field, and the fonts matching it as indices into `fonts`.
     pub font_search: Field,
     pub font_matches: Vec<usize>,
+    /// The Words tab's Try box, and whether keys go to it.
+    pub try_words: Field,
+    pub typing_try: bool,
     /// The shortcut waiting for keys to be pressed, if any.
     pub rebinding: Option<Rebind>,
     pub scrolls: HashMap<ScrollArea, Scroll>,
@@ -542,6 +583,7 @@ impl View {
             blocking: None,
             quit_prompt: false,
             update: None,
+            update_check: None,
             confirm_delete: None,
             setup: None,
             drag_hover: false,
@@ -554,6 +596,8 @@ impl View {
             fonts: Vec::new(),
             font_search: Field::default(),
             font_matches: Vec::new(),
+            try_words: Field::default(),
+            typing_try: false,
             scrolls: HashMap::new(),
             regions: Regions::default(),
         }
