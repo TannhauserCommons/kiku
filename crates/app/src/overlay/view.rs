@@ -133,9 +133,17 @@ pub enum Action {
     OpenWords,
     /// Copies how to edit the word rules file, for an assistant.
     CopyWordInstructions,
-    /// Keys go to the Words tab's Try box until it is left; and emptying it.
-    TypeTry,
-    ClearTry,
+    /// Keys go to one of the Words tab's boxes until it is left; and emptying it.
+    TypeWord(WordBox),
+    ClearWord(WordBox),
+    /// Opens the Words tab's correction card with a line's text, or the selection, as what was heard.
+    CorrectLine(LineRef),
+    CorrectSelection,
+    /// Whether the correction's rule applies only in the app its line came from.
+    CorrectOnlyApp(bool),
+    /// Adds the correction as a rule (heard => should be), or its right word as one to listen for.
+    AddRule,
+    AddHotword,
     CopyLine(LineRef),
     /// Scrolls a section back down to its newest line, which it follows again.
     ScrollToLatest(usize),
@@ -488,6 +496,25 @@ impl Scroll {
     }
 }
 
+/// A text box of the Words tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WordBox {
+    Try,
+    Heard,
+    Fix,
+}
+
+/// A misheard word being corrected: what was heard, what it should be, and the app its line came from.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Correction {
+    pub heard: Field,
+    pub fix: Field,
+    /// As word rules name it: "You" for your lines.
+    pub app: Option<String>,
+    /// The rule applies only in `app`.
+    pub only_app: bool,
+}
+
 /// The question asked before blocking an app.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlockPrompt {
@@ -560,9 +587,10 @@ pub struct View {
     /// What is typed in the font list's search field, and the fonts matching it as indices into `fonts`.
     pub font_search: Field,
     pub font_matches: Vec<usize>,
-    /// The Words tab's Try box, and whether keys go to it.
+    /// The Words tab's Try box, its correction, and which of their boxes keys go to.
     pub try_words: Field,
-    pub typing_try: bool,
+    pub correction: Correction,
+    pub typing_word: Option<WordBox>,
     /// The shortcut waiting for keys to be pressed, if any.
     pub rebinding: Option<Rebind>,
     pub scrolls: HashMap<ScrollArea, Scroll>,
@@ -601,7 +629,8 @@ impl View {
             font_search: Field::default(),
             font_matches: Vec::new(),
             try_words: Field::default(),
-            typing_try: false,
+            correction: Correction::default(),
+            typing_word: None,
             scrolls: HashMap::new(),
             regions: Regions::default(),
         }
@@ -609,6 +638,22 @@ impl View {
 
     pub fn scroll(&self, area: ScrollArea) -> Scroll {
         self.scrolls.get(&area).copied().unwrap_or_else(|| first_scroll(area))
+    }
+
+    pub fn word_box(&self, which: WordBox) -> &Field {
+        match which {
+            WordBox::Try => &self.try_words,
+            WordBox::Heard => &self.correction.heard,
+            WordBox::Fix => &self.correction.fix,
+        }
+    }
+
+    pub fn word_box_mut(&mut self, which: WordBox) -> &mut Field {
+        match which {
+            WordBox::Try => &mut self.try_words,
+            WordBox::Heard => &mut self.correction.heard,
+            WordBox::Fix => &mut self.correction.fix,
+        }
     }
 
     /// Scrolls the innermost scroll area at a point by `delta` DIPs (positive = down); returns whether it moved.

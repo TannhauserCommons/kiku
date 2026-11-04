@@ -25,7 +25,7 @@ use super::{
     finder::{Found, TextBox, Who},
     render::{Frame, Icon, Meter, Panel, Renderer, Speaker, SubtitleLine, SubtitleScene, Surface},
     usage::Usage,
-    view::{Action, BlockPrompt, Dropdown, ImportStatus, LineRef, Screen, Scroll, ScrollArea, SetupStep, Tab, Target, View},
+    view::{Action, BlockPrompt, Correction, Dropdown, ImportStatus, LineRef, Screen, Scroll, ScrollArea, SetupStep, Tab, Target, View, WordBox},
 };
 use kiku_core::{
     captions::Captions,
@@ -393,7 +393,7 @@ fn settings_drawing_only_what_changed_matches_drawing_everything() {
                 6 => view.tab = Tab::General,
                 8 => (view.tab, themes) = (Tab::Appearance, custom_themes()),
                 9 => view.tab = Tab::Words,
-                10 => (view.typing_try, view.hovered) = (true, Some(Action::RemoveWordEntry(1))),
+                10 => (view.typing_word, view.hovered) = (Some(WordBox::Try), Some(Action::RemoveWordEntry(1))),
                 _ => {}
             }
             let panel = settings_window(Panel { dpi, themes, ..panel(&captions, &view, &keybinds, 560.0) });
@@ -557,11 +557,19 @@ fn snapshots() {
     }
     // The Words tab trying a line, typed in, and with an empty file.
     let mut trying = View::new();
-    (trying.tab, trying.typing_try) = (Tab::Words, true);
+    (trying.tab, trying.typing_word) = (Tab::Words, Some(WordBox::Try));
     trying.try_words.set("um, gg kicku.");
+    trying.scrolls.insert(ScrollArea::Settings, Scroll::at(280.0));
+    // A line's misheard word being corrected, opened from Discord.
+    let mut correcting = View::new();
+    (correcting.tab, correcting.typing_word) = (Tab::Words, Some(WordBox::Fix));
+    correcting.correction = Correction { app: Some("Discord".into()), only_app: true, ..Correction::default() };
+    correcting.correction.heard.set("dictionary");
+    correcting.correction.fix.set("fictionary");
     for theme in [Theme::Night, Theme::Day] {
         let themes = Themes::from(theme);
         save_settings_window(&mut renderer, &folder.join(format!("settings-words-try-{}.png", name(theme))), Panel { themes, ..panel(&captions, &trying, &keybinds, 560.0) });
+        save_settings_window(&mut renderer, &folder.join(format!("settings-words-correct-{}.png", name(theme))), Panel { themes, ..panel(&captions, &correcting, &keybinds, 560.0) });
     }
     let mut entries = View::new();
     entries.tab = Tab::Words;

@@ -1,19 +1,22 @@
-//! The Words tab's drawing: where word rules and transforms apply, the Try box and what it would become,
-//! the file with its buttons, and the file's entries by section, each removable.
+//! The Words tab's drawing: correcting a misheard word, where word rules and transforms apply, the Try box
+//! and what it would become, the file with its buttons, and the file's entries by section, each removable.
 
 use windows::{core::Result, Win32::Graphics::Direct2D::Common::D2D_RECT_F};
 
-use kiku_core::words::{Kind, Scope};
+use kiku_core::{
+    captions::YOU,
+    words::{Kind, Scope},
+};
 
 use super::{
     design::{CONTROL, SETTING_ROW},
     height_of,
     history::BoxRole,
-    metrics, rect, Emphasis, Panel, Renderer, Tone, BUTTON, SECTION_GAP,
+    metrics, rect, width, Emphasis, Panel, Renderer, Tone, BUTTON, SECTION_GAP,
 };
 use crate::overlay::{
     render::Icon,
-    view::{Action, Regions},
+    view::{Action, Regions, WordBox},
 };
 
 /// Lines the file couldn't read that the tab names; the log has every one.
@@ -23,8 +26,9 @@ impl Renderer {
     /// Returns the y below the last row.
     pub(super) fn draw_word_settings(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
         let settings = panel.word_settings;
+        let y = self.draw_correction(panel, content, y, regions)?;
         // The card the hotword, suggestion and correction settings join.
-        let mut y = self.draw_heading("Where they apply", content, y)?;
+        let mut y = self.draw_heading("Where they apply", content, y + SECTION_GAP)?;
         y = self.draw_card(content, y, |renderer, inner, mut y| {
             for (label, transforms, chosen) in [("Word rules apply to", false, settings.rules), ("Transforms apply to", true, settings.transforms)] {
                 let choices = Scope::ALL.map(|scope| (scope.name(), scope == chosen, Action::WordScope { transforms, scope }));
@@ -38,7 +42,7 @@ impl Renderer {
 
         y = self.draw_heading("Try", content, y + SECTION_GAP)?;
         let view = panel.view;
-        let role = BoxRole { one_line: true, typing: view.typing_try, click: Some(Action::TypeTry), clear: Some(Action::ClearTry) };
+        let role = BoxRole { icon: Some(Icon::Search), ..word_box_role(WordBox::Try, panel) };
         let area = rect(content.left, y, content.right, y + CONTROL);
         y = self.draw_text_box(&view.try_words, "Type what was said, to see what Kiku makes of it", area, role, panel, regions)?.bottom;
         if !view.try_words.text.trim().is_empty() {
@@ -63,6 +67,41 @@ impl Renderer {
                     ! lowercase, ! no-trailing-punctuation and ! capitalise change the whole line, and [Discord] starts what applies only to Discord ([You] is your mic).";
         y = self.draw_hint(hint, content, y)?;
         self.draw_word_entries(panel, content, y + SECTION_GAP, regions)
+    }
+
+    /// What was heard and what it should be, side by side, then making it a rule (everywhere, or only where
+    /// its line came from) or a hotword, each added on its own and explained. Returns the y below.
+    fn draw_correction(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
+        const GAP: f32 = 8.0;
+        let (view, correction) = (panel.view, &panel.view.correction);
+        let mut y = self.draw_heading("Correct a word", content, y)?;
+        let half = (width(&content) - GAP) / 2.0;
+        let boxes = [(WordBox::Heard, "Heard", "e.g. dictionary", content.left), (WordBox::Fix, "Should be", "e.g. fictionary", content.left + half + GAP)];
+        let mut bottom = y;
+        for (which, label, placeholder, left) in boxes {
+            let label = self.single_line(&self.fonts.small, label, half)?;
+            self.draw_layout(&label, left + 2.0, y, self.palette.text_dim)?;
+            let top = y + height_of(&label)? + 4.0;
+            let area = rect(left, top, left + half, top + CONTROL);
+            bottom = self.draw_text_box(view.word_box(which), placeholder, area, word_box_role(which, panel), panel, regions)?.bottom;
+        }
+        y = bottom + 12.0;
+        let (heard, fix) = (quoted(&correction.heard.text, "what was heard"), quoted(&correction.fix.text, "what it should be"));
+        let (rule, hotword) = (format!("{heard} becomes {fix} once the model writes it"), format!("The model listens out for {fix}"));
+        y = self.draw_card(content, y, |renderer, inner, mut y| {
+            y = renderer.draw_two_line_row("Make it a rule", &rule, &[("Add rule", None, Action::AddRule, Emphasis::Secondary)], inner, y, panel, regions)?;
+            if let Some(app) = &correction.app {
+                let only = if app == YOU { "Only your lines".to_owned() } else { format!("Only in {app}") };
+                let choices = [("Everywhere", !correction.only_app, Action::CorrectOnlyApp(false)), (only.as_str(), correction.only_app, Action::CorrectOnlyApp(true))];
+                y = renderer.draw_choice_row("The rule applies", &choices, inner, y, panel, regions)?;
+            }
+            renderer.draw_two_line_row("Make it a hotword", &hotword, &[("Add hotword", None, Action::AddHotword, Emphasis::Secondary)], inner, y, panel, regions)
+        })?;
+        let hint = "A rule fixes the text: whenever the model writes the words heard, Kiku swaps in what they should be, before the line \
+                    shows, is saved or is typed. It works with every model, for that exact mistake. A hotword fixes the hearing: the model \
+                    listens out for the word while it works out what was said, so it can get it right the first time, in any sentence and \
+                    every app. Only Parakeet Unified listens for hotwords. Add either one, or both.";
+        self.draw_hint(hint, content, y)
     }
 
     /// The file's entries under a heading per section, everywhere's first, then the lines it skipped. Returns the y below.
@@ -117,5 +156,18 @@ impl Renderer {
         let text = self.single_line(&self.fonts.body, &text, what_left - content.left - 12.0)?;
         self.draw_layout(&text, content.left, middle - height_of(&text)? / 2.0, self.palette.text)?;
         Ok(y + SETTING_ROW)
+    }
+}
+
+/// One of the tab's boxes: keys go to it once clicked, and it has a clear button.
+fn word_box_role(which: WordBox, panel: &Panel) -> BoxRole {
+    BoxRole { one_line: true, icon: None, typing: panel.view.typing_word == Some(which), click: Some(Action::TypeWord(which)), clear: Some(Action::ClearWord(which)) }
+}
+
+/// `text` in quotes, or `otherwise` while it is empty.
+fn quoted(text: &str, otherwise: &str) -> String {
+    match text.trim() {
+        "" => otherwise.to_owned(),
+        text => format!("“{text}”"),
     }
 }

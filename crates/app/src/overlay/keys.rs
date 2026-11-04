@@ -1,5 +1,5 @@
 //! The captions key (Ctrl+Win by default; Windows never sees Fn): held alone it dictates, held with
-//! another key it runs a command. The keys are set in settings. Also types and pastes into the focused app.
+//! another key it runs a command. The keys are set in settings. Also pastes into the focused app.
 //!
 //! A low-level keyboard hook sees every key press system-wide. It runs on a thread of its own that
 //! only tracks the captions key and posts to the overlay window, so a busy panel never slows typing;
@@ -18,8 +18,8 @@ use windows::{
         UI::{
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
-                KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_INSERT, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
-                VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_Z,
+                KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_BACK, VK_INSERT, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
+                VK_RSHIFT, VK_RWIN, VK_Z,
             },
             WindowsAndMessaging::{
                 CallNextHookEx, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, PeekMessageW, PostMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
@@ -238,25 +238,10 @@ fn post(window: isize, event: KeyEvent) {
     let _ = unsafe { PostMessageW(Some(HWND(window as _)), WM_CAPTIONS_KEY, wparam, lparam) };
 }
 
-/// Text this app put into the focused app, to be taken back by [`erase`] or a growing [`paste`].
+/// A paste this app put into the focused app, this many characters long, to be taken back by [`erase`] or
+/// a growing [`paste`].
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Erase {
-    /// This many characters, typed as keystrokes.
-    Typed(usize),
-    /// This many characters, pasted at once.
-    Pasted(usize),
-}
-
-/// Types `text` into the focused app.
-pub fn type_text(text: &str) {
-    press(
-        None,
-        text.encode_utf16().flat_map(|unit| match unit {
-            0x0A => [key_input(VK_RETURN, false), key_input(VK_RETURN, true)],
-            _ => [unicode(unit, false), unicode(unit, true)],
-        }),
-    );
-}
+pub struct Erase(pub usize);
 
 /// Takes back what this app last put into the focused app.
 pub fn erase(what: Erase) {
@@ -286,15 +271,12 @@ fn press(erase: Option<Erase>, keys: impl IntoIterator<Item = INPUT>) {
     send(&inputs);
 }
 
-/// A paste is one edit that Ctrl+Z undoes. Typed text, and anything in a terminal, takes a Backspace per character.
-fn erase_keys(what: Erase) -> Vec<INPUT> {
-    match what {
-        Erase::Pasted(_) if !terminal_in_front() => {
-            vec![key_input(VK_LCONTROL, false), key_input(VK_Z, false), key_input(VK_Z, true), key_input(VK_LCONTROL, true)]
-        }
-        Erase::Typed(chars) | Erase::Pasted(chars) => {
-            (0..chars).flat_map(|_| [key_input(VK_BACK, false), key_input(VK_BACK, true)]).collect()
-        }
+/// A paste is one edit that Ctrl+Z undoes; in a terminal it takes a Backspace per character.
+fn erase_keys(Erase(chars): Erase) -> Vec<INPUT> {
+    if terminal_in_front() {
+        (0..chars).flat_map(|_| [key_input(VK_BACK, false), key_input(VK_BACK, true)]).collect()
+    } else {
+        vec![key_input(VK_LCONTROL, false), key_input(VK_Z, false), key_input(VK_Z, true), key_input(VK_LCONTROL, true)]
     }
 }
 
@@ -320,7 +302,3 @@ fn key_input(key: VIRTUAL_KEY, up: bool) -> INPUT {
     INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: key, dwFlags: flags, ..Default::default() } } }
 }
 
-fn unicode(unit: u16, up: bool) -> INPUT {
-    let flags = if up { KEYEVENTF_UNICODE | KEYEVENTF_KEYUP } else { KEYEVENTF_UNICODE };
-    INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wScan: unit, dwFlags: flags, ..Default::default() } } }
-}

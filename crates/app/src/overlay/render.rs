@@ -988,7 +988,8 @@ impl Renderer {
         }
         let middle = content.bottom - 8.0 - CONTROL / 2.0;
         let label = "Ask Claude about the selection";
-        self.draw_text_button(label, Some(Icon::Sparkles), Action::ShareSelection, Emphasis::Primary, content.right, middle, panel, regions)?;
+        let left = self.draw_text_button(label, Some(Icon::Sparkles), Action::ShareSelection, Emphasis::Primary, content.right, middle, panel, regions)?;
+        self.draw_text_button("Correct", Some(Icon::Pencil), Action::CorrectSelection, Emphasis::Secondary, left - 8.0, middle, panel, regions)?;
         Ok(())
     }
 
@@ -1110,9 +1111,13 @@ impl Renderer {
             let visible = clipped(rect(area.left, y, area.left + text_width, y + line_height), area);
             let row = clipped(rect(area.left, y, area.right, y + line_height), area);
             regions.captions.push(CaptionRegion { line, visible, row, x: area.left, y, width: text_width });
-            let hovered = matches!(panel.view.hovered, Some(Action::CopyLine(l) | Action::ShareLine(l)) if l == line);
+            let hovered = matches!(panel.view.hovered, Some(Action::CopyLine(l) | Action::CorrectLine(l) | Action::ShareLine(l)) if l == line);
             if hovered || panel.view.hovered_line == Some(line) {
-                let buttons = vec![(Icon::Copy, Action::CopyLine(line), Tone::Dim), (Icon::Sparkles, Action::ShareLine(line), Tone::Accent)];
+                let buttons = vec![
+                    (Icon::Copy, Action::CopyLine(line), Tone::Dim),
+                    (Icon::Pencil, Action::CorrectLine(line), Tone::Dim),
+                    (Icon::Sparkles, Action::ShareLine(line), Tone::Accent),
+                ];
                 let first = regions.targets.len();
                 // Level with the line's first row.
                 let middle = y + line_height.min(CAPTION_SIZE * 1.33) / 2.0;
@@ -1773,7 +1778,7 @@ impl Renderer {
         self.popover(list, RADIUS_CARD)?;
         // Clicks on the field or between rows keep the list open and reach nothing under it.
         regions.targets.push((list, Target::Card));
-        let role = BoxRole { one_line: true, typing: true, click: None, clear: Some(Action::ClearFontSearch) };
+        let role = BoxRole { one_line: true, icon: Some(Icon::Search), typing: true, click: None, clear: Some(Action::ClearFontSearch) };
         let field = self.draw_text_box(&view.font_search, "Search fonts", rect(list.left + 6.0, list.top + 6.0, list.right - 6.0, list.bottom), role, panel, regions)?;
         let rows = rect(list.left, field.bottom + 4.0, list.right, list.bottom - 4.0);
         regions.scroll_areas.push((rows, ScrollArea::Dropdown(Dropdown::Font), extent));
@@ -2570,7 +2575,13 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::RemoveWordEntry(_) => "Take it out of the file".into(),
         Action::OpenWords => "Open words.txt in your text editor".into(),
         Action::CopyWordInstructions => "Copy how the file works for ChatGPT, Claude or another assistant, then add what you want".into(),
-        Action::ClearTry => "Clear".into(),
+        Action::ClearWord(_) => "Clear".into(),
+        Action::CorrectLine(_) => "Correct a misheard word in this line: make it a rule or a hotword".into(),
+        Action::CorrectSelection => "Correct the selected words: make them a rule or a hotword".into(),
+        Action::CorrectOnlyApp(false) => "The rule applies in every app".into(),
+        Action::CorrectOnlyApp(true) => "The rule applies only where the line came from".into(),
+        Action::AddRule => "Swap the words whenever the model writes them".into(),
+        Action::AddHotword => "Have the model listen for the right word".into(),
         Action::CopyLine(_) => "Copy this line".into(),
         Action::ScrollToLatest(_) => "Back to the newest line, and follow it again".into(),
         Action::ShareLine(_) => "Ask Claude about this line".into(),
@@ -2660,7 +2671,7 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::ShareResults => "Ask Claude about every line found".into(),
         Action::RunSql => "Run the query (Enter)".into(),
         Action::Example(index) => EXAMPLES[index].1.into(),
-        Action::OpenSaved(_) | Action::OpenResult(_) | Action::Type(_) | Action::TypeTry | Action::SetWho(_) | Action::SubtitleFont(_) | Action::ShowTab(_) => return None,
+        Action::OpenSaved(_) | Action::OpenResult(_) | Action::Type(_) | Action::TypeWord(_) | Action::SetWho(_) | Action::SubtitleFont(_) | Action::ShowTab(_) => return None,
     })
 }
 

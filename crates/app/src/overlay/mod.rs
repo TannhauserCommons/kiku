@@ -52,7 +52,7 @@ use windows::{
             HiDpi::{GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
             Input::KeyboardAndMouse::{
                 GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, VIRTUAL_KEY,
-                VK_CONTROL, VK_ESCAPE, VK_RETURN,
+                VK_CONTROL, VK_ESCAPE, VK_RETURN, VK_TAB,
             },
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, RegisterWindowMessageW, GetMessageW, GetWindowLongPtrW,
@@ -70,7 +70,7 @@ use windows::{
 };
 
 use kiku_core::{
-    captions::{Caption, Captions, YOU_SECTION},
+    captions::{Caption, Captions, YOU, YOU_SECTION},
     controls::{Controls, Input, SaveRequest, THRESHOLD_MIN_DB},
     keybinds::{Command, Key, Keybinds},
     log,
@@ -95,8 +95,8 @@ use tray::{MenuChoice, MenuState, Tray, WM_TRAY};
 use usage::{Usage, UsageMeter};
 use selection::{Selection, TextPoint};
 use view::{
-    Action, BlockPrompt, Corner, Dropdown, ImportStatus, LineRef, Notice, Rebind, Screen, Scroll, ScrollArea, SetupStep, Slider, Tab, Target,
-    UpdateCheck, View,
+    Action, BlockPrompt, Corner, Correction, Dropdown, ImportStatus, LineRef, Notice, Rebind, Screen, Scroll, ScrollArea, SetupStep, Slider, Tab,
+    Target, UpdateCheck, View, WordBox,
 };
 
 /// Custom messages: `WM_APP + 2` is the tray's, `+ 3` the captions key's and `+ 6` captions mode's windows'.
@@ -440,8 +440,12 @@ impl Window {
             }
             WM_LBUTTONUP if self.selecting => self.finish_selecting(),
             WM_LBUTTONUP => {
+                let pressed = self.view.pressed;
                 self.press(None);
-                if let Some(Target::Click(action)) = self.target_at_client(lparam) {
+                // A release alone, as at the end of a drag begun in another window, clicks nothing.
+                if let Some(Target::Click(action)) = self.target_at_client(lparam)
+                    && pressed == Some(action)
+                {
                     self.perform(action);
                 }
             }
@@ -514,8 +518,8 @@ impl Window {
         if !matches!(action, Action::DeleteSession(_)) {
             self.view.finder.deleting = None;
         }
-        if !matches!(action, Action::TypeTry | Action::ClearTry) {
-            self.settings.view.typing_try = false;
+        if !matches!(action, Action::TypeWord(_) | Action::ClearWord(_)) {
+            self.settings.view.typing_word = None;
         }
         // Only a second press of Delete deletes.
         let confirming = std::mem::take(&mut self.settings.view.confirm_delete);
@@ -610,8 +614,29 @@ impl Window {
             }
             Action::OpenWords => self.open_words(),
             Action::CopyWordInstructions => self.copy(ASSISTANT_INSTRUCTIONS, "Copied: paste it to your assistant, then say what you want".into()),
-            Action::TypeTry => self.settings.view.typing_try = true,
-            Action::ClearTry => self.settings.view.try_words.clear(),
+            Action::TypeWord(which) => self.settings.view.typing_word = Some(which),
+            Action::ClearWord(which) => self.settings.view.word_box_mut(which).clear(),
+            Action::CorrectLine(line) => {
+                if let Some(caption) = self.caption(line) {
+                    let app = self.words_app(line.section, &caption);
+                    self.open_correction(&caption.text, app);
+                }
+            }
+            Action::CorrectSelection => {
+                if let Some(selection) = self.view.selection {
+                    let captions = self.captions.lock().unwrap();
+                    let text = selection.text(&captions, &self.view.regions.sections);
+                    let first = selection.spans(&captions, &self.view.regions.sections).first().map(|&(line, ..)| line);
+                    drop(captions);
+                    let app = first.and_then(|line| Some(self.words_app(line.section, &self.caption(line)?)));
+                    // A selection starting on one of your lines can take its "You:" too.
+                    let text = text.trim().strip_prefix(&format!("{YOU}:")).unwrap_or(&text).to_owned();
+                    self.open_correction(&text, app.unwrap_or_else(|| YOU.into()));
+                }
+            }
+            Action::CorrectOnlyApp(only) => self.settings.view.correction.only_app = only,
+            Action::AddRule => self.add_correction(false),
+            Action::AddHotword => self.add_correction(true),
             Action::ScrollToLatest(index) => {
                 self.view.scrolls.insert(ScrollArea::Section(index), Scroll::default());
             }
@@ -895,7 +920,7 @@ impl Window {
                 // An open list's field and the space between its rows, or between a palette's colours.
                 Some(Target::Card) => {}
                 _ => {
-                    (self.settings.view.open_dropdown, self.settings.view.typing_try) = (None, false);
+                    (self.settings.view.open_dropdown, self.settings.view.typing_word) = (None, None);
                     self.redraw();
                 }
             },
@@ -926,9 +951,11 @@ impl Window {
                 self.redraw();
             }
             WM_LBUTTONUP => {
-                self.settings.view.pressed = None;
+                let pressed = self.settings.view.pressed.take();
                 self.redraw();
-                if let Some(Target::Click(action)) = self.settings.target_at(point_from(lparam)) {
+                if let Some(Target::Click(action)) = self.settings.target_at(point_from(lparam))
+                    && pressed == Some(action)
+                {
                     self.perform(action);
                 }
             }
@@ -951,13 +978,16 @@ impl Window {
                 self.redraw();
             }
             WM_KEYDOWN if self.settings.view.open_dropdown == Some(Dropdown::Font) => self.font_list_key(VIRTUAL_KEY(wparam.0 as u16)),
-            WM_CHAR if self.settings.view.typing_try => {
-                self.settings.view.try_words.type_unit(wparam.0 as u16);
+            WM_CHAR if self.settings.view.typing_word.is_some() => {
+                let view = &mut self.settings.view;
+                if let Some(which) = view.typing_word {
+                    view.word_box_mut(which).type_unit(wparam.0 as u16);
+                }
                 self.redraw();
             }
-            WM_KEYDOWN if self.settings.view.typing_try => self.try_box_key(VIRTUAL_KEY(wparam.0 as u16)),
-            WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && self.settings.view.typing_try => {
-                self.settings.view.typing_try = false;
+            WM_KEYDOWN if self.settings.view.typing_word.is_some() => self.word_box_key(VIRTUAL_KEY(wparam.0 as u16)),
+            WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && self.settings.view.typing_word.is_some() => {
+                self.settings.view.typing_word = None;
                 self.redraw();
             }
             WM_KEYDOWN if wparam.0 == VK_ESCAPE.0 as usize => self.close_settings(),
@@ -992,18 +1022,67 @@ impl Window {
         self.redraw();
     }
 
-    /// A key pressed while typing in the Words tab's Try box: editing keys edit it, and Escape empties it, then leaves it.
-    fn try_box_key(&mut self, key: VIRTUAL_KEY) {
+    /// A key pressed while typing in one of the Words tab's boxes: editing keys edit it, Tab goes between the
+    /// correction's two boxes, and Escape empties the box, then leaves it.
+    fn word_box_key(&mut self, key: VIRTUAL_KEY) {
         let (ctrl, hwnd) = (ctrl_held(), self.hwnd);
         let view = &mut self.settings.view;
-        if !view.try_words.edit(key, ctrl, || clipboard::text(hwnd)) {
+        let Some(which) = view.typing_word else { return };
+        let field = view.word_box_mut(which);
+        if !field.edit(key, ctrl, || clipboard::text(hwnd)) {
             match key {
-                VK_ESCAPE if !view.try_words.text.is_empty() => view.try_words.clear(),
-                VK_ESCAPE => view.typing_try = false,
+                VK_TAB if which == WordBox::Heard => view.typing_word = Some(WordBox::Fix),
+                VK_TAB if which == WordBox::Fix => view.typing_word = Some(WordBox::Heard),
+                VK_ESCAPE if !field.text.is_empty() => field.clear(),
+                VK_ESCAPE => view.typing_word = None,
                 _ => return,
             }
         }
         self.redraw();
+    }
+
+    /// Opens the Words tab's correction card with `heard` filled in, from a line of `app`, ready to type
+    /// what it should be.
+    fn open_correction(&mut self, heard: &str, app: String) {
+        self.settings.open(self.hwnd);
+        self.perform(Action::ShowTab(Tab::Words));
+        let view = &mut self.settings.view;
+        view.correction = Correction { app: Some(app), ..Correction::default() };
+        view.correction.heard.set(heard.trim());
+        view.typing_word = Some(WordBox::Fix);
+        view.scrolls.insert(ScrollArea::Settings, Scroll::at_top());
+        self.redraw();
+    }
+
+    /// Adds the correction to the word rules file: as a rule, heard => should be, or with `hotword` what
+    /// it should be as a word to listen for. Each only when asked, never both at once.
+    fn add_correction(&mut self, hotword: bool) {
+        let correction = &self.settings.view.correction;
+        let (heard, fix) = (correction.heard.text.trim().to_owned(), correction.fix.text.trim().to_owned());
+        let app = correction.app.clone().filter(|_| correction.only_app);
+        if fix.is_empty() || (!hotword && heard.is_empty()) {
+            let missing = if hotword { "Type what it should be first: that's the word to listen for" } else { "Type what was heard and what it should be first" };
+            return self.notify(missing.into(), true);
+        }
+        let (added, done) = if hotword {
+            let listening = self.controls.words.settings().hotwords;
+            let done = if listening { format!("Listening for {fix} from the next phrase") } else { format!("Added {fix}; turn on Listen for @ words to use it") };
+            (self.controls.words.add_word(&fix), done)
+        } else {
+            (self.controls.words.add_rule(&heard, &fix, app.as_deref()), format!("Added the rule {heard} → {fix}"))
+        };
+        match added {
+            Ok(()) => self.notify(done, false),
+            Err(error) => self.notify(format!("Couldn't add it: {error}"), true),
+        }
+    }
+
+    /// The section of the word rules a line's corrections go under: "You" for your lines, wherever they show.
+    fn words_app(&self, section: usize, caption: &Caption) -> String {
+        match caption.speaker {
+            Some(_) => YOU.into(),
+            None => self.captions.lock().unwrap().sections[section].label.clone(),
+        }
     }
 
     /// Opens `words.txt` in the user's editor, made with a short header if it is missing.
@@ -1353,7 +1432,7 @@ impl Window {
         if let Err(error) = self.paste(erase, &said) {
             return self.notify(format!("Couldn't paste: {}", plain_error(&error)), true);
         }
-        self.typed = Some(Typed { erase: keys::Erase::Pasted(said.chars().count()), lines, at: Instant::now() });
+        self.typed = Some(Typed { erase: keys::Erase(said.chars().count()), lines, at: Instant::now() });
     }
 
     /// Pastes `text` through the clipboard after taking back `erase`: one paste, where typing it
@@ -1383,19 +1462,26 @@ impl Window {
         }
     }
 
-    /// Types dictated lines as they finish.
+    /// Pastes dictated lines as they finish, all those waiting at once.
     fn type_dictation(&mut self) {
         let lines = self.controls.take_typing();
-        let app = if lines.is_empty() { String::new() } else { keys::focused_app().unwrap_or_default() };
-        for line in lines {
-            let line = self.controls.words.apply(&line, &app, Output::Dictation);
-            if line.is_empty() {
-                continue;
-            }
-            let text = dictated(&line);
-            keys::type_text(&text);
-            self.typed = Some(Typed { erase: keys::Erase::Typed(text.chars().count()), lines: 0, at: Instant::now() });
+        if lines.is_empty() {
+            return;
         }
+        let app = keys::focused_app().unwrap_or_default();
+        let text: String = lines
+            .iter()
+            .map(|line| self.controls.words.apply(line, &app, Output::Dictation))
+            .filter(|line| !line.is_empty())
+            .map(|line| dictated(&line))
+            .collect();
+        if text.is_empty() {
+            return;
+        }
+        if let Err(error) = self.paste(None, &text) {
+            return self.notify(format!("Couldn't paste what you said: {}", plain_error(&error)), true);
+        }
+        self.typed = Some(Typed { erase: keys::Erase(text.chars().count()), lines: 0, at: Instant::now() });
     }
 
     /// Erases what this app last typed.

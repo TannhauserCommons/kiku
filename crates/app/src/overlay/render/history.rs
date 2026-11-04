@@ -44,6 +44,8 @@ pub(super) const BOX_ICON: f32 = 28.0;
 /// button (shown on one line once there is text) do.
 pub(super) struct BoxRole {
     pub one_line: bool,
+    /// Before a one-line box's text, e.g. a search's magnifier.
+    pub icon: Option<Icon>,
     pub typing: bool,
     pub click: Option<Action>,
     pub clear: Option<Action>,
@@ -52,7 +54,7 @@ pub(super) struct BoxRole {
 /// A history box: keys go to it once clicked, and the search box has a clear button.
 fn history_box(text_box: TextBox, panel: &Panel) -> BoxRole {
     let search = text_box == TextBox::Search;
-    BoxRole { one_line: search, typing: panel.view.finder.typing == Some(text_box), click: Some(Action::Type(text_box)), clear: search.then_some(Action::ClearSearch) }
+    BoxRole { one_line: search, icon: search.then_some(Icon::Search), typing: panel.view.finder.typing == Some(text_box), click: Some(Action::Type(text_box)), clear: search.then_some(Action::ClearSearch) }
 }
 
 impl Renderer {
@@ -119,13 +121,14 @@ impl Renderer {
     }
 
     /// A text box across the top of `area`: its text, or `placeholder` while empty, and while keys go to it
-    /// the caret. A one-line box slides to keep the caret in view, after a magnifier; a wrapping one grows
+    /// the caret. A one-line box slides to keep the caret in view, after its icon if any; a wrapping one grows
     /// up to [`SQL_LINES`] lines. Returns where the box is.
     pub(super) fn draw_text_box(&mut self, field: &Field, placeholder: &str, area: D2D_RECT_F, role: BoxRole, panel: &Panel, regions: &mut Regions) -> Result<D2D_RECT_F> {
         let palette = self.palette.clone();
         let (one_line, typing) = (role.one_line, role.typing);
         let clear = role.clear.filter(|_| one_line && !field.text.is_empty());
-        let text_left = area.left + if one_line { BOX_ICON } else { BOX_PAD };
+        let icon = role.icon.filter(|_| one_line);
+        let text_left = area.left + if icon.is_some() { BOX_ICON } else { BOX_PAD };
         let text_right = area.right - if clear.is_some() { BOX_ICON } else { BOX_PAD };
         let text_width = text_right - text_left;
         let layout = self.layout(&self.fonts.body, &field.text, if one_line { f32::MAX } else { text_width })?;
@@ -149,12 +152,12 @@ impl Renderer {
             regions.targets.push((area, Target::Click(action)));
         }
         let middle = area.top + CONTROL / 2.0;
-        if one_line {
-            self.icon(Icon::Search, rect(area.left + 9.0, middle - 7.0, area.left + 23.0, middle + 7.0), palette.text_faint)?;
-            if let Some(action) = clear {
-                let button = rect(area.right - BOX_ICON + 2.0, middle - 12.0, area.right - 2.0, middle + 12.0);
-                self.icon_button(button, Icon::Close, action, Tone::Faint, panel, regions)?;
-            }
+        if let Some(icon) = icon {
+            self.icon(icon, rect(area.left + 9.0, middle - 7.0, area.left + 23.0, middle + 7.0), palette.text_faint)?;
+        }
+        if let Some(action) = clear {
+            let button = rect(area.right - BOX_ICON + 2.0, middle - 12.0, area.right - 2.0, middle + 12.0);
+            self.icon_button(button, Icon::Close, action, Tone::Faint, panel, regions)?;
         }
 
         let caret = caret_at(&layout, field.caret_utf16())?;
