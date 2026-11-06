@@ -5,7 +5,7 @@ use windows::{core::Result, Win32::Graphics::Direct2D::Common::D2D_RECT_F};
 
 use kiku_core::{
     captions::YOU,
-    words::{Kind, Scope},
+    words::{Kind, Nudge, Scope, Strength},
 };
 
 use super::{
@@ -34,10 +34,13 @@ impl Renderer {
                 let choices = Scope::ALL.map(|scope| (scope.name(), scope == chosen, Action::WordScope { transforms, scope }));
                 y = renderer.draw_choice_row(label, &choices, inner, y, panel, regions)?;
             }
-            renderer.draw_toggle_row("Listen for @ words", settings.hotwords, Action::WordHotwords(!settings.hotwords), inner, y, panel, regions)
+            y = renderer.draw_toggle_row("Listen for @ words", settings.hotwords, Action::WordHotwords(!settings.hotwords), inner, y, panel, regions)?;
+            let strengths = Strength::ALL.map(|strength| (strength.name(), strength == settings.strength, Action::WordStrength(strength)));
+            renderer.draw_choice_row("Listen for them", &strengths, inner, y, panel, regions)
         })?;
         let hint = "Captions are what the panel, captions mode, History and the MCP server get; dictation is what Kiku types or pastes. \
-                    @ words are listened for in every app, by Parakeet Unified only.";
+                    @ words are listened for in every app, by Parakeet Unified only. The stronger they are, the likelier they are heard, \
+                    also where a similar word was said; each one can be made weaker or stronger than the rest below.";
         y = self.draw_hint(hint, content, y)?;
 
         y = self.draw_heading("Try", content, y + SECTION_GAP)?;
@@ -63,7 +66,8 @@ impl Renderer {
             let copy = [("Copy instructions", Some(Icon::Copy), Action::CopyWordInstructions, Emphasis::Secondary)];
             renderer.draw_two_line_row("Ask an assistant", "How the file works, for you to add what you want", &copy, inner, y, panel, regions)
         })?;
-        let hint = "One entry a line: kicku => Kiku swaps words (nothing after => deletes them), @ Tannhauser is a word to listen for, \
+        let hint = "One entry a line: kicku => Kiku swaps words (nothing after => deletes them), @ Tannhauser is a word to listen for \
+                    (:stronger or :weaker after it to change how strongly), \
                     ! lowercase, ! no-trailing-punctuation and ! capitalise change the whole line, and [Discord] starts what applies only to Discord ([You] is your mic).";
         y = self.draw_hint(hint, content, y)?;
         self.draw_word_entries(panel, content, y + SECTION_GAP, regions)
@@ -100,7 +104,8 @@ impl Renderer {
         let hint = "A rule fixes the text: whenever the model writes the words heard, Kiku swaps in what they should be, before the line \
                     shows, is saved or is typed. It works with every model, for that exact mistake. A hotword fixes the hearing: the model \
                     listens out for the word while it works out what was said, so it can get it right the first time, in any sentence and \
-                    every app. Only Parakeet Unified listens for hotwords. Add either one, or both.";
+                    every app; if it is still misheard, make it stronger in its entry below. Only Parakeet Unified listens for hotwords. \
+                    Add either one, or both.";
         self.draw_hint(hint, content, y)
     }
 
@@ -137,21 +142,27 @@ impl Renderer {
         Ok(y)
     }
 
-    /// An entry as it reads, what kind it is, and a button removing it. Returns the y below.
+    /// An entry as it reads, what kind it is (a word to listen for, how strongly next to the others), and
+    /// a button removing it. Returns the y below.
     #[allow(clippy::too_many_arguments)]
     fn draw_word_entry(&mut self, index: usize, kind: &Kind, content: D2D_RECT_F, y: f32, panel: &Panel, regions: &mut Regions) -> Result<f32> {
         self.begin_row(content, y)?;
         let middle = y + SETTING_ROW / 2.0;
         let remove = rect(content.right + 6.0 - BUTTON, middle - BUTTON / 2.0, content.right + 6.0, middle + BUTTON / 2.0);
         self.icon_button(remove, Icon::Trash, Action::RemoveWordEntry(index), Tone::Dim, panel, regions)?;
+        let mut right = remove.left - 6.0;
+        if let Kind::Word { nudge: chosen, .. } = kind {
+            let nudges = Nudge::ALL.map(|nudge| (nudge.name(), nudge == *chosen, (nudge != *chosen).then_some(Action::WordNudge(index, nudge))));
+            right = self.draw_segments(&nudges, right, middle, panel, regions)? - 6.0;
+        }
         let (text, what) = match kind {
             Kind::Rule { from, to } if to.is_empty() => (format!("{from}  →  deleted"), "rule"),
             Kind::Rule { from, to } => (format!("{from}  →  {to}"), "rule"),
-            Kind::Word(word) => (word.clone(), "listen for"),
+            Kind::Word { word, .. } => (word.clone(), "listen for"),
             Kind::Transform(transform) => (transform.name().to_owned(), "transform"),
         };
         let what = self.single_line(&self.fonts.small, what, f32::MAX)?;
-        let what_left = remove.left - 6.0 - metrics(&what)?.width;
+        let what_left = right - metrics(&what)?.width;
         self.draw_layout(&what, what_left, middle - height_of(&what)? / 2.0, self.palette.text_dim)?;
         let text = self.single_line(&self.fonts.body, &text, what_left - content.left - 12.0)?;
         self.draw_layout(&text, content.left, middle - height_of(&text)? / 2.0, self.palette.text)?;

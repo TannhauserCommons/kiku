@@ -115,7 +115,7 @@ static HARDWARE: std::sync::LazyLock<Hardware> = std::sync::LazyLock::new(Hardwa
 static DOWNLOADS: std::sync::LazyLock<Downloads> = std::sync::LazyLock::new(|| Downloads::start(|| {}));
 static WORD_RULES: std::sync::LazyLock<Words> = std::sync::LazyLock::new(|| Words::parse(SNAPSHOT_WORDS));
 /// A word rules file with an entry of each kind, sections and a line it skips.
-const SNAPSHOT_WORDS: &str = "# mine\nkicku => Kiku\num =>\n@ Tannhauser\n! capitalise\nnot a rule\n[Discord]\ngg => good game\n! no-trailing-punctuation\n";
+const SNAPSHOT_WORDS: &str = "# mine\nkicku => Kiku\num =>\n@ Tannhauser\n@ Lull :stronger\n! capitalise\nnot a rule\n[Discord]\ngg => good game\n! no-trailing-punctuation\n";
 
 fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, width: f32) -> Panel<'a> {
     let choice = Choice { model: catalog::by_id_or_default(catalog::DEFAULT_ID), device: Device::Cpu };

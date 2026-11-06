@@ -12,7 +12,7 @@ use std::{
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineStream, VadModelConfig, VoiceActivityDetector};
 
 use crate::{
-    engine::{Device, Engine, EngineStream, Line, ModelSpec, PhraseModel, Result, SAMPLE_RATE},
+    engine::{Device, Engine, EngineStream, Hotword, Line, ModelSpec, PhraseModel, Result, SAMPLE_RATE},
     transcripts,
 };
 
@@ -26,8 +26,6 @@ const LEAD_IN_SAMPLES: i64 = SAMPLE_RATE as i64 / 2;
 /// Audio kept after where the detector says a phrase ends: it calls a fading last word silence,
 /// and the model needs a moment after the last word to finish it.
 const TRAIL_SAMPLES: i64 = SAMPLE_RATE as i64 / 2;
-/// How strongly beam search favours a hotword's tokens.
-const HOTWORDS_SCORE: f32 = 1.5;
 
 pub struct PhraseEngine {
     recognizer: OfflineRecognizer,
@@ -105,7 +103,7 @@ impl Engine for PhraseEngine {
         }))
     }
 
-    fn set_hotwords(&self, words: &[String]) -> bool {
+    fn set_hotwords(&self, words: &[Hotword]) -> bool {
         match &self.hotwords {
             Some(hotwords) if !words.is_empty() => {
                 *hotwords.lock().unwrap() = hotwords_text(words);
@@ -237,11 +235,14 @@ fn tokens_file(dir: &Path) -> Result<String> {
     found.map(|path| path.to_string_lossy().into_owned()).ok_or_else(|| format!("no tokens.txt in {}", dir.display()).into())
 }
 
-/// sherpa-onnx's per-stream hotwords: a phrase per `/`-separated line, its words split by spaces.
-/// Pieces it would read as a line break or a score (`:2.0`) are left out.
-fn hotwords_text(words: &[String]) -> String {
-    let phrases = words.iter().map(|word| word.replace('/', " ").split_whitespace().filter(|piece| !piece.starts_with(':')).collect::<Vec<_>>().join(" "));
-    phrases.filter(|phrase| !phrase.is_empty()).collect::<Vec<_>>().join("/")
+/// sherpa-onnx's per-stream hotwords: a phrase per `/`-separated line, its words split by spaces, then
+/// its boost as a score (`:2.5`). Pieces it would read as a line break or a score are left out of the words.
+fn hotwords_text(words: &[Hotword]) -> String {
+    let phrases = words.iter().filter_map(|word| {
+        let phrase = word.text.replace('/', " ").split_whitespace().filter(|piece| !piece.starts_with(':')).collect::<Vec<_>>().join(" ");
+        (!phrase.is_empty()).then(|| format!("{phrase} :{}", word.boost))
+    });
+    phrases.collect::<Vec<_>>().join("/")
 }
 
 /// Has the recognizer decode with modified beam search, which hotwords need. sherpa-onnx splits a
@@ -256,7 +257,6 @@ fn decode_for_hotwords(config: &mut OfflineRecognizerConfig, tokens: &Path) -> R
         transcripts::replace(&path, &vocab)?;
     }
     config.decoding_method = Some("modified_beam_search".into());
-    config.hotwords_score = HOTWORDS_SCORE;
     config.model_config.modeling_unit = Some("bpe".into());
     config.model_config.bpe_vocab = Some(path.to_string_lossy().into_owned());
     Ok(())
@@ -306,8 +306,9 @@ mod tests {
 
     #[test]
     fn hotwords_become_sherpa_lines() {
-        let words = ["Kiku", " New  York ", "AC/DC", "x :2.0", "", ":3"].map(String::from);
-        assert_eq!(hotwords_text(&words), "Kiku/New York/AC DC/x");
+        let words = ["Kiku", " New  York ", "AC/DC", "x :2.0", "", ":3"].map(|text| Hotword { text: text.into(), boost: 1.5 });
+        let strong = Hotword { text: "Lull".into(), boost: 2.5 };
+        assert_eq!(hotwords_text(&[&words[..], &[strong]].concat()), "Kiku :1.5/New York :1.5/AC DC :1.5/x :1.5/Lull :2.5");
     }
 
     #[test]

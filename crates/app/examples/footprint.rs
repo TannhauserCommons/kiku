@@ -4,7 +4,8 @@
 //!
 //! Usage:
 //!   footprint <model id> <cpu|gpu> <set folder> [realtime utterances, default 10] [--json results.jsonl]
-//!             [--hotwords "Kiku,Tannhauser Commons"]
+//!             [--hotwords "Kiku,Tannhauser Commons:2.5"]   (a word's boost after a colon, else 1.5)
+//!             [--heard heard.tsv]                          (each utterance's reference and what was heard)
 //!   footprint --table results.jsonl        prints a Markdown table of saved runs
 //! The set folder holds `<id>.wav` (16 kHz mono 16-bit) and `<id>.txt` (reference text) pairs, e.g. 200
 //! LibriSpeech test-clean utterances.
@@ -18,7 +19,7 @@ use std::{
 
 use kiku::overlay::usage::UsageMeter;
 use kiku_core::{
-    engine::{load, Device, EngineStream, ModelSpec, POLL_INTERVAL, SAMPLE_RATE},
+    engine::{load, Device, EngineStream, Hotword, ModelSpec, POLL_INTERVAL, SAMPLE_RATE},
     catalog,
 };
 use serde_json::{json, Value};
@@ -51,7 +52,11 @@ fn main() {
     let realtime_count: usize = args.get(3).filter(|a| !a.starts_with("--")).map_or(10, |n| n.parse().unwrap());
     let option = |name: &str| args.iter().position(|a| a == name).map(|i| args[i + 1].clone());
     let json_out = option("--json").map(PathBuf::from);
-    let hotwords: Vec<String> = option("--hotwords").map_or_else(Vec::new, |words| words.split(',').map(|w| w.trim().to_owned()).collect());
+    let hotword = |word: &str| match word.rsplit_once(':') {
+        Some((text, boost)) => Hotword { text: text.trim().to_owned(), boost: boost.parse().expect("a boost is a number") },
+        None => Hotword { text: word.trim().to_owned(), boost: 1.5 },
+    };
+    let hotwords: Vec<Hotword> = option("--hotwords").map_or_else(Vec::new, |words| words.split(',').map(hotword).collect());
 
     let start = memory(None);
     let mut usage = UsageMeter::new();
@@ -70,8 +75,12 @@ fn main() {
     let wall_start = Instant::now();
     let mut errors = 0;
     let mut reference_words = 0;
+    let mut heard_out = option("--heard").map(|path| fs::File::create(path).unwrap());
     for utterance in &set {
         let heard = transcribe(stream.as_mut(), &utterance.audio);
+        if let Some(out) = &mut heard_out {
+            writeln!(out, "{}\t{heard}", utterance.text.trim()).unwrap();
+        }
         let (e, n) = word_errors(&normalize(&utterance.text), &normalize(&heard));
         (errors, reference_words) = (errors + e, reference_words + n);
     }

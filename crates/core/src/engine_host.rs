@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::engine::{load_here, Backend, Device, Engine, EngineStream, Line, ModelSpec, Result, SAMPLE_RATE};
+use crate::engine::{load_here, Backend, Device, Engine, EngineStream, Hotword, Line, ModelSpec, Result, SAMPLE_RATE};
 
 const HELPER: &str = "kiku-engine";
 /// Loading a model and hearing the test clip takes seconds; a GPU stack that hangs gets this long.
@@ -120,9 +120,10 @@ impl Engine for HostedEngine {
         matches!(self.child.lock().unwrap().try_wait(), Ok(Some(_)))
     }
 
-    fn set_hotwords(&self, words: &[String]) -> bool {
+    fn set_hotwords(&self, words: &[Hotword]) -> bool {
         // A helper that can't answer is lost; loading again starts a new one.
-        self.request(HOTWORDS, words.join("\n").as_bytes()).is_ok_and(|reply| reply == [1])
+        let lines: Vec<String> = words.iter().map(encode_hotword).collect();
+        self.request(HOTWORDS, lines.join("\n").as_bytes()).is_ok_and(|reply| reply == [1])
     }
 }
 
@@ -199,7 +200,7 @@ pub fn serve() {
                 streams.remove(&id);
                 None
             }
-            (HOTWORDS, Some(engine)) => Some(Ok(vec![engine.set_hotwords(&payload_lines(&payload)) as u8])),
+            (HOTWORDS, Some(engine)) => Some(Ok(vec![engine.set_hotwords(&decode_hotwords(payload_lines(&payload))) as u8])),
             _ => Some(Err("no model loaded".into())),
         };
         let written = match reply {
@@ -343,7 +344,7 @@ fn read_frame(reader: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
 fn encode_spec(spec: &ModelSpec) -> Vec<u8> {
     let device = if spec.device == Device::Cuda { "cuda" } else { "cpu" };
     let vad = spec.vad.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
-    let hotwords: String = spec.hotwords.iter().map(|word| format!("\n{word}")).collect();
+    let hotwords: String = spec.hotwords.iter().map(|word| format!("\n{}", encode_hotword(word))).collect();
     format!("{}\n{device}\n{vad}\n{}{hotwords}", spec.backend.name(), spec.dir.display()).into_bytes()
 }
 
@@ -353,7 +354,17 @@ fn decode_spec(payload: &[u8]) -> Result<ModelSpec> {
     let device = if parts.next().as_deref() == Some("cuda") { Device::Cuda } else { Device::Cpu };
     let vad = parts.next().filter(|path| !path.is_empty()).map(Into::into);
     let dir = parts.next().ok_or("no model folder")?.into();
-    Ok(ModelSpec { backend, device, vad, dir, hotwords: parts.collect() })
+    Ok(ModelSpec { backend, device, vad, dir, hotwords: decode_hotwords(parts) })
+}
+
+/// A hotword as one line: its boost, a space and its text.
+fn encode_hotword(word: &Hotword) -> String {
+    format!("{} {}", word.boost, word.text)
+}
+
+fn decode_hotwords(lines: impl IntoIterator<Item = String>) -> Vec<Hotword> {
+    let read = |line: &str| line.split_once(' ').and_then(|(boost, text)| Some(Hotword { text: text.to_owned(), boost: boost.parse().ok()? }));
+    lines.into_iter().filter_map(|line| read(&line)).collect()
 }
 
 /// A payload's lines; a hotword is one line.
@@ -402,7 +413,8 @@ mod tests {
         let lines = vec![Line { id: 7, text: "Bonjour, ça va ?".into(), complete: true }, Line { id: 8, text: String::new(), complete: false }];
         assert_eq!(decode_lines(&encode_lines(&lines)).unwrap(), lines);
         let mut spec = ModelSpec { backend: Backend::Phrases(crate::engine::PhraseModel::NemoTransducer), dir: r"C:\models\sherpa\x-fp16".into(), device: Device::Cuda, vad: Some(r"C:\vad.onnx".into()), hotwords: Vec::new() };
-        for hotwords in [vec![], vec!["Kiku".into(), "Tannhauser Commons".into()]] {
+        let word = |text: &str, boost| Hotword { text: text.into(), boost };
+        for hotwords in [vec![], vec![word("Kiku", 1.5), word("Tannhauser Commons", 2.25)]] {
             spec.hotwords = hotwords;
             let read = decode_spec(&encode_spec(&spec)).unwrap();
             assert_eq!((read.backend, read.device, &read.dir, &read.vad, &read.hotwords), (spec.backend, spec.device, &spec.dir, &spec.vad, &spec.hotwords));

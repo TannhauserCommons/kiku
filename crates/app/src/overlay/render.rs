@@ -75,7 +75,7 @@ use kiku_core::{
     subtitles::SubtitleSettings,
     theme::{CustomTheme, Theme, Themes},
     update::{self, Release},
-    words::{Scope, WordSettings, Words},
+    words::{Nudge, Scope, Strength, WordSettings, Words},
 };
 use std::time::Instant;
 
@@ -2572,6 +2572,12 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         }
         Action::WordHotwords(true) => "Help Parakeet Unified hear the @ words; it decodes a little slower while there are any".into(),
         Action::WordHotwords(false) => "Decode as if there were no @ words".into(),
+        Action::WordStrength(Strength::Gentle) => "Listen gently: an @ word wins only where the model nearly heard it anyway".into(),
+        Action::WordStrength(Strength::Normal) => "Listen as Kiku does by default".into(),
+        Action::WordStrength(Strength::Strong) => "Listen strongly: @ words are heard more, also where a similar word was said".into(),
+        Action::WordNudge(_, Nudge::Weaker) => "Listen for this word less strongly than the other @ words".into(),
+        Action::WordNudge(_, Nudge::Same) => "Listen for this word as strongly as the other @ words".into(),
+        Action::WordNudge(_, Nudge::Stronger) => "Listen for this word more strongly than the other @ words".into(),
         Action::RemoveWordEntry(_) => "Take it out of the file".into(),
         Action::OpenWords => "Open words.txt in your text editor".into(),
         Action::CopyWordInstructions => "Copy how the file works for ChatGPT, Claude or another assistant, then add what you want".into(),

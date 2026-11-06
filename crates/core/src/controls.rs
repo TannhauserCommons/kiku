@@ -9,7 +9,12 @@ use std::sync::{
 /// Transcripts are kept this many days unless settings say otherwise.
 pub const DEFAULT_KEEP_DAYS: u32 = 30;
 
-use crate::{catalog::Choice, engine::SAMPLE_RATE, update::Release, words::WordBook};
+use crate::{
+    catalog::Choice,
+    engine::{Hotword, SAMPLE_RATE},
+    update::Release,
+    words::WordBook,
+};
 
 /// Slider range for sensitivity thresholds, in dBFS. The minimum means "let everything through".
 pub const THRESHOLD_MIN_DB: f32 = -70.0;
@@ -72,7 +77,7 @@ pub struct Controls {
     /// Word rules for captions and dictation, from `words.txt`, and where they apply.
     pub words: WordBook,
     /// The words the model listens for, and whether they changed since the decoder last took them.
-    hotwords: Mutex<(Vec<String>, bool)>,
+    hotwords: Mutex<(Vec<Hotword>, bool)>,
 }
 
 /// An app that isn't captured or captioned: until Kiku quits, or always (saved in settings).
@@ -202,7 +207,7 @@ impl Controls {
     }
 
     /// Sets the words the model listens for (see `ModelSpec::hotwords`); the decoder hands them on.
-    pub fn set_hotwords(&self, words: Vec<String>) {
+    pub fn set_hotwords(&self, words: Vec<Hotword>) {
         let mut hotwords = self.hotwords.lock().unwrap();
         if hotwords.0 != words {
             *hotwords = (words, true);
@@ -210,12 +215,12 @@ impl Controls {
     }
 
     /// The words to load a model with.
-    pub fn hotwords(&self) -> Vec<String> {
+    pub fn hotwords(&self) -> Vec<Hotword> {
         self.hotwords.lock().unwrap().0.clone()
     }
 
     /// The words, if they changed since last taken.
-    pub fn take_changed_hotwords(&self) -> Option<Vec<String>> {
+    pub fn take_changed_hotwords(&self) -> Option<Vec<Hotword>> {
         let mut hotwords = self.hotwords.lock().unwrap();
         std::mem::take(&mut hotwords.1).then(|| hotwords.0.clone())
     }
@@ -389,12 +394,15 @@ mod tests {
     fn changed_hotwords_are_taken_once() {
         let choice = Choice { model: crate::catalog::by_id_or_default(crate::catalog::DEFAULT_ID), device: crate::engine::Device::Cpu };
         let controls = Controls::new(THRESHOLD_MIN_DB, THRESHOLD_MIN_DB, choice);
-        controls.set_hotwords(vec!["Kiku".into()]);
-        assert_eq!(controls.take_changed_hotwords(), Some(vec!["Kiku".into()]));
+        let kiku = |boost| vec![Hotword { text: "Kiku".into(), boost }];
+        controls.set_hotwords(kiku(1.5));
+        assert_eq!(controls.take_changed_hotwords(), Some(kiku(1.5)));
         assert_eq!(controls.take_changed_hotwords(), None);
-        controls.set_hotwords(vec!["Kiku".into()]);
+        controls.set_hotwords(kiku(1.5));
         assert_eq!(controls.take_changed_hotwords(), None, "the same words are no change");
-        assert_eq!(controls.hotwords(), ["Kiku"]);
+        controls.set_hotwords(kiku(2.5));
+        assert_eq!(controls.take_changed_hotwords(), Some(kiku(2.5)), "a new boost is a change");
+        assert_eq!(controls.hotwords(), kiku(2.5));
     }
 
     #[test]

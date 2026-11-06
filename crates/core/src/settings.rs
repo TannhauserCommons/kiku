@@ -294,7 +294,7 @@ mod tests {
             opacity: Opacity { window: 60, text: 90 },
             locked_opacity: Opacity { window: 20, text: 70 },
             dictation_only: true,
-            words: WordSettings { rules: crate::words::Scope::Captions, transforms: crate::words::Scope::Both, hotwords: false },
+            words: WordSettings { rules: crate::words::Scope::Captions, transforms: crate::words::Scope::Both, hotwords: false, strength: crate::words::Strength::Gentle },
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
         assert_eq!(Settings::parse("mic_threshold_db = loud\nunknown = 1"), Settings::default());

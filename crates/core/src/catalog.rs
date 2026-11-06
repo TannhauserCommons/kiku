@@ -15,7 +15,7 @@ use std::{
 use serde::Deserialize;
 
 use crate::{
-    engine::{Backend, Device, ModelSpec},
+    engine::{Backend, Device, Hotword, ModelSpec},
     imports, paths, update,
 };
 
@@ -438,7 +438,7 @@ impl Choice {
     }
 
     /// `words`, if the model listens for hotwords; otherwise none.
-    pub fn hotwords(&self, words: Vec<String>) -> Vec<String> {
+    pub fn hotwords(&self, words: Vec<Hotword>) -> Vec<Hotword> {
         if self.model.hotwords { words } else { Vec::new() }
     }
 

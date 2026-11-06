@@ -606,6 +606,16 @@ impl Window {
                 self.controls.words.set_settings(WordSettings { hotwords: on, ..self.controls.words.settings() });
                 self.save_settings();
             }
+            Action::WordStrength(strength) => {
+                self.controls.words.set_settings(WordSettings { strength, ..self.controls.words.settings() });
+                self.save_settings();
+            }
+            Action::WordNudge(index, nudge) => {
+                let words = self.controls.words.words();
+                if let Some(Err(error)) = words.entries().get(index).map(|entry| self.controls.words.set_nudge(entry, nudge)) {
+                    self.notify(format!("Couldn't change words.txt: {}", plain_error(&error)), true);
+                }
+            }
             Action::RemoveWordEntry(index) => {
                 let words = self.controls.words.words();
                 if let Some(Err(error)) = words.entries().get(index).map(|entry| self.controls.words.remove(entry)) {

@@ -5,6 +5,7 @@
 //! ```text
 //! kicku => Kiku          # whole words or a phrase, any case, become the text after => as written
 //! @ Tannhauser           # a word to listen for
+//! @ Lull :stronger       # listened for more strongly than the rest (or :weaker)
 //! ! lowercase            # a transform, applied in the order listed
 //! [Discord]              # what follows applies only to Discord ("You" is the mic)
 //! gg => good game
@@ -17,7 +18,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use crate::{log, paths, transcripts};
+use crate::{engine::Hotword, log, paths, transcripts};
 
 /// The file is looked at for changes at most this often.
 const CHECK_EVERY: Duration = Duration::from_secs(1);
@@ -27,6 +28,7 @@ const HEADER: &str = "\
 # Kiku's word rules. Kiku reloads this file whenever it is saved.
 #   kicku => Kiku       these words, any case, become the text after => (nothing after it deletes them)
 #   @ Tannhauser        a word to listen for, in every app (Parakeet Unified listens)
+#   @ Lull :stronger    listened for more strongly than the other @ words (or :weaker, less)
 #   ! lowercase         a transform: lowercase, no-trailing-punctuation or capitalise
 #   [Discord]           what follows applies only to Discord; [You] is your mic
 # Settings → Words picks whether rules and transforms apply to captions, dictation or both.
@@ -42,12 +44,13 @@ The steps live in one plain text file, %APPDATA%\\kiku\\words.txt, which Kiku re
     kicku => Kiku        a rule: these words or this phrase, in any case and only as whole words (punctuation next to them is fine), become the text after => exactly as written
     um =>                nothing after => deletes the words
     @ Tannhauser         a name or word Kiku should listen for, in every app whatever section it is in (only Parakeet Unified listens; other models ignore it)
+    @ Lull :stronger     listened for more strongly than the other @ words; :weaker for less (Settings → Words sets how strongly all of them are)
     ! lowercase          a transform; the built-in ones are lowercase, no-trailing-punctuation and capitalise (the first letter)
     [Discord]            the lines after it apply only to this app, named as Kiku shows it; [You] is my microphone
 
 Lines before the first [App] line apply everywhere. Rules run before transforms, the general ones before an app's, and transforms in the order listed. Where rules overlap, the longest wins. Rules are fixed text: no patterns or wildcards.
 
-Use rules for fixed swaps and deletions, such as a misheard name to its spelling, a word to an emoji, or dropping \"um\". Names and words Kiku keeps mishearing go on @ lines, which help the model hear them; a rule only changes the text afterwards, so rewriting a real word with one changes it everywhere it is said. Settings → Words in Kiku chooses whether rules and transforms apply to captions (the panel, captions mode, History and Kiku's MCP server), to dictation (what Kiku types or pastes, where an app's lines apply to the app being typed into) or both; by default rules apply to both and transforms to dictation.
+Use rules for fixed swaps and deletions, such as a misheard name to its spelling, a word to an emoji, or dropping \"um\". Names and words Kiku keeps mishearing go on @ lines, which help the model hear them; a rule only changes the text afterwards, so rewriting a real word with one changes it everywhere it is said. A word still misheard can be made :stronger, but the stronger it is, the likelier it is heard where a similar word was said. Settings → Words in Kiku chooses whether rules and transforms apply to captions (the panel, captions mode, History and Kiku's MCP server), to dictation (what Kiku types or pastes, where an app's lines apply to the app being typed into) or both; by default rules apply to both and transforms to dictation.
 
 Edit the file in place, keeping my comments and the order of what is there. What I want:
 ";
@@ -95,6 +98,73 @@ impl Scope {
     }
 }
 
+/// How strongly the model listens for the `@` words, all of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Strength {
+    Gentle,
+    #[default]
+    Normal,
+    Strong,
+}
+
+impl Strength {
+    pub const ALL: [Strength; 3] = [Strength::Gentle, Strength::Normal, Strength::Strong];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Strength::Gentle => "Gentle",
+            Strength::Normal => "Normal",
+            Strength::Strong => "Strong",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Strength::Gentle => "gentle",
+            Strength::Normal => "normal",
+            Strength::Strong => "strong",
+        }
+    }
+}
+
+/// How strongly one `@` word is listened for next to the others: `:weaker` or `:stronger` after it in the file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Nudge {
+    Weaker,
+    #[default]
+    Same,
+    Stronger,
+}
+
+impl Nudge {
+    pub const ALL: [Nudge; 3] = [Nudge::Weaker, Nudge::Same, Nudge::Stronger];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Nudge::Weaker => "Weaker",
+            Nudge::Same => "Same",
+            Nudge::Stronger => "Stronger",
+        }
+    }
+
+    /// What follows the word in the file.
+    fn suffix(self) -> &'static str {
+        match self {
+            Nudge::Weaker => " :weaker",
+            Nudge::Same => "",
+            Nudge::Stronger => " :stronger",
+        }
+    }
+}
+
+/// The boost each of a word's tokens gets, weakest first: the strength picks one of the middle three
+/// and a nudge moves a word a step. From about 5 a word is heard where it wasn't said.
+const BOOSTS: [f32; 5] = [0.75, 1.0, 1.5, 2.5, 3.5];
+
+fn boost(strength: Strength, nudge: Nudge) -> f32 {
+    BOOSTS[strength as usize + nudge as usize]
+}
+
 /// Where word rules and transforms apply, kept as `words.*` lines in settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WordSettings {
@@ -102,11 +172,12 @@ pub struct WordSettings {
     pub transforms: Scope,
     /// The model listens for the `@` words, on models that can.
     pub hotwords: bool,
+    pub strength: Strength,
 }
 
 impl Default for WordSettings {
     fn default() -> Self {
-        Self { rules: Scope::Both, transforms: Scope::Dictation, hotwords: true }
+        Self { rules: Scope::Both, transforms: Scope::Dictation, hotwords: true, strength: Strength::Normal }
     }
 }
 
@@ -118,13 +189,15 @@ impl WordSettings {
             "rules" => self.rules = scope.unwrap_or(self.rules),
             "transforms" => self.transforms = scope.unwrap_or(self.transforms),
             "hotwords" => self.hotwords = value != "off",
+            "strength" => self.strength = Strength::ALL.into_iter().find(|strength| strength.id() == value).unwrap_or(self.strength),
             _ => {}
         }
     }
 
     pub fn to_settings(&self) -> String {
         let hotwords = if self.hotwords { "on" } else { "off" };
-        format!("words.rules = {}\nwords.transforms = {}\nwords.hotwords = {hotwords}\n", self.rules.id(), self.transforms.id())
+        let (rules, transforms, strength) = (self.rules.id(), self.transforms.id(), self.strength.id());
+        format!("words.rules = {rules}\nwords.transforms = {transforms}\nwords.hotwords = {hotwords}\nwords.strength = {strength}\n")
     }
 }
 
@@ -171,8 +244,8 @@ impl Transform {
 pub enum Kind {
     /// These words become `to` as written; an empty `to` deletes them.
     Rule { from: String, to: String },
-    /// A word to listen for.
-    Word(String),
+    /// A word to listen for, and how strongly next to the others.
+    Word { word: String, nudge: Nudge },
     Transform(Transform),
 }
 
@@ -225,12 +298,13 @@ impl Words {
         &self.entries
     }
 
-    /// The words to listen for, from every section.
-    pub fn hotwords(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().filter_map(|entry| match &entry.kind {
-            Kind::Word(word) => Some(word.as_str()),
+    /// The words to listen for, from every section, each boosted as `strength` and its nudge say.
+    pub fn hotwords(&self, strength: Strength) -> Vec<Hotword> {
+        let hotword = |entry: &Entry| match &entry.kind {
+            Kind::Word { word, nudge } => Some(Hotword { text: word.clone(), boost: boost(strength, *nudge) }),
             _ => None,
-        })
+        };
+        self.entries.iter().filter_map(hotword).collect()
     }
 
     /// `text` as it reaches `output`, said by (captions) or typed into (dictation) the app labelled `app`,
@@ -288,21 +362,36 @@ impl Words {
     /// Adds a word to listen for, unless it is listed already.
     pub fn add_word(&mut self, word: &str) -> Result<(), String> {
         let word = word.trim();
-        if self.hotwords().any(|known| known.eq_ignore_ascii_case(word)) {
+        if self.entries.iter().any(|entry| matches!(&entry.kind, Kind::Word { word: known, .. } if known.eq_ignore_ascii_case(word))) {
             return Ok(());
         }
-        self.insert_entry(format!("@ {word}"), Kind::Word(word.to_owned()), None).map_err(|()| "Type one word or name to listen for".into())
+        let kind = Kind::Word { word: word.to_owned(), nudge: Nudge::Same };
+        self.insert_entry(format!("@ {word}"), kind, None).map_err(|()| "Type one word or name to listen for".into())
+    }
+
+    /// Changes how strongly the word to listen for in the line holding an entry like `entry` is listened
+    /// for, keeping a comment after it; returns whether there was one.
+    pub fn set_nudge(&mut self, entry: &Entry, nudge: Nudge) -> bool {
+        let Kind::Word { word, .. } = &entry.kind else { return false };
+        let Some(line) = self.line_of(entry) else { return false };
+        let comment = self.lines[line][without_comment(&self.lines[line]).trim_end().len()..].to_owned();
+        self.lines[line] = format!("@ {word}{}{comment}", nudge.suffix());
+        self.read_lines();
+        true
     }
 
     /// Removes the line holding an entry like `entry`; returns whether there was one.
     pub fn remove(&mut self, entry: &Entry) -> bool {
-        let same = |e: &&Entry| e.kind == entry.kind && e.is_in(entry.section.as_deref());
-        // The line it was read from if it is still there, else the first like it.
-        let found = self.entries.iter().filter(same).min_by_key(|e| e.line != entry.line).map(|e| e.line);
-        let Some(line) = found else { return false };
+        let Some(line) = self.line_of(entry) else { return false };
         self.lines.remove(line);
         self.read_lines();
         true
+    }
+
+    /// The line holding an entry like `entry`: the one it was read from if it is still there, else the first like it.
+    fn line_of(&self, entry: &Entry) -> Option<usize> {
+        let same = |e: &&Entry| e.kind == entry.kind && e.is_in(entry.section.as_deref());
+        self.entries.iter().filter(same).min_by_key(|e| e.line != entry.line).map(|e| e.line)
     }
 
     /// Inserts `line` if it reads back as `kind`, which rules out text the file's format would read otherwise.
@@ -401,8 +490,7 @@ fn parse_line(line: &str) -> Result<Parsed, String> {
         return if name.is_empty() { Err("a section needs an app's name".into()) } else { Ok(Parsed::Section(name.to_owned())) };
     }
     if let Some(word) = line.strip_prefix('@') {
-        let word = word.trim();
-        return if word.is_empty() { Err("@ needs a word after it".into()) } else { Ok(Parsed::Entry(Kind::Word(word.to_owned()))) };
+        return parse_word(word).map(Parsed::Entry);
     }
     if let Some(name) = line.strip_prefix('!') {
         let names = Transform::ALL.map(Transform::name).join(", ");
@@ -414,6 +502,19 @@ fn parse_line(line: &str) -> Result<Parsed, String> {
         return Err("a rule needs words before =>".into());
     }
     Ok(Parsed::Entry(Kind::Rule { from, to: to.trim().to_owned() }))
+}
+
+/// An `@` line's word, and how strongly it is listened for if a `:weaker` or `:stronger` follows it.
+fn parse_word(text: &str) -> Result<Kind, String> {
+    let text = text.trim();
+    let (before, last) = text.rsplit_once(char::is_whitespace).map_or(("", text), |(before, last)| (before.trim(), last));
+    let (word, nudge) = if last.starts_with(':') {
+        let nudge = Nudge::ALL.into_iter().find(|nudge| nudge.suffix().trim().eq_ignore_ascii_case(last));
+        (before, nudge.ok_or(format!("no strength \"{last}\" (there are :weaker and :stronger)"))?)
+    } else {
+        (text, Nudge::Same)
+    };
+    if word.is_empty() { Err("@ needs a word after it".into()) } else { Ok(Kind::Word { word: word.to_owned(), nudge }) }
 }
 
 /// The line up to a comment: a # at its start, or with spaces around it.
@@ -566,12 +667,12 @@ impl WordBook {
     }
 
     /// The words the model listens for: the `@` words while the setting is on.
-    pub fn hotwords(&self) -> Vec<String> {
+    pub fn hotwords(&self) -> Vec<Hotword> {
         let state = self.state.lock().unwrap();
         if !state.settings.hotwords {
             return Vec::new();
         }
-        state.words.hotwords().map(str::to_owned).collect()
+        state.words.hotwords(state.settings.strength)
     }
 
     /// `text` as it reaches `output` for the app labelled `app`; see [`Words::apply`].
@@ -594,6 +695,11 @@ impl WordBook {
     /// Adds a word to listen for; see [`Words::add_word`]. Saved at once.
     pub fn add_word(&self, word: &str) -> io::Result<()> {
         self.edit(|words| words.add_word(word))
+    }
+
+    /// Changes how strongly a word is listened for; see [`Words::set_nudge`]. Saved at once.
+    pub fn set_nudge(&self, entry: &Entry, nudge: Nudge) -> io::Result<()> {
+        self.edit(|words| if words.set_nudge(entry, nudge) { Ok(()) } else { Err("That word is no longer in the file".into()) })
     }
 
     /// Removes an entry; see [`Words::remove`]. Saved at once.
@@ -645,7 +751,7 @@ fn path() -> PathBuf {
 mod tests {
     use super::*;
 
-    const BOTH: WordSettings = WordSettings { rules: Scope::Both, transforms: Scope::Both, hotwords: true };
+    const BOTH: WordSettings = WordSettings { rules: Scope::Both, transforms: Scope::Both, hotwords: true, strength: Strength::Normal };
 
     fn run(file: &str, text: &str, app: &str) -> String {
         Words::parse(file).apply(text, app, Output::Captions, &BOTH)
@@ -662,7 +768,7 @@ mod tests {
             kinds,
             [
                 (None, &rule("kicku", "Kiku")),
-                (None, &Kind::Word("Tannhauser".into())),
+                (None, &Kind::Word { word: "Tannhauser".into(), nudge: Nudge::Same }),
                 (None, &Kind::Transform(Transform::NoTrailingPunctuation)),
                 (Some("Discord"), &rule("gg", "good game")),
                 (Some("Discord"), &Kind::Transform(Transform::Capitalise)),
@@ -670,7 +776,30 @@ mod tests {
             ]
         );
         assert_eq!(words.skipped.iter().map(|(line, _)| *line).collect::<Vec<_>>(), [5, 6, 10, 12]);
-        assert_eq!(words.hotwords().collect::<Vec<_>>(), ["Tannhauser"]);
+        assert_eq!(words.hotwords(Strength::Normal), [Hotword { text: "Tannhauser".into(), boost: 1.5 }]);
+    }
+
+    #[test]
+    fn hotwords_are_boosted_by_the_strength_and_their_nudge() {
+        let words = Words::parse("@ Kiku\n@ Lull :stronger  # my app\n@ Re:Zero :Weaker\n@ lol :louder\n@ :stronger\n");
+        assert_eq!(words.skipped.iter().map(|(line, _)| *line).collect::<Vec<_>>(), [4, 5]);
+        let boosts = |strength| words.hotwords(strength).into_iter().map(|word| (word.text, word.boost)).collect::<Vec<_>>();
+        let expected = |boosts: [f32; 3]| ["Kiku", "Lull", "Re:Zero"].into_iter().map(String::from).zip(boosts).collect::<Vec<_>>();
+        assert_eq!(boosts(Strength::Normal), expected([1.5, 2.5, 1.0]));
+        assert_eq!(boosts(Strength::Gentle), expected([1.0, 1.5, 0.75]));
+        assert_eq!(boosts(Strength::Strong), expected([2.5, 3.5, 1.5]));
+    }
+
+    #[test]
+    fn a_words_nudge_is_changed_in_place() {
+        let mut words = Words::parse("# mine\n@ Lull  # my app\nkicku => Kiku\n");
+        let lull = words.entries()[0].clone();
+        assert!(words.set_nudge(&lull, Nudge::Stronger));
+        assert_eq!(words.to_text(), "# mine\n@ Lull :stronger  # my app\nkicku => Kiku\n");
+        let lull = words.entries()[0].clone();
+        assert!(words.set_nudge(&lull, Nudge::Same));
+        assert_eq!(words.to_text(), "# mine\n@ Lull  # my app\nkicku => Kiku\n");
+        assert!(!words.set_nudge(&words.entries()[1].clone(), Nudge::Weaker), "a rule has no strength");
     }
 
     #[test]
@@ -723,7 +852,7 @@ mod tests {
         assert_eq!(words.apply_to_caption("Hi kicku", "", &captions_only), "Hi kicku");
 
         let mut read = WordSettings::default();
-        let changed = WordSettings { rules: Scope::Dictation, transforms: Scope::Both, hotwords: false };
+        let changed = WordSettings { rules: Scope::Dictation, transforms: Scope::Both, hotwords: false, strength: Strength::Strong };
         for line in changed.to_settings().lines().chain(["words.rules = loud", "words.other = both"]) {
             let (key, value) = line.split_once(" = ").unwrap();
             read.apply_setting(key, value);
@@ -781,7 +910,7 @@ mod tests {
         assert_eq!(book.apply("kicku", "", Output::Captions), "kicku");
 
         book.add_word("Tannhauser").unwrap();
-        assert_eq!(book.hotwords(), ["Tannhauser"]);
+        assert_eq!(book.hotwords(), [Hotword { text: "Tannhauser".into(), boost: 1.5 }]);
         book.set_settings(WordSettings { hotwords: false, ..book.settings() });
         assert!(book.hotwords().is_empty(), "the setting turns listening off");
     }

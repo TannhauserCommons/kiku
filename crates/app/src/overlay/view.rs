@@ -23,7 +23,7 @@ use kiku_core::{
     settings::{BlockAnswer, YourLines},
     theme::{Colours, Theme},
     update::Release,
-    words::Scope,
+    words::{Nudge, Scope, Strength},
 };
 
 /// What the panel is showing.
@@ -127,6 +127,10 @@ pub enum Action {
     WordScope { transforms: bool, scope: Scope },
     /// Whether the model listens for the file's `@` words.
     WordHotwords(bool),
+    /// How strongly it listens for all of them.
+    WordStrength(Strength),
+    /// How strongly it listens for one, next to the others, by its place in the file's entries.
+    WordNudge(usize, Nudge),
     /// Removes an entry from the word rules file, by its place in the file's entries.
     RemoveWordEntry(usize),
     /// Opens the word rules file, made first if missing.

@@ -25,7 +25,7 @@ use kiku::{
 use kiku_core::{
     captions::{Captions, StreamId, YOU, YOU_SECTION},
     controls::{Controls, Gate, Input, THRESHOLD_MIN_DB},
-    engine::{self, Device, Engine, EngineStream, Line, ModelSpec, Result, POLL_INTERVAL},
+    engine::{self, Device, Engine, EngineStream, Hotword, Line, ModelSpec, Result, POLL_INTERVAL},
     hardware::Hardware,
     log,
     misses::{self, Recent},
@@ -842,7 +842,7 @@ fn reopen<'e>(engine: &'e dyn Engine, sources: &mut Sources, slot: &mut Option<S
     *slot = sources.open(engine, index);
 }
 
-fn load_logged(choice: Choice, hotwords: Vec<String>) -> Result<Box<dyn Engine>> {
+fn load_logged(choice: Choice, hotwords: Vec<Hotword>) -> Result<Box<dyn Engine>> {
     let start = Instant::now();
     let loaded = engine::load(&ModelSpec { hotwords: choice.hotwords(hotwords), ..choice.spec() });
     match &loaded {

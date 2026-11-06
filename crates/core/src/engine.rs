@@ -40,7 +40,7 @@ pub trait Engine: Send + Sync {
 
     /// Changes the words to listen for (see [`ModelSpec::hotwords`]) from the next phrase on. Returns false
     /// when that needs the model loaded again with them: turning hotwords on or off changes how it decodes.
-    fn set_hotwords(&self, _words: &[String]) -> bool {
+    fn set_hotwords(&self, _words: &[Hotword]) -> bool {
         true
     }
 }
@@ -181,7 +181,15 @@ pub struct ModelSpec {
     pub vad: Option<PathBuf>,
     /// Words to listen for, e.g. names the model would otherwise mishear. NeMo transducers decode
     /// with beam search when there are any; other models ignore them.
-    pub hotwords: Vec<String>,
+    pub hotwords: Vec<Hotword>,
+}
+
+/// A word or phrase to listen for, and how strongly: the score each of its tokens gains while decoding.
+/// The more it gains, the likelier the word is heard, also where it wasn't said.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hotword {
+    pub text: String,
+    pub boost: f32,
 }
 
 /// Loads the model described by `spec` in a helper process (see [`crate::engine_host`]), so a crash
