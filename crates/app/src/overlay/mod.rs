@@ -88,7 +88,7 @@ use kiku_core::{
 use app_icon::register_class;
 use finder::{example_sql, line_text, table_text, Reply, Request, Searcher, TextBox};
 use folds::auto_fold_after;
-use render::{fraction_at, threshold_at, usage_text, Meter, Panel, Renderer, Surface, HANDLE_STRIP, TITLE_HEIGHT};
+use render::{fraction_at, strength_at, threshold_at, usage_text, Meter, Panel, Renderer, Surface, HANDLE_STRIP, TITLE_HEIGHT};
 use settings::SettingsWindow;
 use subtitles::{Subtitles, TabEvent, WM_SUBTITLES};
 use tray::{MenuChoice, MenuState, Tray, WM_TRAY};
@@ -606,16 +606,7 @@ impl Window {
                 self.controls.words.set_settings(WordSettings { hotwords: on, ..self.controls.words.settings() });
                 self.save_settings();
             }
-            Action::WordStrength(strength) => {
-                self.controls.words.set_settings(WordSettings { strength, ..self.controls.words.settings() });
-                self.save_settings();
-            }
-            Action::WordNudge(index, nudge) => {
-                let words = self.controls.words.words();
-                if let Some(Err(error)) = words.entries().get(index).map(|entry| self.controls.words.set_nudge(entry, nudge)) {
-                    self.notify(format!("Couldn't change words.txt: {}", plain_error(&error)), true);
-                }
-            }
+            Action::ResetWordStrength(index) => self.set_word_strength(index, None),
             Action::RemoveWordEntry(index) => {
                 let words = self.controls.words.words();
                 if let Some(Err(error)) = words.entries().get(index).map(|entry| self.controls.words.remove(entry)) {
@@ -956,6 +947,9 @@ impl Window {
             WM_LBUTTONUP if self.dragging.is_some() => {
                 self.dragging = None;
                 unsafe { ReleaseCapture().ok() }.unwrap_or_default();
+                if let Some((index, strength)) = self.settings.view.word_strength.take() {
+                    self.set_word_strength(index, Some(strength));
+                }
                 self.save_settings();
                 // The panel showed a locked opacity while it was dragged.
                 self.redraw();
@@ -1129,10 +1123,30 @@ impl Window {
                 let percent = MIN_TEXT_OPACITY + (fraction_at(&track, x) * (100 - MIN_TEXT_OPACITY) as f32).round() as u8;
                 std::mem::replace(&mut self.opacity_mut(locked).text, percent) != percent
             }
+            // The decoder takes the new strength from the next phrase on.
+            Slider::Strength => {
+                let settings = self.controls.words.settings();
+                let strength = strength_at(&track, x);
+                self.controls.words.set_settings(WordSettings { strength, ..settings });
+                settings.strength != strength
+            }
+            Slider::WordStrength(index) => {
+                let strength = Some((index, strength_at(&track, x)));
+                std::mem::replace(&mut self.settings.view.word_strength, strength) != strength
+            }
         };
         if changed {
             self.redraw();
         }
+    }
+
+    /// Gives the word at `index` in the file's entries a strength of its own, or the rest's with `None`.
+    fn set_word_strength(&mut self, index: usize, strength: Option<f32>) {
+        let words = self.controls.words.words();
+        if let Some(Err(error)) = words.entries().get(index).map(|entry| self.controls.words.set_strength(entry, strength)) {
+            self.notify(format!("Couldn't change words.txt: {}", plain_error(&error)), true);
+        }
+        self.redraw();
     }
 
     fn opacity_mut(&mut self, locked: bool) -> &mut Opacity {

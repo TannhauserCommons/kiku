@@ -5,18 +5,18 @@ use windows::{core::Result, Win32::Graphics::Direct2D::Common::D2D_RECT_F};
 
 use kiku_core::{
     captions::YOU,
-    words::{Kind, Nudge, Scope, Strength},
+    words::{strength_text, Kind, Scope, STRENGTHS},
 };
 
 use super::{
     design::{CONTROL, SETTING_ROW},
     height_of,
     history::BoxRole,
-    metrics, rect, width, Emphasis, Panel, Renderer, Tone, BUTTON, SECTION_GAP,
+    metrics, rect, strength_fraction, width, Emphasis, Panel, Renderer, Tone, BUTTON, KNOB, SECTION_GAP, TRACK,
 };
 use crate::overlay::{
     render::Icon,
-    view::{Action, Regions, WordBox},
+    view::{Action, Regions, Slider, Target, WordBox},
 };
 
 /// Lines the file couldn't read that the tab names; the log has every one.
@@ -35,12 +35,13 @@ impl Renderer {
                 y = renderer.draw_choice_row(label, &choices, inner, y, panel, regions)?;
             }
             y = renderer.draw_toggle_row("Listen for @ words", settings.hotwords, Action::WordHotwords(!settings.hotwords), inner, y, panel, regions)?;
-            let strengths = Strength::ALL.map(|strength| (strength.name(), strength == settings.strength, Action::WordStrength(strength)));
-            renderer.draw_choice_row("Listen for them", &strengths, inner, y, panel, regions)
+            let strength = settings.strength;
+            renderer.draw_slider_row("Strength", &strength_text(strength), strength_fraction(strength), Slider::Strength, inner, y, regions)
         })?;
         let hint = "Captions are what the panel, captions mode, History and the MCP server get; dictation is what Kiku types or pastes. \
-                    @ words are listened for in every app, by Parakeet Unified only. The stronger they are, the likelier they are heard, \
-                    also where a similar word was said; each one can be made weaker or stronger than the rest below.";
+                    @ words are listened for in every app, by Parakeet Unified only, as strongly as Strength says (1.5 at first). The \
+                    stronger, the likelier they are heard; toward 4 they start to be heard where they weren't said. Each word below \
+                    can have a strength of its own.";
         y = self.draw_hint(hint, content, y)?;
 
         y = self.draw_heading("Try", content, y + SECTION_GAP)?;
@@ -67,7 +68,7 @@ impl Renderer {
             renderer.draw_two_line_row("Ask an assistant", "How the file works, for you to add what you want", &copy, inner, y, panel, regions)
         })?;
         let hint = "One entry a line: kicku => Kiku swaps words (nothing after => deletes them), @ Tannhauser is a word to listen for \
-                    (:stronger or :weaker after it to change how strongly), \
+                    (:2.5 after it gives it a strength of its own), \
                     ! lowercase, ! no-trailing-punctuation and ! capitalise change the whole line, and [Discord] starts what applies only to Discord ([You] is your mic).";
         y = self.draw_hint(hint, content, y)?;
         self.draw_word_entries(panel, content, y + SECTION_GAP, regions)
@@ -142,8 +143,8 @@ impl Renderer {
         Ok(y)
     }
 
-    /// An entry as it reads, what kind it is (a word to listen for, how strongly next to the others), and
-    /// a button removing it. Returns the y below.
+    /// An entry as it reads, what kind it is (with a word to listen for, how strongly), and a button removing
+    /// it. Returns the y below.
     #[allow(clippy::too_many_arguments)]
     fn draw_word_entry(&mut self, index: usize, kind: &Kind, content: D2D_RECT_F, y: f32, panel: &Panel, regions: &mut Regions) -> Result<f32> {
         self.begin_row(content, y)?;
@@ -151,9 +152,8 @@ impl Renderer {
         let remove = rect(content.right + 6.0 - BUTTON, middle - BUTTON / 2.0, content.right + 6.0, middle + BUTTON / 2.0);
         self.icon_button(remove, Icon::Trash, Action::RemoveWordEntry(index), Tone::Dim, panel, regions)?;
         let mut right = remove.left - 6.0;
-        if let Kind::Word { nudge: chosen, .. } = kind {
-            let nudges = Nudge::ALL.map(|nudge| (nudge.name(), nudge == *chosen, (nudge != *chosen).then_some(Action::WordNudge(index, nudge))));
-            right = self.draw_segments(&nudges, right, middle, panel, regions)? - 6.0;
+        if let Kind::Word { strength, .. } = kind {
+            right = self.draw_word_strength(index, *strength, right, middle, panel, regions)? - 12.0;
         }
         let (text, what) = match kind {
             Kind::Rule { from, to } if to.is_empty() => (format!("{from}  →  deleted"), "rule"),
@@ -167,6 +167,38 @@ impl Renderer {
         let text = self.single_line(&self.fonts.body, &text, what_left - content.left - 12.0)?;
         self.draw_layout(&text, content.left, middle - height_of(&text)? / 2.0, self.palette.text)?;
         Ok(y + SETTING_ROW)
+    }
+
+    /// A word's strength: a slider, its value (faint while it is the rest's, in the warning colour above
+    /// what settings offer) and, while it has its own, a button back to the rest's, ending at `right`.
+    /// Returns the slider's left edge.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_word_strength(&mut self, index: usize, own: Option<f32>, right: f32, middle: f32, panel: &Panel, regions: &mut Regions) -> Result<f32> {
+        const SLIDER: f32 = 120.0;
+        const VALUE: f32 = 30.0;
+        let dragged = panel.view.word_strength.filter(|&(at, _)| at == index).map(|(_, strength)| strength);
+        let own = dragged.or(own);
+        let strength = own.unwrap_or(panel.word_settings.strength);
+        let reset = rect(right - BUTTON, middle - BUTTON / 2.0, right, middle + BUTTON / 2.0);
+        if own.is_some() {
+            self.icon_button(reset, Icon::Reset, Action::ResetWordStrength(index), Tone::Dim, panel, regions)?;
+        }
+        let colour = match own {
+            Some(strength) if strength > *STRENGTHS.end() => self.palette.warn,
+            Some(_) => self.palette.text,
+            None => self.palette.text_faint,
+        };
+        let value = self.single_line(&self.fonts.small, &strength_text(strength), f32::MAX)?;
+        let value_right = reset.left - 2.0;
+        self.draw_layout(&value, value_right - metrics(&value)?.width, middle - height_of(&value)? / 2.0, colour)?;
+        let track_right = value_right - VALUE - KNOB / 2.0;
+        let track = rect(track_right - SLIDER, middle - TRACK / 2.0, track_right, middle + TRACK / 2.0);
+        let fraction = strength_fraction(strength);
+        let band = if own.is_some() { self.palette.accent } else { self.palette.text_faint };
+        self.draw_slider(track, fraction, &[(0.0, fraction, band)])?;
+        // The clickable band is taller than the track so it is easy to grab.
+        regions.targets.push((rect(track.left, middle - 12.0, track.right, middle + 12.0), Target::Slider(Slider::WordStrength(index))));
+        Ok(track.left - KNOB / 2.0)
     }
 }
 

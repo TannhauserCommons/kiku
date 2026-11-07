@@ -31,8 +31,8 @@ pub struct PhraseEngine {
     recognizer: OfflineRecognizer,
     vad: VadModelConfig,
     kind: PhraseModel,
-    /// The words to listen for, as sherpa-onnx takes them per stream, while the recognizer decodes for them.
-    hotwords: Option<Mutex<String>>,
+    /// The words to listen for, while the recognizer decodes for them.
+    hotwords: Option<Mutex<Vec<Hotword>>>,
 }
 
 impl PhraseEngine {
@@ -73,7 +73,7 @@ impl PhraseEngine {
         model.tokens = Some(tokens.clone());
         model.num_threads = THREADS;
         model.provider = Some(provider(spec.device).into());
-        let hotwords = (kind == PhraseModel::NemoTransducer && !spec.hotwords.is_empty()).then(|| hotwords_text(&spec.hotwords));
+        let hotwords = (kind == PhraseModel::NemoTransducer && !spec.hotwords.is_empty()).then(|| spec.hotwords.clone());
         if hotwords.is_some() {
             decode_for_hotwords(&mut config, Path::new(&tokens))?;
         }
@@ -85,7 +85,7 @@ impl PhraseEngine {
     /// A stream for one phrase, listening for the hotwords if there are any.
     fn create_stream(&self) -> OfflineStream {
         match &self.hotwords {
-            Some(hotwords) => self.recognizer.create_stream_with_hotwords(&hotwords.lock().unwrap()),
+            Some(hotwords) => self.recognizer.create_stream_with_hotwords(&hotwords_text(&hotwords.lock().unwrap())),
             None => self.recognizer.create_stream(),
         }
     }
@@ -106,7 +106,7 @@ impl Engine for PhraseEngine {
     fn set_hotwords(&self, words: &[Hotword]) -> bool {
         match &self.hotwords {
             Some(hotwords) if !words.is_empty() => {
-                *hotwords.lock().unwrap() = hotwords_text(words);
+                *hotwords.lock().unwrap() = words.to_vec();
                 true
             }
             Some(_) => false,
@@ -167,7 +167,11 @@ impl PhraseStream<'_> {
         let stream = self.engine.create_stream();
         stream.accept_waveform(SAMPLE_RATE as i32, samples);
         self.engine.recognizer.decode(&stream);
-        stream.get_result().map(|r| r.text.trim().to_owned()).unwrap_or_default()
+        let text = stream.get_result().map(|r| r.text.trim().to_owned()).unwrap_or_default();
+        match &self.engine.hotwords {
+            Some(hotwords) => without_repeats(&text, &hotwords.lock().unwrap()),
+            None => text,
+        }
     }
 }
 
@@ -239,10 +243,36 @@ fn tokens_file(dir: &Path) -> Result<String> {
 /// its boost as a score (`:2.5`). Pieces it would read as a line break or a score are left out of the words.
 fn hotwords_text(words: &[Hotword]) -> String {
     let phrases = words.iter().filter_map(|word| {
-        let phrase = word.text.replace('/', " ").split_whitespace().filter(|piece| !piece.starts_with(':')).collect::<Vec<_>>().join(" ");
+        let phrase = hotword_pieces(word).join(" ");
         (!phrase.is_empty()).then(|| format!("{phrase} :{}", word.boost))
     });
     phrases.collect::<Vec<_>>().join("/")
+}
+
+fn hotword_pieces(word: &Hotword) -> Vec<&str> {
+    word.text.split(|c: char| c == '/' || c.is_whitespace()).filter(|piece| !piece.is_empty() && !piece.starts_with(':')).collect()
+}
+
+/// `text` with a hotword decoded twice or more in a row written once: beam search can repeat a boosted word
+/// said once ("Nguyen Nguyen"), the more so the stronger it is. The last copy stays, with what follows it.
+fn without_repeats(text: &str, words: &[Hotword]) -> String {
+    let bare = |piece: &str| piece.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+    let mut pieces: Vec<&str> = text.split_whitespace().collect();
+    let before = pieces.len();
+    for word in words {
+        let phrase: Vec<String> = hotword_pieces(word).into_iter().map(bare).collect();
+        let n = phrase.len();
+        let at_phrase = |pieces: &[&str], at: usize| n > 0 && at + n <= pieces.len() && pieces[at..at + n].iter().map(|p| bare(p)).eq(phrase.iter().cloned());
+        let mut at = 0;
+        while at < pieces.len() {
+            if at_phrase(&pieces, at) && at_phrase(&pieces, at + n) {
+                pieces.drain(at..at + n);
+            } else {
+                at += 1;
+            }
+        }
+    }
+    if pieces.len() == before { text.to_owned() } else { pieces.join(" ") }
 }
 
 /// Has the recognizer decode with modified beam search, which hotwords need. sherpa-onnx splits a
@@ -309,6 +339,16 @@ mod tests {
         let words = ["Kiku", " New  York ", "AC/DC", "x :2.0", "", ":3"].map(|text| Hotword { text: text.into(), boost: 1.5 });
         let strong = Hotword { text: "Lull".into(), boost: 2.5 };
         assert_eq!(hotwords_text(&[&words[..], &[strong]].concat()), "Kiku :1.5/New York :1.5/AC DC :1.5/x :1.5/Lull :2.5");
+    }
+
+    #[test]
+    fn a_hotword_repeated_back_to_back_is_written_once() {
+        let words = ["Nguyen", "New York", "Kiku"].map(|text| Hotword { text: text.into(), boost: 2.5 });
+        assert_eq!(without_repeats("Dr. Nguyen Nguyen Nguyen will call back.", &words), "Dr. Nguyen will call back.");
+        assert_eq!(without_repeats("I think Kiku, kiku missed that word", &words), "I think kiku missed that word");
+        assert_eq!(without_repeats("in New York New York.", &words), "in New York.");
+        assert_eq!(without_repeats("Kiku and Kiku again", &words), "Kiku and Kiku again");
+        assert_eq!(without_repeats("No  no, Kiku.", &words), "No  no, Kiku.", "untouched text keeps its spacing");
     }
 
     #[test]

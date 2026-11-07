@@ -452,7 +452,7 @@ impl Renderer {
 
     /// `label`, a slider at `fraction` setting what `slider` sets, and its `value` at the end. Returns the y below.
     #[allow(clippy::too_many_arguments)]
-    fn draw_slider_row(&mut self, label: &str, value: &str, fraction: f32, slider: Slider, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
+    pub(super) fn draw_slider_row(&mut self, label: &str, value: &str, fraction: f32, slider: Slider, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
         const VALUE: f32 = 72.0;
         let middle = y + SETTING_ROW / 2.0;
         self.draw_row_label(label, content, y)?;

@@ -75,7 +75,7 @@ use kiku_core::{
     subtitles::SubtitleSettings,
     theme::{CustomTheme, Theme, Themes},
     update::{self, Release},
-    words::{Nudge, Scope, Strength, WordSettings, Words},
+    words::{Scope, WordSettings, Words, STRENGTHS},
 };
 use std::time::Instant;
 
@@ -195,6 +195,17 @@ pub struct Meter {
 /// How far along a slider drawn in `track` a click or drag at `x` is, from 0 to 1.
 pub fn fraction_at(track: &D2D_RECT_F, x: f32) -> f32 {
     ((x - track.left) / width(track)).clamp(0.0, 1.0)
+}
+
+/// The hotword strength for a click or drag at `x` on a strength slider drawn in `track`, to a tenth.
+pub fn strength_at(track: &D2D_RECT_F, x: f32) -> f32 {
+    let strength = STRENGTHS.start() + fraction_at(track, x) * (STRENGTHS.end() - STRENGTHS.start());
+    (strength * 10.0).round() / 10.0
+}
+
+/// Where a hotword strength sits along a strength slider, from 0 to 1.
+fn strength_fraction(strength: f32) -> f32 {
+    ((strength - STRENGTHS.start()) / (STRENGTHS.end() - STRENGTHS.start())).clamp(0.0, 1.0)
 }
 
 /// The threshold for a click or drag at `x` on a sensitivity slider drawn in `track`.
@@ -2572,12 +2583,7 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         }
         Action::WordHotwords(true) => "Help Parakeet Unified hear the @ words; it decodes a little slower while there are any".into(),
         Action::WordHotwords(false) => "Decode as if there were no @ words".into(),
-        Action::WordStrength(Strength::Gentle) => "Listen gently: an @ word wins only where the model nearly heard it anyway".into(),
-        Action::WordStrength(Strength::Normal) => "Listen as Kiku does by default".into(),
-        Action::WordStrength(Strength::Strong) => "Listen strongly: @ words are heard more, also where a similar word was said".into(),
-        Action::WordNudge(_, Nudge::Weaker) => "Listen for this word less strongly than the other @ words".into(),
-        Action::WordNudge(_, Nudge::Same) => "Listen for this word as strongly as the other @ words".into(),
-        Action::WordNudge(_, Nudge::Stronger) => "Listen for this word more strongly than the other @ words".into(),
+        Action::ResetWordStrength(_) => "Listen for it as strongly as the other @ words again".into(),
         Action::RemoveWordEntry(_) => "Take it out of the file".into(),
         Action::OpenWords => "Open words.txt in your text editor".into(),
         Action::CopyWordInstructions => "Copy how the file works for ChatGPT, Claude or another assistant, then add what you want".into(),

@@ -423,4 +423,25 @@ mod tests {
         write_frame(&mut framed, POLL, b"abc").unwrap();
         assert_eq!(read_frame(&mut framed.as_slice()).unwrap(), (POLL, b"abc".to_vec()));
     }
+
+    /// A word's strength changed on a loaded model, as Settings' sliders do, applies from the next phrase:
+    /// made very strong, the word is heard where it wasn't said, and set back, it isn't. Needs Parakeet
+    /// Unified installed (`KIKU_MODELS_DIR` can point at the folder) and the helper built
+    /// (`cargo build -p kiku-core --bin kiku-engine`).
+    #[test]
+    #[ignore]
+    fn a_hotwords_strength_changes_what_is_heard() {
+        let model = crate::catalog::by_id_or_default(crate::catalog::DEFAULT_ID);
+        let variant = model.variants.iter().find(|variant| variant.installed()).expect("Parakeet Unified is installed");
+        let lull = |boost| vec![Hotword { text: "Lull".into(), boost }];
+        let engine = crate::engine::load(&ModelSpec { hotwords: lull(1.5), ..model.spec(variant) }).unwrap();
+        let heard = || hear(engine.as_ref(), &probe_clip()).unwrap();
+        let usual = heard();
+        assert!(!usual.contains("Lull"), "{usual}");
+        assert!(engine.set_hotwords(&lull(8.0)), "a new strength needs no reload");
+        let strong = heard();
+        assert!(strong.contains("Lull"), "{strong}");
+        assert!(engine.set_hotwords(&lull(1.5)));
+        assert_eq!(heard(), usual);
+    }
 }

@@ -23,7 +23,7 @@ use kiku_core::{
     settings::{BlockAnswer, YourLines},
     theme::{Colours, Theme},
     update::Release,
-    words::{Nudge, Scope, Strength},
+    words::Scope,
 };
 
 /// What the panel is showing.
@@ -127,10 +127,8 @@ pub enum Action {
     WordScope { transforms: bool, scope: Scope },
     /// Whether the model listens for the file's `@` words.
     WordHotwords(bool),
-    /// How strongly it listens for all of them.
-    WordStrength(Strength),
-    /// How strongly it listens for one, next to the others, by its place in the file's entries.
-    WordNudge(usize, Nudge),
+    /// Has a word listened for as strongly as the rest again, by its place in the file's entries.
+    ResetWordStrength(usize),
     /// Removes an entry from the word rules file, by its place in the file's entries.
     RemoveWordEntry(usize),
     /// Opens the word rules file, made first if missing.
@@ -355,6 +353,10 @@ pub enum Slider {
     WindowOpacity { locked: bool },
     /// The opacity of the panel's text, while locked or unlocked.
     TextOpacity { locked: bool },
+    /// How strongly the model listens for the `@` words without a strength of their own.
+    Strength,
+    /// How strongly it listens for one `@` word, by its place in the file's entries.
+    WordStrength(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -595,6 +597,9 @@ pub struct View {
     pub try_words: Field,
     pub correction: Correction,
     pub typing_word: Option<WordBox>,
+    /// A word's strength while its slider is dragged, by its place in the file's entries; the file gets it
+    /// when the slider is let go.
+    pub word_strength: Option<(usize, f32)>,
     /// The shortcut waiting for keys to be pressed, if any.
     pub rebinding: Option<Rebind>,
     pub scrolls: HashMap<ScrollArea, Scroll>,
@@ -635,6 +640,7 @@ impl View {
             try_words: Field::default(),
             correction: Correction::default(),
             typing_word: None,
+            word_strength: None,
             scrolls: HashMap::new(),
             regions: Regions::default(),
         }
