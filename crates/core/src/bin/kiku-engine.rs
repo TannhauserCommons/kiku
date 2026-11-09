@@ -1,7 +1,7 @@
 //! The helper process that runs Kiku's model; see `engine_host`. Started by the app,
 //! it ends when the app closes its input or ends it. `--probe <backend> <dir> [vad]` instead tries
 //! an imported model on a test clip and prints what it heard. `--serve` hosts the model for other
-//! computers (`remote::host`).
+//! computers (`remote::host`). `--models` and `--download` are the catalog's commands, `--check` tries a host (`models_cli`).
 
 // No console window; the app talks to it over pipes.
 #![windows_subsystem = "windows"]
@@ -13,6 +13,10 @@ fn main() -> std::process::ExitCode {
         Some("--serve") => {
             attach_parent_console();
             kiku_core::remote::host::serve(&args)
+        }
+        Some("--models" | "--download" | "--check") => {
+            attach_parent_console();
+            kiku_core::models_cli::run(&args)
         }
         _ => {
             kiku_core::engine_host::serve();

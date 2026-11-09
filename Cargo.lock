@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "kiku"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "kiku-core",
  "serde_json",
@@ -824,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "kiku-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -832,6 +832,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "fs4",
+ "libc",
  "rcgen",
  "ring",
  "rusqlite",

@@ -208,10 +208,68 @@ pub fn load(spec: &ModelSpec) -> Result<Box<dyn Engine>> {
 
 /// Loads the model in this process.
 pub fn load_here(spec: &ModelSpec) -> Result<Box<dyn Engine>> {
+    #[cfg(not(windows))]
+    if spec.device == Device::Cuda && matches!(spec.backend, Backend::Phrases(_)) {
+        check_cuda_provider()?;
+    }
     match spec.backend {
         Backend::MoonshineTinyStreaming
         | Backend::MoonshineSmallStreaming
         | Backend::MoonshineMediumStreaming => Ok(Box::new(MoonshineEngine::load(spec)?)),
         Backend::Phrases(kind) => Ok(Box::new(PhraseEngine::load(spec, kind)?)),
+    }
+}
+
+/// ONNX Runtime drops a CUDA provider that can't start and runs on the CPU without a word, so a GPU load on
+/// Linux first checks what the provider needs (CUDA 12.9's runtime and libraries, cuDNN 9, a driver that
+/// sees a GPU and supports CUDA 12.9), failing with the reason. The provider itself isn't loaded here: it
+/// must come after ONNX Runtime's own setup.
+#[cfg(not(windows))]
+fn check_cuda_provider() -> Result<()> {
+    let unusable = |why: String| format!("the GPU can't be used here ({why}): install NVIDIA's driver with CUDA 12.9 and cuDNN 9, or use the CPU");
+    for library in ["libcublasLt.so.12", "libcublas.so.12", "libcurand.so.10", "libcudnn.so.9"] {
+        open_library(library).map_err(unusable)?;
+    }
+    let runtime = open_library("libcudart.so.12").map_err(unusable)?;
+    let driver = open_library("libcuda.so.1").map_err(|why| unusable(format!("no NVIDIA driver: {why}")))?;
+    // SAFETY: the CUDA runtime's and driver's documented C signatures; each pointer comes from dlsym on them.
+    unsafe {
+        let symbol = |library: *mut libc::c_void, name: &str| {
+            let name = std::ffi::CString::new(name).unwrap();
+            let found = libc::dlsym(library, name.as_ptr());
+            if found.is_null() { Err(unusable(format!("no {} in the CUDA libraries", name.to_string_lossy()))) } else { Ok(found) }
+        };
+        let runtime_version: extern "C" fn(*mut i32) -> i32 = std::mem::transmute(symbol(runtime, "cudaRuntimeGetVersion")?);
+        let mut found = 0;
+        if runtime_version(&mut found) == 0 && found < 12090 {
+            return Err(unusable(format!("its CUDA runtime is {}.{}, older than 12.9", found / 1000, found % 1000 / 10)).into());
+        }
+        let init: extern "C" fn(u32) -> i32 = std::mem::transmute(symbol(driver, "cuInit")?);
+        let count: extern "C" fn(*mut i32) -> i32 = std::mem::transmute(symbol(driver, "cuDeviceGetCount")?);
+        let version: extern "C" fn(*mut i32) -> i32 = std::mem::transmute(symbol(driver, "cuDriverGetVersion")?);
+        let code = init(0);
+        if code != 0 {
+            return Err(unusable(format!("the NVIDIA driver didn't start, error {code}; in Docker, run with --gpus all")).into());
+        }
+        let mut gpus = 0;
+        if count(&mut gpus) != 0 || gpus == 0 {
+            return Err(unusable("no NVIDIA GPU is visible; in Docker, run with --gpus all".into()).into());
+        }
+        let mut supported = 0;
+        if version(&mut supported) == 0 && supported < 12090 {
+            return Err(unusable(format!("the driver supports CUDA {}.{}, older than 12.9", supported / 1000, supported % 1000 / 10)).into());
+        }
+    }
+    Ok(())
+}
+
+/// Loads a shared library for good, or says why it couldn't.
+#[cfg(not(windows))]
+fn open_library(name: &str) -> std::result::Result<*mut libc::c_void, String> {
+    let name = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
+    // SAFETY: dlopen and dlerror get a valid C string on this thread; the library is never closed.
+    unsafe {
+        let handle = libc::dlopen(name.as_ptr(), libc::RTLD_NOW);
+        if handle.is_null() { Err(std::ffi::CStr::from_ptr(libc::dlerror()).to_string_lossy().into_owned()) } else { Ok(handle) }
     }
 }

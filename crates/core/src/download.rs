@@ -129,8 +129,11 @@ impl Target {
     }
 
     /// The GPU pack, if this is a GPU build and the pack is missing: a download of its own, queued
-    /// with the model's so its progress shows by itself.
+    /// with the model's so its progress shows by itself. Windows only: a Linux host's CUDA libraries come from the system.
     pub fn gpu_pack(&self) -> Option<Target> {
+        if !cfg!(windows) {
+            return None;
+        }
         let pack = catalog::component(GPU_PACK);
         let gpu_model = matches!(self, Target::Model(_, variant) if variant.device == Device::Cuda);
         (gpu_model && !pack.installed()).then_some(Target::Component(pack))

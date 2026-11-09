@@ -36,6 +36,10 @@ if [ ! -f "$runtime" ]; then
     echo "the runtime is not fetched yet: $runtime" >&2
     exit 1
 fi
-cmake -S "$src/core" -B "$build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DMOONSHINE_BUILD_STATIC=ON -DMOONSHINE_ORT_LIBRARY="$runtime"
-cmake --build "$build" --target moonshine --parallel
+# CMake before 3.25 (Ubuntu 22.04) doesn't define LINUX, which Moonshine's CMake files test.
+case "$(uname -s)" in Linux) platform=-DLINUX=ON ;; *) platform= ;; esac
+# __FILE__ in the built code names no folder of this machine.
+map="-ffile-prefix-map=$(cd "$root" && pwd)=third_party"
+cmake -S "$src/core" -B "$build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$map" -DCMAKE_CXX_FLAGS="$map" -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+    -DMOONSHINE_BUILD_STATIC=ON -DMOONSHINE_ORT_LIBRARY="$runtime" $platform
+cmake --build "$build" --target moonshine --parallel 6

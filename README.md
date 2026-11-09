@@ -55,6 +55,20 @@ other setting stay on that PC; only the audio being captioned goes to the host, 
 - **Without the app:** `kiku-engine.exe --serve [--listen <address:port>] [--state <folder>]`, run from
   Kiku's install folder, shares the models there and prints the code.
 
+### Hosting on Linux
+
+A Linux PC or server (x64; Ubuntu 22.04 or Debian 12 and newer) can host the models, on the CPU or an NVIDIA
+GPU. Download `kiku-engine-linux-x64.tar.gz` from the [latest release](../../releases/latest) and unpack it,
+or use the Docker image:
+
+```
+tar xzf kiku-engine-*-linux-x64.tar.gz && ./kiku-engine/kiku-engine --download parakeet-unified && ./kiku-engine/kiku-engine --serve
+docker run -d --init --gpus all -p 7300:7300 -v kiku:/data ghcr.io/tannhausercommons/kiku-engine
+```
+
+Either way it prints the code to paste into Kiku on Windows. `HOSTING.md` in the tarball covers downloading
+models (the image needs a `--download` run first), the GPU's requirements, a systemd service and Tailscale.
+
 ## Privacy
 
 What Kiku hears, its captions and its transcripts stay on your PC. Kiku goes online only to download the

@@ -10,6 +10,7 @@ pub mod imports;
 pub mod keybinds;
 pub mod log;
 pub mod misses;
+pub mod models_cli;
 mod moonshine;
 pub mod paths;
 pub mod recording;

@@ -1,1 +1,5 @@
 *.patch -text
+# Run in Linux containers and on Linux, so always LF.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf

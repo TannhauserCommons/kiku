@@ -20,13 +20,24 @@ PATTERNS = {
 ALLOWED = {'info@e-szigno.hu', 'appro@openssl.org'}
 # Files quoting other people's licences, copyright lines and addresses included; private words still count.
 QUOTES = {'THIRD-PARTY-NOTICES.txt': {'an email address'}}
+# Upstream libraries shipped as built (builders' paths, random bytes that look like addresses); only the
+# private words in KIKU_PRIVATE_WORDS are looked for in them.
+UPSTREAM = {'libonnxruntime.so', 'libonnxruntime_providers_cuda.so', 'libonnxruntime_providers_shared.so',
+            'libsherpa-onnx-c-api.so', 'libsherpa-onnx-cxx-api.so'}
 # Below this length a word matches too much by chance to say anything.
 SHORTEST_WORD = 4
 
 
+def explicit_words():
+    return sorted({w.strip() for w in os.environ.get('KIKU_PRIVATE_WORDS', '').split(',') if len(w.strip()) >= SHORTEST_WORD},
+                  key=len, reverse=True)
+
+
 def private_words():
-    words = [w.strip() for w in os.environ.get('KIKU_PRIVATE_WORDS', '').split(',')]
-    words += [os.environ.get(name, '') for name in ('USERNAME', 'USER', 'COMPUTERNAME')]
+    words = explicit_words()
+    # A CI runner's names are its own (e.g. "runner"), not the owner's; there the explicit words cover them.
+    if os.environ.get('GITHUB_ACTIONS') != 'true':
+        words += [os.environ.get(name, '') for name in ('USERNAME', 'USER', 'COMPUTERNAME')]
     return sorted({w for w in words if len(w) >= SHORTEST_WORD}, key=len, reverse=True)
 
 
@@ -38,9 +49,12 @@ def texts(path):
 
 def findings(path, words):
     found = set()
+    upstream = path.name in UPSTREAM
+    if upstream:
+        words = explicit_words()
     for text in texts(path):
         for what, pattern in PATTERNS.items():
-            if what in QUOTES.get(path.name, ()):
+            if upstream or what in QUOTES.get(path.name, ()):
                 continue
             for match in re.finditer(pattern, text, re.ASCII):
                 if match.group() not in ALLOWED:

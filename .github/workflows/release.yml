@@ -1,8 +1,9 @@
 # Builds and publishes a release from this repository's source when a version tag (v1.2.3) is pushed: each
-# architecture's installer (x64 and ARM64, each built natively) and signed update manifest as the tag's
-# release, and model files the app downloads from here, if missing, in the models-v1 release. Publishes only
-# on tag pushes to the public repository itself, never for pull requests or forks, so its signing key reaches
-# no one else's code. Run by hand (workflow_dispatch), it only builds and tests both architectures.
+# architecture's installer (x64 and ARM64, each built natively) and signed update manifest, and the Linux
+# model host's tarball, as the tag's release; the host's Docker image on ghcr.io; and model files the app
+# downloads from here, if missing, in the models-v1 release. Publishes only on tag pushes to the public
+# repository itself, never for pull requests or forks, so its signing key reaches no one else's code. Run by
+# hand (workflow_dispatch), it only builds and tests.
 # Secrets: KIKU_SIGNING_KEY (the update manifest's ed25519 key) and KIKU_PRIVATE_WORDS (for the privacy gate).
 name: release
 
@@ -11,8 +12,9 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Each job asks for more where it needs it.
 permissions:
-  contents: write
+  contents: read
 
 concurrency: release-${{ github.ref }}
 
@@ -89,16 +91,71 @@ jobs:
           path: target/dist/Kiku
           retention-days: 7
 
+  linux:
+    if: ${{ !github.event.repository.fork && (github.event_name == 'workflow_dispatch' || !github.event.repository.private) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag
+        if: github.event_name == 'push'
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml | tr -d '\r')"
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "The tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml" >&2; exit 1; }
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            third_party/sherpa-onnx
+            third_party/moonshine-src
+            third_party/moonshine-build
+          key: runtime-linux-x64-${{ hashFiles('scripts/fetch-runtime.sh', 'scripts/build-moonshine.sh', 'patches/*') }}
+
+      # The same image the Linux gate builds in, so CI and the gate agree. Files made in the container are
+      # handed back to the runner's user afterwards.
+      - name: Test and pack in the build image
+        run: |
+          docker build -q -t kiku-linux-build -f scripts/linux-build.Dockerfile scripts
+          docker run --rm -v "$PWD:/src" -e "OWNER=$(id -u):$(id -g)" kiku-linux-build bash -c '
+            trap "chown -R $OWNER third_party target" EXIT
+            if [ ! -e third_party/sherpa-onnx/lib/libonnxruntime.so ]; then ./scripts/fetch-runtime.sh; fi
+            if [ ! -e third_party/moonshine-build/libmoonshine.a ]; then ./scripts/build-moonshine.sh; fi
+            cargo test --release --locked -p kiku-core --tests
+            ./scripts/pack-linux.sh'
+
+      - name: Privacy gate
+        env:
+          KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
+        run: |
+          unpacked="$RUNNER_TEMP/unpacked"
+          mkdir "$unpacked"
+          tar -xzf target/dist/kiku-engine-*-linux-x64.tar.gz -C "$unpacked"
+          python3 scripts/privacy-gate.py "$unpacked"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kiku-engine-linux-x64
+          path: target/dist/kiku-engine-*-linux-x64.tar.gz
+          retention-days: 7
+
   publish:
-    needs: app
+    needs: [app, linux]
     if: ${{ github.event_name == 'push' && !github.event.repository.private }}
     runs-on: windows-2025
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
 
-      # Into target/dist/kiku-x64 and target/dist/kiku-arm64.
+      # Into target/dist/kiku-x64, kiku-arm64 and kiku-engine-linux-x64.
       - uses: actions/download-artifact@v4
         with:
           pattern: kiku-*
@@ -142,6 +199,8 @@ jobs:
     needs: publish
     runs-on: windows-2025
     timeout-minutes: 90
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
@@ -149,3 +208,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/publish-models.ps1
+
+  image:
+    needs: publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: kiku-engine-linux-x64
+          path: image-context
+
+      # ghcr.io wants a lowercase name. A new package starts private: see docs/RELEASING.md.
+      - name: Build and push the image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kiku-engine"
+          version="${GITHUB_REF_NAME#v}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -f Dockerfile -t "$image:$version" -t "$image:latest" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" image-context
+          docker push "$image:$version"
+          docker push "$image:latest"

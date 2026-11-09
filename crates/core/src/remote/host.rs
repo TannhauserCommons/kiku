@@ -23,10 +23,10 @@ use rustls::{
 };
 
 use super::frames::{Frame, FrameReader, HOTWORDS_ID, PING, PING_ID, SILENT_AFTER, TICK, WRITE_TIMEOUT};
-use super::{decode_key, decode_pcm, decode_request, encode_key, fingerprint_of, provider, same_bytes, HostCode, ACCEPTED, KEY_BYTES, MAX_FRAME, TLS13_ONLY};
+use super::{decode_key, decode_pcm, decode_request, ModelRequest, encode_key, fingerprint_of, provider, same_bytes, HostCode, ACCEPTED, KEY_BYTES, MAX_FRAME, TLS13_ONLY};
 use crate::{
     catalog,
-    engine::{Engine, EngineStream, ModelSpec, Result},
+    engine::{Device, Engine, EngineStream, ModelSpec, Result},
     engine_host::{
         decode_hotwords, encode_lines, payload_lines, read_frame_up_to, write_frame, HostedEngine, CLOSE, ERROR, FLUSH, HOTWORDS, LINES, LOAD, OK, OPEN, POLL, PUSH,
     },
@@ -348,15 +348,28 @@ fn work(engine: &HostedEngine, requests: mpsc::Receiver<Frame>, replies: mpsc::S
     }
 }
 
-/// Starts the model a client asked for, from this host's own copy, in a helper process of its own.
+/// Starts the model a client asked for and writes one line to stderr: the model, the device, the time and the outcome.
 fn load(payload: &[u8]) -> Result<HostedEngine> {
     let request = decode_request(payload)?;
+    let started = Instant::now();
+    let outcome = start(&request);
+    let device = if request.device == Device::Cuda { "GPU" } else { "CPU" };
+    let seconds = started.elapsed().as_secs_f32();
+    match &outcome {
+        Ok(_) => eprintln!("load {} on the {device}: ok in {seconds:.1} s", request.model),
+        Err(error) => eprintln!("load {} on the {device}: failed in {seconds:.1} s: {error}", request.model),
+    }
+    outcome
+}
+
+/// Starts the model from this host's own copy, in a helper process of its own.
+fn start(request: &ModelRequest) -> Result<HostedEngine> {
     let model = catalog::by_id(&request.model).filter(|model| !model.imported()).ok_or_else(|| not_here(&request.model))?;
     let variant = model.variant(request.device);
     if !variant.installed() {
         return Err(not_here(&request.model).into());
     }
-    HostedEngine::start(&ModelSpec { hotwords: request.hotwords, ..model.spec(variant) })
+    HostedEngine::start(&ModelSpec { hotwords: request.hotwords.clone(), ..model.spec(variant) })
 }
 
 /// Says which models this host has, for a client that asked for one it doesn't.

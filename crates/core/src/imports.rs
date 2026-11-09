@@ -227,6 +227,6 @@ mod tests {
         let model = imported.into_model("imported-x").unwrap();
         assert_eq!(model.variants.len(), 2);
         assert_eq!(model.requires, [VAD]);
-        assert_eq!(id_for(Path::new(r"D:\models\Sherpa ONNX Whisper (tiny)")), "imported-sherpa-onnx-whisper--tiny");
+        assert_eq!(id_for(&Path::new("models").join("Sherpa ONNX Whisper (tiny)")), "imported-sherpa-onnx-whisper--tiny");
     }
 }
