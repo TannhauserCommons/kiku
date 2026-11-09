@@ -87,6 +87,7 @@ fn snapshot(captions: &Captions, controls: &Controls, capturing: &[bool]) -> Val
         "dictating": controls.dictating.load(Ordering::Relaxed),
         "model": model.active.model.name,
         "device": device(model.active),
+        "runs_on": model.remote.as_deref().unwrap_or("this PC"),
         "switching_to": model.pending.map(|choice| format!("{} on the {}", choice.model.name, device(choice))),
         "save_mode": if controls.auto_save.load(Ordering::Relaxed) { "auto" } else { "manual" },
         "saves_only_mic": controls.save_mic_only.load(Ordering::Relaxed),

@@ -42,6 +42,7 @@ use windows_numerics::Matrix3x2;
 mod design;
 mod history;
 mod icon;
+mod remote;
 mod subtitles;
 mod words;
 
@@ -71,7 +72,7 @@ use kiku_core::{
     engine::Device,
     hardware::{gb, Gpu, Hardware},
     keybinds::{Command, Key, Keybinds},
-    settings::{BlockAnswer, Opacity, YourLines},
+    settings::{BlockAnswer, EngineWhere, Opacity, YourLines},
     subtitles::SubtitleSettings,
     theme::{CustomTheme, Theme, Themes},
     update::{self, Release},
@@ -168,6 +169,12 @@ pub struct Panel<'a> {
     pub themes: Themes,
     /// Kiku only dictates: no app is captioned.
     pub dictation_only: bool,
+    /// Where models run, whether this PC shares its own, and the code others use for it once it listens.
+    pub engine_where: EngineWhere,
+    pub host_on: bool,
+    pub hosted_code: Option<String>,
+    /// The other computer's code in use, empty when none is saved.
+    pub engine_host: String,
     /// The panel's opacity now, and its settings while unlocked and while locked.
     pub shown_opacity: Opacity,
     pub opacity: Opacity,
@@ -1408,7 +1415,8 @@ impl Renderer {
         })?;
         y = self.draw_hint("Drag the knob; sound below it is ignored, like Discord's input sensitivity.", content, y)?;
         y = self.draw_models(panel, content, y + SECTION_GAP, regions)?;
-        self.draw_gpu(panel, content, y + SECTION_GAP, regions)
+        y = self.draw_gpu(panel, content, y + SECTION_GAP, regions)?;
+        self.draw_remote_settings(panel, content, y + SECTION_GAP, regions)
     }
 
     /// The models with their downloads, the device picker by the heading, and adding one's own.
@@ -2489,7 +2497,10 @@ fn status_text(panel: &Panel, palette: &Palette) -> Status {
     let newest = || panel.captions.visible().filter_map(|(_, section)| section.captions.back()).max_by_key(|caption| caption.time);
     match newest().filter(|_| panel.view.collapsed) {
         Some(caption) => state(caption.display_text(), palette.accent, true),
-        None => state("Listening".into(), palette.accent, true),
+        None => match &panel.model.remote {
+            Some(address) => state(format!("Listening on {address}"), palette.accent, true),
+            None => state("Listening".into(), palette.accent, true),
+        },
     }
 }
 
@@ -2627,6 +2638,13 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::UseRecommended => "Use the model recommended for this PC".into(),
         Action::SetupNext | Action::SetupBack | Action::SkipSetup | Action::QuitAndPause | Action::KeepDownloading => return None,
         Action::InstallUpdate | Action::UpdateLater => return None,
+        Action::SetEngineWhere(EngineWhere::ThisPc) => "Run models on this PC; nothing is sent anywhere".into(),
+        Action::SetEngineWhere(EngineWhere::Host) => "Run models on another computer that shares its models; your audio is sent to it".into(),
+        Action::ShareModels(true) => "Let other computers caption with this PC's models, using your code".into(),
+        Action::ShareModels(false) => "Stop sharing this PC's models".into(),
+        Action::CopyHostCode => "Copy the whole code, to paste on the other computer".into(),
+        Action::NewHostCode if panel.view.confirm_new_code => "Press again: the old code stops working".into(),
+        Action::NewHostCode => "Make a new code; the old one stops working".into(),
         Action::DictationOnly(false) => "Caption apps and your mic, and dictate while the key is held".into(),
         Action::DictationOnly(true) => "Only dictate: no captions, and the mic heard only while the key is held".into(),
         Action::CheckUpdatesNow => "Look for a newer Kiku now".into(),

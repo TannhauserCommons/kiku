@@ -10,7 +10,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::Ordering,
-        mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender},
+        mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -18,7 +18,7 @@ use std::{
 
 use kiku::{
     capture::{self, default_microphone, Capture, Chunk, Source},
-    hardware, overlay,
+    hardware, hosting, overlay,
     processes::{exe_path, snapshot, Process},
     sessions::Sessions,
 };
@@ -29,10 +29,11 @@ use kiku_core::{
     hardware::Hardware,
     log,
     misses::{self, Recent},
+    remote::{self, HostCode, ModelRequest},
     recording::Recorder,
     catalog::{self, Choice, GPU_PACK},
     download::{self, runnable, Target as Download},
-    settings::Settings,
+    settings::{EngineWhere, Settings},
     status::StatusFile,
     update,
     words::Output,
@@ -88,6 +89,10 @@ fn main() -> Result<()> {
     controls.save_mic_only.store(settings.save_mic_only, Ordering::Relaxed);
     controls.check_updates.store(settings.check_updates, Ordering::Relaxed);
     controls.dictation_only.store(settings.dictation_only, Ordering::Relaxed);
+    controls.set_engine_where(settings.engine_where);
+    controls.set_engine_host(&settings.engine_host);
+    controls.take_engine_changed();
+    controls.set_host_on(settings.host_on);
     controls.words.set_settings(settings.words);
     controls.words.refresh();
     controls.set_hotwords(controls.words.hotwords());
@@ -108,10 +113,12 @@ fn main() -> Result<()> {
         hardware: hardware.clone(),
         awaiting_gpu: Cell::new(false),
         last_notice: RefCell::default(),
+        host: RefCell::default(),
     };
     let discovery = Discovery::new(audio, events, wake_discovery.clone(), controls.clone());
     let setup = overlay::Setup { settings, hardware, first_run };
     let updates = controls.clone();
+    let updates_for_hosting = controls.clone();
     overlay::run(captions, controls.clone(), setup, wake_discovery, move |overlay| {
         std::thread::spawn(move || discovery.run(&discovery_wakes));
         // Not before setup is done, where checking can be turned off first.
@@ -122,6 +129,8 @@ fn main() -> Result<()> {
             overlay.refresh();
         };
         std::thread::spawn(move || update::watch(allowed, offer));
+        let hosting = updates_for_hosting;
+        std::thread::spawn(move || hosting::run(&hosting));
         std::thread::spawn(move || {
             decoder.run(&chunks, &source_events, overlay);
             decoder.status.borrow_mut().clear();
@@ -319,7 +328,33 @@ struct Decoder {
     awaiting_gpu: Cell<bool>,
     /// The last notice posted, so one event is told once however often the model loads.
     last_notice: RefCell<Option<String>>,
+    /// Running on this PC though the host is wanted: when to try the host again, and an attempt under way.
+    host: RefCell<HostRetry>,
 }
+
+/// Trying the host again while the model runs on this PC.
+struct HostRetry {
+    next_try: Instant,
+    /// An attempt on its own thread, with what it was made for.
+    attempt: Option<HostAttempt>,
+    /// The engine adopted can't take the current words as they are: load again to apply them.
+    reload: bool,
+}
+
+struct HostAttempt {
+    code: String,
+    choice: Choice,
+    answer: Receiver<Result<Box<dyn Engine>>>,
+}
+
+impl Default for HostRetry {
+    fn default() -> Self {
+        Self { next_try: Instant::now(), attempt: None, reload: false }
+    }
+}
+
+/// How long after the host fails the model runs on this PC before the host is tried again.
+const HOST_RETRY: Duration = Duration::from_secs(60);
 
 /// Per-source state that outlives a model switch, indexed like the sources were added.
 #[derive(Default)]
@@ -400,7 +435,7 @@ impl Decoder {
                 Stop::Stopped | Stop::Lost => {
                     drop(engine);
                     self.controls.set_helper_process(None);
-                    self.controls.unloaded();
+                    self.unloaded();
                     overlay.refresh();
                     let restarted = self.wait_while_stopped(&mut sources, chunks, source_events)
                         .then(|| self.load_or_wait(&mut sources, chunks, source_events, overlay))
@@ -487,7 +522,11 @@ impl Decoder {
             was_dictating = dictating;
             if Instant::now() >= next_poll {
                 if engine.lost() {
-                    self.tell(format!("{} stopped unexpectedly (its helper process ended), so it's loading again.", self.controls.model().active.model.name));
+                    let state = self.controls.model();
+                    self.tell(match state.remote {
+                        Some(_) => format!("Lost the host, so {} is loading again, on the host if it answers and on this PC if not.", state.active.model.name),
+                        None => format!("{} stopped unexpectedly (its helper process ended), so it's loading again.", state.active.model.name),
+                    });
                     return Stop::Lost;
                 }
                 let collect = if dictating { Collect::Dictating } else { Collect::Poll };
@@ -511,12 +550,14 @@ impl Decoder {
                 self.controls.set_hotwords(self.controls.words.hotwords());
                 let active = self.controls.model().active;
                 let reload = self.controls.take_changed_hotwords().is_some_and(|words| !engine.set_hotwords(&active.hotwords(words)));
+                let reload = self.controls.take_engine_changed() || reload || std::mem::take(&mut self.host.borrow_mut().reload);
+                let mut from_host = self.host_answered();
                 // A pick still downloading waits, and captions go on meanwhile.
-                if self.controls.model().pending.is_some_and(runnable) || self.gpu_move_due() || reload {
+                if self.controls.model().pending.is_some_and(|choice| self.can_load(choice)) || self.gpu_move_due() || reload || from_host.is_some() {
                     self.finish_speech(engine, &mut streams, sources, overlay);
                 }
                 let reloaded = || reload.then(|| self.reload()).flatten();
-                if let Some(next) = self.load_requested_model().or_else(|| self.move_to_gpu()).or_else(reloaded) {
+                if let Some(next) = self.load_requested_model().or_else(|| self.move_to_gpu()).or_else(reloaded).or_else(|| from_host.take().map(|engine| self.adopt_host(engine))) {
                     overlay.refresh();
                     return Stop::Switch(next);
                 }
@@ -560,10 +601,11 @@ impl Decoder {
                 overlay.refresh();
                 return Some(engine);
             }
-            self.controls.unloaded();
+            self.unloaded();
             overlay.refresh();
-            // Try again once something changes, not over and over on a model that fails.
-            while self.readiness() == tried {
+            // Try again once something changes, or in a minute when the host is wanted, not over and over on a model that fails.
+            let host_retry = self.host_wanted().map(|_| self.host.borrow().next_try);
+            while self.readiness() == tried && !host_retry.is_some_and(|at| Instant::now() >= at) {
                 let disconnected = matches!(chunks.recv_timeout(POLL_INTERVAL), Err(RecvTimeoutError::Disconnected));
                 if disconnected || self.controls.quitting.load(Ordering::Relaxed) {
                     return None;
@@ -575,10 +617,27 @@ impl Decoder {
         }
     }
 
+    /// Records that no model runs, and drops a host attempt so a host that answers isn't left holding a model nobody uses.
+    fn unloaded(&self) {
+        self.host.borrow_mut().attempt = None;
+        self.controls.unloaded();
+    }
+
     /// What decides which model can load: the picks, and which of them can run.
-    fn readiness(&self) -> (Option<Choice>, Choice, [bool; 2], Option<Choice>) {
+    fn readiness(&self) -> (Option<Choice>, Choice, [bool; 2], Option<Choice>, (EngineWhere, String)) {
         let state = self.controls.model();
-        (state.pending, state.active, [state.pending.is_some_and(runnable), runnable(state.active)], download::fallback())
+        let ready = [state.pending.is_some_and(|choice| self.can_load(choice)), self.can_load(state.active)];
+        (state.pending, state.active, ready, download::fallback(), (self.controls.engine_where(), self.controls.engine_host()))
+    }
+
+    /// Whether a load of `choice` can be tried: its files are here, or the host is wanted and may have them.
+    fn can_load(&self, choice: Choice) -> bool {
+        runnable(choice) || self.host_wanted().is_some()
+    }
+
+    /// The host's code, when the model should run there and the code is one.
+    fn host_wanted(&self) -> Option<HostCode> {
+        (self.controls.engine_where() == EngineWhere::Host).then(|| HostCode::parse(&self.controls.engine_host()).ok()).flatten()
     }
 
     /// The current model, or one that is installed if it can't load (e.g. its files were removed or
@@ -587,8 +646,9 @@ impl Decoder {
         let active = self.controls.model().active;
         let mut failure = None;
         let fallback = download::fallback().filter(|&choice| choice != active);
-        for choice in std::iter::once(active).filter(|&choice| runnable(choice)).chain(fallback) {
-            match self.load(choice) {
+        for choice in std::iter::once(active).filter(|&choice| self.can_load(choice)).chain(fallback) {
+            // Only the pick is tried on the host; what runs in its place is on this PC.
+            match self.load(choice, choice == active) {
                 Ok((engine, gpu_fallback)) => {
                     if choice != active {
                         let (name, instead) = (&active.model.name, &choice.model.name);
@@ -605,7 +665,7 @@ impl Decoder {
                     }
                     return Some(engine);
                 }
-                Err(error) if choice == active => failure = Some(error.to_string()),
+                Err(error) if choice == active && runnable(choice) => failure = Some(error.to_string()),
                 Err(_) => {}
             }
         }
@@ -618,8 +678,8 @@ impl Decoder {
     /// Loads the model the user picked, once it can run (a pick still downloading waits). The
     /// current one keeps running if it fails.
     fn load_requested_model(&self) -> Option<Box<dyn Engine>> {
-        let model = self.controls.model().pending.filter(|&choice| runnable(choice))?;
-        match self.load(model) {
+        let model = self.controls.model().pending.filter(|&choice| self.can_load(choice))?;
+        match self.load(model, true) {
             Ok((engine, gpu_fallback)) => {
                 self.controls.finish_switch(model, Ok(gpu_fallback));
                 Some(engine)
@@ -631,13 +691,101 @@ impl Decoder {
         }
     }
 
-    /// Loads `choice`. A GPU model that can't run on the GPU now runs on the CPU, returned with why.
-    fn load(&self, choice: Choice) -> Result<(Box<dyn Engine>, Option<String>)> {
+    /// Loads `choice`, on the host if that is wanted and `host` allows, else on this PC. A GPU model that
+    /// can't run on the GPU now runs on the CPU, returned with why.
+    fn load(&self, choice: Choice, host: bool) -> Result<(Box<dyn Engine>, Option<String>)> {
+        self.controls.take_engine_changed();
+        if let Some(loaded) = host.then(|| self.load_on_host(choice)).flatten() {
+            self.awaiting_gpu.set(false);
+            return Ok((loaded, None));
+        }
         let awaiting_gpu = choice.device() == Device::Cuda && !Download::Model(choice.model, choice.variant()).complete();
         // A failed load leaves the model still running, and whether it waits for its GPU files, as they were.
         let loaded = self.load_where_possible(choice)?;
         self.awaiting_gpu.set(awaiting_gpu);
+        self.controls.set_running_on(None);
         Ok(loaded)
+    }
+
+    /// Loads `choice` on the host, if one is wanted. When it can't be, says so once and why, and the
+    /// host is tried again in a minute.
+    fn load_on_host(&self, choice: Choice) -> Option<Box<dyn Engine>> {
+        if self.controls.engine_where() != EngineWhere::Host {
+            return None;
+        }
+        let Some(code) = self.host_wanted() else {
+            self.tell_host_unreached("the host's code isn't one", choice);
+            return None;
+        };
+        match load_on_host_logged(&code, &host_request(choice, self.controls.hotwords())) {
+            Ok(engine) => {
+                self.controls.set_running_on(Some(code.address().to_owned()));
+                Some(engine)
+            }
+            Err(error) => {
+                self.tell_host_unreached(&error.to_string(), choice);
+                None
+            }
+        }
+    }
+
+    fn tell_host_unreached(&self, why: &str, choice: Choice) {
+        self.host.borrow_mut().next_try = Instant::now() + HOST_RETRY;
+        if runnable(choice) {
+            self.tell(format!("Couldn't reach the host ({why}), so the model runs on this PC. It tries again every minute."));
+        } else {
+            self.tell(format!("Couldn't reach the host ({why}), and {} isn't on this PC. Kiku tries the host again every minute; Settings → Listening can download it here instead.", choice.model.name));
+        }
+    }
+
+    /// While the model runs on this PC though the host is wanted: tries the host once a minute, on a
+    /// thread of its own so captions go on, and hands over the engine once the host has loaded the model.
+    fn host_answered(&self) -> Option<Box<dyn Engine>> {
+        let mut retry = self.host.borrow_mut();
+        let state = self.controls.model();
+        let Some(code) = self.host_wanted().filter(|_| state.remote.is_none() && state.loaded) else {
+            retry.attempt = None;
+            return None;
+        };
+        let code_text = code.to_string();
+        if let Some(attempt) = retry.attempt.take() {
+            let matches = attempt.code == code_text && attempt.choice == state.active;
+            match attempt.answer.try_recv() {
+                Err(TryRecvError::Empty) if matches => {
+                    retry.attempt = Some(attempt);
+                    return None;
+                }
+                Ok(Ok(engine)) if matches => return Some(engine),
+                Ok(Err(error)) if matches => log::write(format!("the host still can't be reached: {error}")),
+                // Made for something no longer wanted: dropped, which ends its connection.
+                _ if !matches => return None,
+                _ => {}
+            }
+            retry.next_try = Instant::now() + HOST_RETRY;
+            return None;
+        }
+        if Instant::now() < retry.next_try {
+            return None;
+        }
+        let request = host_request(state.active, self.controls.hotwords());
+        let (send, answer) = channel();
+        std::thread::spawn(move || {
+            let _ = send.send(load_on_host_logged(&code, &request));
+        });
+        retry.attempt = Some(HostAttempt { code: code_text, choice: state.active, answer });
+        None
+    }
+
+    /// Makes an engine the host loaded the running one, with the words the model listens for now.
+    fn adopt_host(&self, engine: Box<dyn Engine>) -> Box<dyn Engine> {
+        let active = self.controls.model().active;
+        self.controls.set_running_on(self.host_wanted().map(|code| code.address().to_owned()));
+        self.controls.finish_switch(active, Ok(None));
+        if !engine.set_hotwords(&active.hotwords(self.controls.hotwords())) {
+            self.host.borrow_mut().reload = true;
+        }
+        self.awaiting_gpu.set(false);
+        engine
     }
 
     fn load_where_possible(&self, choice: Choice) -> Result<(Box<dyn Engine>, Option<String>)> {
@@ -676,7 +824,7 @@ impl Decoder {
     /// Loads the current model again; it keeps running if that fails.
     fn reload(&self) -> Option<Box<dyn Engine>> {
         let active = self.controls.model().active;
-        let (engine, gpu_fallback) = self.load(active).ok()?;
+        let (engine, gpu_fallback) = self.load(active, true).ok()?;
         self.controls.finish_switch(active, Ok(gpu_fallback));
         Some(engine)
     }
@@ -840,6 +988,21 @@ impl Decoder {
 fn reopen<'e>(engine: &'e dyn Engine, sources: &mut Sources, slot: &mut Option<Stream<'e>>, index: usize, error: &dyn std::fmt::Display) {
     log::write(format!("source {index}: stream failed ({error}); reopening"));
     *slot = sources.open(engine, index);
+}
+
+fn host_request(choice: Choice, hotwords: Vec<Hotword>) -> ModelRequest {
+    ModelRequest { model: choice.model.id.clone(), device: choice.device, hotwords: choice.hotwords(hotwords) }
+}
+
+/// Loads on the host and logs the outcome, naming the address and never the secret.
+fn load_on_host_logged(code: &HostCode, request: &ModelRequest) -> Result<Box<dyn Engine>> {
+    let start = Instant::now();
+    let loaded = remote::connect(code, request);
+    match &loaded {
+        Ok(_) => log::write(format!("loaded {} on the host {} in {:.1} s", request.model, code.address(), start.elapsed().as_secs_f32())),
+        Err(error) => log::write(format!("{} on the host {} failed to load: {error}", request.model, code.address())),
+    }
+    loaded
 }
 
 fn load_logged(choice: Choice, hotwords: Vec<Hotword>) -> Result<Box<dyn Engine>> {

@@ -20,7 +20,7 @@ use kiku_core::{
     engine::Device,
     keybinds::Command,
     history::Session,
-    settings::{BlockAnswer, YourLines},
+    settings::{BlockAnswer, EngineWhere, YourLines},
     theme::{Colours, Theme},
     update::Release,
     words::Scope,
@@ -135,7 +135,14 @@ pub enum Action {
     OpenWords,
     /// Copies how to edit the word rules file, for an assistant.
     CopyWordInstructions,
-    /// Keys go to one of the Words tab's boxes until it is left; and emptying it.
+    /// Picks where models run: this PC, or the host whose code is entered.
+    SetEngineWhere(EngineWhere),
+    /// Shares this PC's models with other computers (true) or stops.
+    ShareModels(bool),
+    CopyHostCode,
+    /// Makes a new code for this PC, so the old one stops working (a second press confirms).
+    NewHostCode,
+    /// Keys go to one of the settings window's text boxes until it is left; and emptying it.
     TypeWord(WordBox),
     ClearWord(WordBox),
     /// Opens the Words tab's correction card with a line's text, or the selection, as what was heard.
@@ -502,9 +509,10 @@ impl Scroll {
     }
 }
 
-/// A text box of the Words tab.
+/// A text box of the settings window that keys go to once clicked: the Words tab's, and Listening's host code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WordBox {
+    Host,
     Try,
     Heard,
     Fix,
@@ -576,6 +584,8 @@ pub struct View {
     pub update_check: Option<UpdateCheck>,
     /// Files waiting for a second press of Delete.
     pub confirm_delete: Option<Download>,
+    /// A new host code waiting for a second press.
+    pub confirm_new_code: bool,
     /// The settings window is walking through setup, at this step.
     pub setup: Option<SetupStep>,
     /// The pointer is over the title bar, where dragging moves the panel.
@@ -595,6 +605,8 @@ pub struct View {
     pub font_matches: Vec<usize>,
     /// The Words tab's Try box, its correction, and which of their boxes keys go to.
     pub try_words: Field,
+    /// The code of the host to run models on, as typed.
+    pub host_code: Field,
     pub correction: Correction,
     pub typing_word: Option<WordBox>,
     /// A word's strength while its slider is dragged, by its place in the file's entries; the file gets it
@@ -626,6 +638,7 @@ impl View {
             update: None,
             update_check: None,
             confirm_delete: None,
+            confirm_new_code: false,
             setup: None,
             drag_hover: false,
             notice: None,
@@ -638,6 +651,7 @@ impl View {
             font_search: Field::default(),
             font_matches: Vec::new(),
             try_words: Field::default(),
+            host_code: Field::default(),
             correction: Correction::default(),
             typing_word: None,
             word_strength: None,
@@ -652,6 +666,7 @@ impl View {
 
     pub fn word_box(&self, which: WordBox) -> &Field {
         match which {
+            WordBox::Host => &self.host_code,
             WordBox::Try => &self.try_words,
             WordBox::Heard => &self.correction.heard,
             WordBox::Fix => &self.correction.fix,
@@ -660,6 +675,7 @@ impl View {
 
     pub fn word_box_mut(&mut self, which: WordBox) -> &mut Field {
         match which {
+            WordBox::Host => &mut self.host_code,
             WordBox::Try => &mut self.try_words,
             WordBox::Heard => &mut self.correction.heard,
             WordBox::Fix => &mut self.correction.fix,

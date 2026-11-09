@@ -13,6 +13,7 @@ pub mod misses;
 mod moonshine;
 pub mod paths;
 pub mod recording;
+pub mod remote;
 pub mod settings;
 pub(crate) mod sherpa;
 pub mod status;

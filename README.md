@@ -2,6 +2,7 @@
 
 Kiku shows live captions for what each app on your PC says, such as a call, a stream
 or a video, and for your microphone. Everything runs on your PC: no account, no cloud, no telemetry.
+If you choose to, the speech model can run on another computer of yours instead.
 
 **Download Kiku for Windows:**
 
@@ -23,6 +24,8 @@ or a video, and for your microphone. Everything runs on your PC: no account, no 
   as you choose, or only when you press save.
 - **For assistants on your PC:** an MCP server (`kiku-mcp.exe`) lets a local AI assistant read and search
   your captions, if you set it up.
+- **The model on another computer:** a PC with a good GPU can share its models, and other PCs caption
+  with them over the network (see below).
 - Themes, a light and dark look, and per-app blocking.
 
 ## Installing
@@ -31,12 +34,34 @@ Run the installer. It installs Kiku for you alone, without admin rights. The ins
 code-signed, so Windows SmartScreen may say it "protected your PC": choose **More info**, then
 **Run anyway**. Kiku checks for updates once a day if you leave that on, and asks before installing one.
 
+## Running the model on another computer
+
+On the computer that will run the model (the host), open **Settings → Listening**, download a model, and
+turn on **Share this PC's models**. It shows a code; **Copy** it. On the other PC, choose **Another
+computer** under **Where models run** and paste the code. Captions, history, word rules, hotwords and every
+other setting stay on that PC; only the audio being captioned goes to the host, and text comes back.
+
+- **Reaching the host:** on the same network, the code usually works as it is (it names the host PC; if
+  not, edit its address to the host's local IP address). From elsewhere, the easy way is a
+  VPN such as [Tailscale](https://tailscale.com) on both PCs: edit the code's address to the host's Tailscale
+  name or address. Otherwise forward the port (7300) on the host's router.
+- **Windows Firewall** may ask for an administrator once, the first time the host shares, to let other
+  computers connect.
+- **Security:** the connection is encrypted and checks the host's certificate, and the host lets in only
+  those with its code, which holds a secret. Treat the code like a password; **New code** makes the old one
+  stop working.
+- **If the host can't be reached,** Kiku runs the model on this PC (if it has one downloaded), says so, and
+  tries the host again every minute.
+- **Without the app:** `kiku-engine.exe --serve [--listen <address:port>] [--state <folder>]`, run from
+  Kiku's install folder, shares the models there and prints the code.
+
 ## Privacy
 
 What Kiku hears, its captions and its transcripts stay on your PC. Kiku goes online only to download the
 models you pick (from Hugging Face, NVIDIA, Microsoft's ONNX Runtime releases and this repository's
 releases) and, if *Check for updates* is on, once a day to read the latest version from this repository's
-releases. Nothing else is sent.
+releases. Nothing else is sent, unless you choose **Another computer** under **Where models run**: then the
+audio being captioned goes, encrypted, to the computer whose code you pasted, and only there.
 
 ## Building from source
 

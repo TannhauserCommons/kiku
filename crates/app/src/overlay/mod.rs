@@ -78,6 +78,7 @@ use kiku_core::{
     download::{self, Downloads, Target as Download},
     hardware::Hardware,
     imports,
+    remote::HostCode,
     settings::{BlockAnswer, Opacity, Settings, YourLines, MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
     subtitles::SubtitleSettings,
     theme::Themes,
@@ -231,7 +232,11 @@ pub fn run(
         renderer: Renderer::new()?,
         panel_surface: Surface::default(),
         subtitles: Subtitles::new(hwnd, settings.subtitles, settings.themes)?,
-        settings: SettingsWindow::new(hwnd, WNDPROC::Some(settings_proc))?,
+        settings: {
+            let mut window = SettingsWindow::new(hwnd, WNDPROC::Some(settings_proc))?;
+            window.view.host_code.set(&settings.engine_host);
+            window
+        },
         view: View::new(),
         searcher: Searcher::start(move || handle.history_answered()),
         tray,
@@ -521,8 +526,9 @@ impl Window {
         if !matches!(action, Action::TypeWord(_) | Action::ClearWord(_)) {
             self.settings.view.typing_word = None;
         }
-        // Only a second press of Delete deletes.
+        // Only a second press of Delete deletes, and of New code.
         let confirming = std::mem::take(&mut self.settings.view.confirm_delete);
+        let confirming_new_code = std::mem::take(&mut self.settings.view.confirm_new_code);
         match action {
             Action::SaveAll => self.save(SaveRequest::All, "every app"),
             Action::SaveSection(index) => {
@@ -615,8 +621,28 @@ impl Window {
             }
             Action::OpenWords => self.open_words(),
             Action::CopyWordInstructions => self.copy(ASSISTANT_INSTRUCTIONS, "Copied: paste it to your assistant, then say what you want".into()),
+            Action::SetEngineWhere(place) => {
+                self.controls.set_engine_where(place);
+                self.save_settings();
+            }
+            Action::ShareModels(on) => {
+                self.controls.set_host_on(on);
+                self.save_settings();
+            }
+            Action::CopyHostCode => match self.controls.hosted_code() {
+                Some(code) => self.copy(&code, "Copied the code: paste it on the other computer".into()),
+                None => self.notify("This PC isn't sharing yet".into(), true),
+            },
+            Action::NewHostCode if confirming_new_code => {
+                self.controls.request_new_code();
+                self.notify("Made a new code; the old one no longer works".into(), false);
+            }
+            Action::NewHostCode => self.settings.view.confirm_new_code = true,
             Action::TypeWord(which) => self.settings.view.typing_word = Some(which),
-            Action::ClearWord(which) => self.settings.view.word_box_mut(which).clear(),
+            Action::ClearWord(which) => {
+                self.settings.view.word_box_mut(which).clear();
+                self.host_code_edited(which);
+            }
             Action::CorrectLine(line) => {
                 if let Some(caption) = self.caption(line) {
                     let app = self.words_app(line.section, &caption);
@@ -701,6 +727,7 @@ impl Window {
                     self.finish_rebinding(None);
                 }
                 self.settings.show_tab(tab);
+                self.settings.view.confirm_new_code = false;
                 self.controls.words.refresh();
                 self.watch_meters();
             }
@@ -880,6 +907,7 @@ impl Window {
         if self.settings.view.rebinding.is_some() {
             self.finish_rebinding(None);
         }
+        self.settings.view.confirm_new_code = false;
         self.settings.close();
         self.watch_meters();
     }
@@ -986,6 +1014,7 @@ impl Window {
                 let view = &mut self.settings.view;
                 if let Some(which) = view.typing_word {
                     view.word_box_mut(which).type_unit(wparam.0 as u16);
+                    self.host_code_edited(which);
                 }
                 self.redraw();
             }
@@ -1042,7 +1071,17 @@ impl Window {
                 _ => return,
             }
         }
+        self.host_code_edited(which);
         self.redraw();
+    }
+
+    /// Gives the decoder the host code just edited, once it is empty or valid, and saves it.
+    fn host_code_edited(&mut self, which: WordBox) {
+        let code = self.settings.view.host_code.text.trim().to_owned();
+        if which == WordBox::Host && code != self.controls.engine_host() && (code.is_empty() || HostCode::parse(&code).is_ok()) {
+            self.controls.set_engine_host(&code);
+            self.save_settings();
+        }
     }
 
     /// Opens the Words tab's correction card with `heard` filled in, from a line of `app`, ready to type
@@ -1198,6 +1237,9 @@ impl Window {
             locked_opacity: self.locked_opacity,
             dictation_only: self.controls.dictation_only.load(Ordering::Relaxed),
             words: self.controls.words.settings(),
+            engine_where: self.controls.engine_where(),
+            engine_host: self.controls.engine_host(),
+            host_on: self.controls.host_on(),
         };
         if let Err(error) = settings.save() {
             self.notify(format!("Couldn't save settings: {}", plain_error(&error)), true);
@@ -2040,6 +2082,10 @@ impl Window {
             keep_days: self.controls.keep_days.load(Ordering::Relaxed),
             check_updates: self.controls.check_updates.load(Ordering::Relaxed),
             dictation_only: self.controls.dictation_only.load(Ordering::Relaxed),
+            engine_where: self.controls.engine_where(),
+            host_on: self.controls.host_on(),
+            hosted_code: self.controls.hosted_code(),
+            engine_host: self.controls.engine_host(),
             auto_fold: self.auto_fold,
             blocked: &blocked,
             block_answer: self.block_answer,

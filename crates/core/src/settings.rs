@@ -69,6 +69,20 @@ pub struct Settings {
     pub dictation_only: bool,
     /// Where word rules and transforms apply.
     pub words: WordSettings,
+    /// Where the model runs: this PC, or the host in `engine_host`.
+    pub engine_where: EngineWhere,
+    /// The host's code as pasted; empty for none.
+    pub engine_host: String,
+    /// Whether this PC hosts its models for other computers.
+    pub host_on: bool,
+}
+
+/// Where the model runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EngineWhere {
+    #[default]
+    ThisPc,
+    Host,
 }
 
 /// What an app header's block button does: ask, or block without asking until Kiku quits or always.
@@ -149,6 +163,9 @@ impl Default for Settings {
             locked_opacity: Opacity::default(),
             dictation_only: false,
             words: WordSettings::default(),
+            engine_where: EngineWhere::ThisPc,
+            engine_host: String::new(),
+            host_on: false,
         }
     }
 }
@@ -168,7 +185,7 @@ impl Settings {
         transcripts::replace(&path, &self.to_text())
     }
 
-    fn parse(text: &str) -> Self {
+    pub fn parse(text: &str) -> Self {
         let lines: Vec<(&str, &str)> = text.lines().filter_map(|line| line.split_once('=')).map(|(key, value)| (key.trim(), value.trim())).collect();
         let (mut settings, mut subtitles) = (Self::default(), Vec::new());
         let (mut locked_window, mut locked_text) = (None, None);
@@ -193,6 +210,9 @@ impl Settings {
                 "pinned" if !value.is_empty() => settings.pinned.push(value.to_owned()),
                 "check_updates" => settings.check_updates = value != "off",
                 "dictation_only" => settings.dictation_only = value == "on",
+                "engine.where" => settings.engine_where = if value == "host" { EngineWhere::Host } else { EngineWhere::ThisPc },
+                "engine.host" => settings.engine_host = value.to_owned(),
+                "host.on" => settings.host_on = value == "true",
                 "window_opacity" => settings.opacity.window = percent(value, MIN_WINDOW_OPACITY).unwrap_or(settings.opacity.window),
                 "text_opacity" => settings.opacity.text = percent(value, MIN_TEXT_OPACITY).unwrap_or(settings.opacity.text),
                 "locked_window_opacity" => locked_window = percent(value, MIN_WINDOW_OPACITY),
@@ -213,11 +233,11 @@ impl Settings {
         settings
     }
 
-    fn to_text(&self) -> String {
+    pub fn to_text(&self) -> String {
         let blocked: String = self.blocked.iter().map(|name| format!("blocked = {name}\n")).collect();
         let pinned: String = self.pinned.iter().map(|name| format!("pinned = {name}\n")).collect();
         format!(
-            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\n{}{blocked}{pinned}{}{}{}",
+            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\nengine.where = {}\nengine.host = {}\nhost.on = {}\n{}{blocked}{pinned}{}{}{}",
             self.mic_threshold_db,
             self.computer_threshold_db,
             self.model,
@@ -234,6 +254,9 @@ impl Settings {
             self.locked_opacity.window,
             self.locked_opacity.text,
             if self.dictation_only { "on" } else { "off" },
+            if self.engine_where == EngineWhere::Host { "host" } else { "this-pc" },
+            self.engine_host,
+            self.host_on,
             self.themes.to_settings(),
             self.keybinds.to_settings(),
             self.subtitles.to_settings(),
@@ -295,6 +318,9 @@ mod tests {
             locked_opacity: Opacity { window: 20, text: 70 },
             dictation_only: true,
             words: WordSettings { rules: crate::words::Scope::Captions, transforms: crate::words::Scope::Both, hotwords: false, strength: 1.0 },
+            engine_where: EngineWhere::Host,
+            engine_host: "kiku://studio:7300/#ab.cd".into(),
+            host_on: true,
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
         assert_eq!(Settings::parse("mic_threshold_db = loud\nunknown = 1"), Settings::default());

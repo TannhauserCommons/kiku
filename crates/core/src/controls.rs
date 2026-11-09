@@ -6,6 +6,8 @@ use std::sync::{
     Mutex,
 };
 
+use crate::settings::EngineWhere;
+
 /// Transcripts are kept this many days unless settings say otherwise.
 pub const DEFAULT_KEEP_DAYS: u32 = 30;
 
@@ -78,6 +80,21 @@ pub struct Controls {
     pub words: WordBook,
     /// The words the model listens for, and whether they changed since the decoder last took them.
     hotwords: Mutex<(Vec<Hotword>, bool)>,
+    /// Where the model runs and which host, and whether the decoder has yet to load again for a change.
+    engine_place: Mutex<EnginePlace>,
+    /// Whether this PC hosts its models for other computers.
+    host_on: AtomicBool,
+    /// The code of the host this PC runs, once it listens.
+    hosted_code: Mutex<Option<String>>,
+    /// Asked for a new code for the host this PC runs, waiting for the hosting thread.
+    new_code: AtomicBool,
+}
+
+/// Where the model runs (settings' `engine.where` and `engine.host`).
+struct EnginePlace {
+    place: EngineWhere,
+    code: String,
+    changed: bool,
 }
 
 /// An app that isn't captured or captioned: until Kiku quits, or always (saved in settings).
@@ -100,6 +117,8 @@ pub struct ModelState {
     pub loaded: bool,
     /// Why the active model runs on the CPU though the GPU was picked.
     pub gpu_fallback: Option<String>,
+    /// The address of the host the active model runs on; `None` when it runs on this PC.
+    pub remote: Option<String>,
 }
 
 impl ModelState {
@@ -131,7 +150,7 @@ impl Controls {
             typing: Mutex::new(Vec::new()),
             mic: InputControls::new(mic_threshold_db),
             computer: InputControls::new(computer_threshold_db),
-            model: Mutex::new(ModelState { active: model, pending: None, failed: None, failure: None, loaded: false, gpu_fallback: None }),
+            model: Mutex::new(ModelState { active: model, pending: None, failed: None, failure: None, loaded: false, gpu_fallback: None, remote: None }),
             notice: Mutex::new(None),
             check_updates: AtomicBool::new(true),
             dictation_only: AtomicBool::new(false),
@@ -139,6 +158,10 @@ impl Controls {
             checked: Mutex::new(None),
             words: WordBook::default(),
             hotwords: Mutex::new((Vec::new(), false)),
+            engine_place: Mutex::new(EnginePlace { place: EngineWhere::ThisPc, code: String::new(), changed: false }),
+            host_on: AtomicBool::new(false),
+            hosted_code: Mutex::new(None),
+            new_code: AtomicBool::new(false),
         }
     }
 
@@ -223,6 +246,64 @@ impl Controls {
     pub fn take_changed_hotwords(&self) -> Option<Vec<Hotword>> {
         let mut hotwords = self.hotwords.lock().unwrap();
         std::mem::take(&mut hotwords.1).then(|| hotwords.0.clone())
+    }
+
+    /// Where the model should run: this PC, or the host whose code is set. The decoder loads again.
+    pub fn set_engine_where(&self, place: EngineWhere) {
+        let mut state = self.engine_place.lock().unwrap();
+        state.changed |= state.place != place;
+        state.place = place;
+    }
+
+    /// The code of the host to run the model on, as pasted. The decoder loads again if the host is wanted.
+    pub fn set_engine_host(&self, code: &str) {
+        let mut state = self.engine_place.lock().unwrap();
+        state.changed |= state.place == EngineWhere::Host && state.code != code;
+        state.code = code.to_owned();
+    }
+
+    pub fn engine_where(&self) -> EngineWhere {
+        self.engine_place.lock().unwrap().place
+    }
+
+    pub fn engine_host(&self) -> String {
+        self.engine_place.lock().unwrap().code.clone()
+    }
+
+    /// Whether where the model runs changed since last asked; the decoder then loads it again.
+    pub fn take_engine_changed(&self) -> bool {
+        std::mem::take(&mut self.engine_place.lock().unwrap().changed)
+    }
+
+    /// Records where the active model runs: the host's address, or `None` for this PC.
+    pub fn set_running_on(&self, address: Option<String>) {
+        self.model.lock().unwrap().remote = address;
+    }
+
+    pub fn set_host_on(&self, on: bool) {
+        self.host_on.store(on, Ordering::Relaxed);
+    }
+
+    pub fn host_on(&self) -> bool {
+        self.host_on.load(Ordering::Relaxed)
+    }
+
+    /// The code others use to reach this PC's models, while it is hosting and listening.
+    pub fn hosted_code(&self) -> Option<String> {
+        self.hosted_code.lock().unwrap().clone()
+    }
+
+    pub fn set_hosted_code(&self, code: Option<String>) {
+        *self.hosted_code.lock().unwrap() = code;
+    }
+
+    /// Asks for a new code for this PC's host; the old one stops working.
+    pub fn request_new_code(&self) {
+        self.new_code.store(true, Ordering::Relaxed);
+    }
+
+    pub fn take_new_code_request(&self) -> bool {
+        self.new_code.swap(false, Ordering::Relaxed)
     }
 
     pub fn set_helper_process(&self, pid: Option<u32>) {

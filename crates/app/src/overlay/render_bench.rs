@@ -36,7 +36,7 @@ use kiku_core::{
     catalog::{self, Choice},
     download::Downloads,
     hardware::{Gpu, Hardware},
-    settings::{BlockAnswer, Opacity, YourLines},
+    settings::{BlockAnswer, EngineWhere, Opacity, YourLines},
     subtitles::SubtitleSettings,
     theme::{Theme, Themes},
     update::Release,
@@ -127,7 +127,7 @@ fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, wid
         dictating: false,
         keybinds,
         captured: &[],
-        model: ModelState { active: choice, pending: None, failed: None, failure: None, loaded: true, gpu_fallback: None },
+        model: ModelState { active: choice, pending: None, failed: None, failure: None, loaded: true, gpu_fallback: None, remote: None },
         hardware: &HARDWARE,
         downloads: &DOWNLOADS,
         import: &ImportStatus::Idle,
@@ -141,6 +141,10 @@ fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, wid
         your_lines: YourLines::default(),
         themes: Themes::default(),
         dictation_only: false,
+        engine_where: EngineWhere::ThisPc,
+        host_on: false,
+        hosted_code: None,
+        engine_host: String::new(),
         shown_opacity: Opacity::default(),
         opacity: Opacity::default(),
         locked_opacity: Opacity::default(),
@@ -560,6 +564,35 @@ fn snapshots() {
     (trying.tab, trying.typing_word) = (Tab::Words, Some(WordBox::Try));
     trying.try_words.set("um, gg kicku.");
     trying.scrolls.insert(ScrollArea::Settings, Scroll::at(280.0));
+    // The Listening tab's remote cards: a host answering, an invalid code, and sharing with a code.
+    let key = "A".repeat(43);
+    let code = format!("kiku://192.168.1.20:7300/#{key}.{key}");
+    let (mut running, mut invalid, mut sharing) = (View::new(), View::new(), View::new());
+    for view in [&mut running, &mut invalid, &mut sharing] {
+        view.tab = Tab::Listening;
+        view.scrolls.insert(ScrollArea::Settings, Scroll::at(f32::MAX));
+    }
+    running.host_code.set(&code);
+    // A saved code with its end deleted, being edited, and pasted garbage with a secret in it, not focused.
+    invalid.host_code.set(&code[..code.len() - 8]);
+    invalid.host_code.left(false);
+    invalid.typing_word = Some(WordBox::Host);
+    let mut garbage = View::new();
+    garbage.tab = Tab::Listening;
+    garbage.scrolls.insert(ScrollArea::Settings, Scroll::at(f32::MAX));
+    garbage.host_code.set(&format!("{key}.{key} kiku://host/#{key}"));
+    let on_host = ModelState { remote: Some("192.168.1.20:7300".into()), ..panel(&captions, &running, &keybinds, 560.0).model };
+    for theme in [Theme::Night, Theme::Day] {
+        let themes = Themes::from(theme);
+        let host = Panel { themes, engine_where: EngineWhere::Host, ..panel(&captions, &running, &keybinds, 560.0) };
+        save_settings_window(&mut renderer, &folder.join(format!("settings-remote-running-{}.png", name(theme))), Panel { model: on_host.clone(), ..host });
+        let host = Panel { themes, engine_where: EngineWhere::Host, engine_host: code.clone(), ..panel(&captions, &invalid, &keybinds, 560.0) };
+        save_settings_window(&mut renderer, &folder.join(format!("settings-remote-invalid-{}.png", name(theme))), host);
+        let host = Panel { themes, engine_where: EngineWhere::Host, ..panel(&captions, &garbage, &keybinds, 560.0) };
+        save_settings_window(&mut renderer, &folder.join(format!("settings-remote-garbage-{}.png", name(theme))), host);
+        let hosting = Panel { themes, host_on: true, hosted_code: Some(code.clone()), ..panel(&captions, &sharing, &keybinds, 560.0) };
+        save_settings_window(&mut renderer, &folder.join(format!("settings-remote-sharing-{}.png", name(theme))), hosting);
+    }
     // A line's misheard word being corrected, opened from Discord.
     let mut correcting = View::new();
     (correcting.tab, correcting.typing_word) = (Tab::Words, Some(WordBox::Fix));

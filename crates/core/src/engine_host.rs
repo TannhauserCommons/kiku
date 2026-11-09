@@ -32,17 +32,17 @@ const PROBE_CLIP: &[u8] = include_bytes!("../assets/probe.wav");
 const DLL_NOT_FOUND: u32 = 0xC000_0135;
 
 // Requests.
-const LOAD: u8 = 1;
-const OPEN: u8 = 2;
-const PUSH: u8 = 3;
-const POLL: u8 = 4;
-const FLUSH: u8 = 5;
-const CLOSE: u8 = 6;
-const HOTWORDS: u8 = 7;
+pub(crate) const LOAD: u8 = 1;
+pub(crate) const OPEN: u8 = 2;
+pub(crate) const PUSH: u8 = 3;
+pub(crate) const POLL: u8 = 4;
+pub(crate) const FLUSH: u8 = 5;
+pub(crate) const CLOSE: u8 = 6;
+pub(crate) const HOTWORDS: u8 = 7;
 // Replies.
-const OK: u8 = 0;
-const LINES: u8 = 1;
-const ERROR: u8 = 2;
+pub(crate) const OK: u8 = 0;
+pub(crate) const LINES: u8 = 1;
+pub(crate) const ERROR: u8 = 2;
 
 /// An engine running in the helper process; dropping it ends the process.
 pub struct HostedEngine {
@@ -314,7 +314,7 @@ fn exit_code(status: ExitStatus) -> Option<u32> {
 }
 
 /// The helper sits next to the app, or one folder up for the examples in `target/release/examples`.
-fn helper_path() -> Result<PathBuf> {
+pub fn helper_path() -> Result<PathBuf> {
     let name = format!("{HELPER}{}", std::env::consts::EXE_SUFFIX);
     let exe = std::env::current_exe()?;
     exe.ancestors()
@@ -325,17 +325,26 @@ fn helper_path() -> Result<PathBuf> {
         .ok_or_else(|| format!("{name} is missing next to the app").into())
 }
 
-fn write_frame(writer: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
+pub(crate) fn write_frame(writer: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
     writer.write_all(&[kind])?;
     writer.write_all(&(payload.len() as u32).to_le_bytes())?;
     writer.write_all(payload)?;
     writer.flush()
 }
 
-fn read_frame(reader: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
+pub(crate) fn read_frame(reader: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
+    read_frame_up_to(reader, u32::MAX as usize)
+}
+
+/// Like `read_frame`, but a frame longer than `limit` is an error, so a bad length can't allocate gigabytes.
+pub(crate) fn read_frame_up_to(reader: &mut impl Read, limit: usize) -> io::Result<(u8, Vec<u8>)> {
     let mut header = [0u8; 5];
     reader.read_exact(&mut header)?;
-    let mut payload = vec![0u8; u32::from_le_bytes(header[1..].try_into().unwrap()) as usize];
+    let length = u32::from_le_bytes(header[1..].try_into().unwrap()) as usize;
+    if length > limit {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too long"));
+    }
+    let mut payload = vec![0u8; length];
     reader.read_exact(&mut payload)?;
     Ok((header[0], payload))
 }
@@ -358,23 +367,23 @@ fn decode_spec(payload: &[u8]) -> Result<ModelSpec> {
 }
 
 /// A hotword as one line: its boost, a space and its text.
-fn encode_hotword(word: &Hotword) -> String {
+pub(crate) fn encode_hotword(word: &Hotword) -> String {
     format!("{} {}", word.boost, word.text)
 }
 
-fn decode_hotwords(lines: impl IntoIterator<Item = String>) -> Vec<Hotword> {
+pub(crate) fn decode_hotwords(lines: impl IntoIterator<Item = String>) -> Vec<Hotword> {
     let read = |line: &str| line.split_once(' ').and_then(|(boost, text)| Some(Hotword { text: text.to_owned(), boost: boost.parse().ok()? }));
     lines.into_iter().filter_map(|line| read(&line)).collect()
 }
 
 /// A payload's lines; a hotword is one line.
-fn payload_lines(payload: &[u8]) -> Vec<String> {
+pub(crate) fn payload_lines(payload: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(payload);
     if text.is_empty() { Vec::new() } else { text.split('\n').map(str::to_owned).collect() }
 }
 
 /// A count, then each line's id, finished flag, text length and text.
-fn encode_lines(lines: &[Line]) -> Vec<u8> {
+pub(crate) fn encode_lines(lines: &[Line]) -> Vec<u8> {
     let mut bytes = (lines.len() as u32).to_le_bytes().to_vec();
     for line in lines {
         bytes.extend(line.id.to_le_bytes());
@@ -385,7 +394,7 @@ fn encode_lines(lines: &[Line]) -> Vec<u8> {
     bytes
 }
 
-fn decode_lines(bytes: &[u8]) -> Result<Vec<Line>> {
+pub(crate) fn decode_lines(bytes: &[u8]) -> Result<Vec<Line>> {
     let mut reader = bytes;
     let mut take = |n: usize| -> Result<&[u8]> {
         let (head, rest) = reader.split_at_checked(n).ok_or("garbled reply from the model's helper")?;
