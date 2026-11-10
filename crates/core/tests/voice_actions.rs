@@ -410,8 +410,10 @@ fn v3_the_word_book_plans_with_the_file_as_saved() {
 
 #[test]
 fn v4_the_header_and_instructions_explain_actions() {
-    let skill = include_str!("../../../skills/kiku/SKILL.md");
-    for (name, text) in [("HEADER", HEADER), ("ASSISTANT_INSTRUCTIONS", ASSISTANT_INSTRUCTIONS), ("SKILL.md", skill)] {
+    // The skill is private (`.publicignore`), so the public source checks only what it ships.
+    let skill = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../skills/kiku/SKILL.md")).ok();
+    let texts = [("HEADER", Some(HEADER)), ("ASSISTANT_INSTRUCTIONS", Some(ASSISTANT_INSTRUCTIONS)), ("SKILL.md", skill.as_deref())];
+    for (name, text) in texts.into_iter().filter_map(|(name, text)| Some((name, text?))) {
         let line = |verb: &str| text.lines().any(|line| line.trim_start_matches(['#', ' ']).starts_with('>') && line.contains(&format!("=> {verb} ")));
         assert!(line("press"), "{name}: an example press line");
         assert!(line("paste"), "{name}: an example paste line");
