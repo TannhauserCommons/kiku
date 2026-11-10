@@ -183,7 +183,7 @@ fn run_io(mut stream: Tls, queue: &mpsc::Receiver<Frame>, shared: &Shared) -> io
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 // The engine is gone and everything it queued is written.
-                Err(mpsc::TryRecvError::Disconnected) => return Ok(stream.flush()?),
+                Err(mpsc::TryRecvError::Disconnected) => return stream.flush(),
             }
         }
         while let Some((kind, payload)) = reader.next(&mut stream, super::MAX_FRAME)? {

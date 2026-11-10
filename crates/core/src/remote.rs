@@ -171,7 +171,7 @@ pub(crate) fn encode_pcm(audio: &[f32]) -> impl Iterator<Item = u8> + '_ {
 }
 
 pub(crate) fn decode_pcm(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect()
+    bytes.as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b) as f32 / 32768.0).collect()
 }
 
 /// A TLS connection to a host that accepted the code's secret; requests go over `stream`.

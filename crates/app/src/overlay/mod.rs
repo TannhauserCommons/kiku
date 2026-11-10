@@ -14,11 +14,24 @@ mod finder;
 mod folds;
 mod icons;
 mod keys;
+mod macro_run;
+mod macro_tab;
+mod palette;
 mod selection;
 mod share;
 mod render;
 #[cfg(test)]
 mod render_bench;
+#[cfg(test)]
+mod voice_tests;
+#[cfg(test)]
+mod macros_tests;
+#[cfg(test)]
+mod macros_ui_tests;
+#[cfg(test)]
+mod macros_phase2_tests;
+#[cfg(test)]
+mod triggers_tests;
 mod rows;
 mod scene;
 mod settings;
@@ -31,6 +44,7 @@ pub use keys::focused_app;
 
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::{atomic::Ordering, mpsc::Sender, Arc, Mutex},
     time::{Duration, Instant},
@@ -55,7 +69,7 @@ use windows::{
                 VK_CONTROL, VK_ESCAPE, VK_RETURN, VK_TAB,
             },
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, RegisterWindowMessageW, GetMessageW, GetWindowLongPtrW,
+                CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetForegroundWindow, RegisterWindowMessageW, GetMessageW, GetWindowLongPtrW,
                 GetWindowRect, IsWindowVisible, KillTimer, PostMessageW, PostQuitMessage, SetForegroundWindow, SetTimer,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
                 GWLP_USERDATA, GWL_EXSTYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, MINMAXINFO, MSG,
@@ -74,6 +88,8 @@ use kiku_core::{
     controls::{Controls, Input, SaveRequest, THRESHOLD_MIN_DB},
     keybinds::{Command, Key, Keybinds},
     log,
+    macros::{run_step, Mode, Modes, Step, README},
+    paths,
     catalog::{self, Choice},
     download::{self, Downloads, Target as Download},
     hardware::Hardware,
@@ -84,9 +100,13 @@ use kiku_core::{
     theme::Themes,
     transcripts,
     update::{self, Release},
-    words::{Output, WordSettings, ASSISTANT_INSTRUCTIONS},
+    words::{WordSettings, ASSISTANT_INSTRUCTIONS},
 };
+use crate::processes::snapshot;
 use app_icon::register_class;
+use macro_run::MacroRun;
+use macro_tab::{MacroAction, MacroBox, MacroTab};
+use palette::Palette;
 use finder::{example_sql, line_text, table_text, Reply, Request, Searcher, TextBox};
 use folds::auto_fold_after;
 use render::{fraction_at, strength_at, threshold_at, usage_text, Meter, Panel, Renderer, Surface, HANDLE_STRIP, TITLE_HEIGHT};
@@ -129,6 +149,9 @@ const GROW_WITHIN: Duration = Duration::from_secs(5);
 /// Gives the clipboard back after a paste, once the app has had time to read it, even behind a long erase.
 const CLIPBOARD_TIMER: usize = 6;
 const CLIPBOARD_MS: u32 = 1000;
+/// Runs the next of several dictation steps once the app has had time to read the last paste.
+const STEP_TIMER: usize = 11;
+const STEP_MS: u32 = 150;
 /// Refreshes the CPU/GPU figures in the footer.
 const USAGE_TIMER: usize = 4;
 const USAGE_MS: u32 = 2000;
@@ -219,6 +242,7 @@ pub fn run(
     // Without a tray icon (e.g. Explorer restarting) the panel still hides and returns via Ctrl+Win+H.
     let tray = Tray::add(hwnd).inspect_err(|error| log::write(format!("no tray icon: {error}"))).ok();
     let (settings, handle) = (setup.settings, Handle(hwnd.0 as isize));
+    controls.macros.set_phrases(settings.mode_phrases);
     let mut window = Window {
         hwnd,
         captions,
@@ -235,6 +259,9 @@ pub fn run(
         settings: {
             let mut window = SettingsWindow::new(hwnd, WNDPROC::Some(settings_proc))?;
             window.view.host_code.set(&settings.engine_host);
+            window.view.macros.set_settings(&settings.keybinds, settings.dictation_only, &settings.macros_wake);
+            window.view.macros.set_policy(settings.run_programs);
+            window.view.macros.set_phrases(settings.mode_phrases);
             window
         },
         view: View::new(),
@@ -243,6 +270,8 @@ pub fn run(
         tracking_mouse: false,
         tracking_title_bar: false,
         typed: None,
+        steps: VecDeque::new(),
+        step_waiting: false,
         lent: None,
         keybinds: settings.keybinds,
         auto_fold: settings.auto_fold_minutes,
@@ -255,6 +284,9 @@ pub fn run(
         captured_down: Vec::new(),
         selecting: false,
         _keys: None,
+        macro_shortcuts: (0, Vec::new()),
+        refused_shortcuts: Vec::new(),
+        front_app: RefCell::new((HWND::default(), String::new())),
         usage_meter: UsageMeter::new(),
         usage: None,
         collapsed_from: None,
@@ -281,6 +313,7 @@ pub fn run(
         Ok(hook) => shared.window.borrow_mut()._keys = Some(hook),
         Err(error) => log::write(format!("the Ctrl+Win captions key is unavailable: {error}")),
     }
+    shared.window.borrow_mut().refresh_macros();
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(shared) as isize) };
     unsafe { SetTimer(Some(hwnd), USAGE_TIMER, USAGE_MS, None) };
     Handle(hwnd.0 as isize).refresh();
@@ -328,6 +361,9 @@ struct Window {
     /// A drag over caption text is selecting it.
     selecting: bool,
     typed: Option<Typed>,
+    /// Dictation steps still to run, and whether [`STEP_TIMER`] is set to run the next.
+    steps: VecDeque<Step>,
+    step_waiting: bool,
     /// The clipboard as it was before a paste, until it is given back.
     lent: Option<Lent>,
     keybinds: Keybinds,
@@ -344,6 +380,12 @@ struct Window {
     captured_down: Vec<u16>,
     /// The keyboard hook, removed with the window.
     _keys: Option<keys::Hook>,
+    /// The macros behind the shortcuts the hook has, by place, and which handing of them it was.
+    macro_shortcuts: (u32, Vec<String>),
+    /// Shortcuts the hook was refused (a macro, why), so each is told once.
+    refused_shortcuts: Vec<(String, String)>,
+    /// The window that was in front when `mode_in_front` last looked, and its app.
+    front_app: RefCell<(HWND, String)>,
     usage_meter: UsageMeter,
     usage: Option<Usage>,
     /// The panel's height in pixels before it collapsed; `Some` while collapsed.
@@ -416,12 +458,19 @@ impl Window {
             }
             WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE => self.stop_typing(),
             WM_NCHITTEST => return Some(self.hit_test(lparam)),
-            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => match self.target_at_client(lparam) {
-                Some(Target::Header(index)) if message == WM_LBUTTONDBLCLK => self.solo(index),
-                Some(Target::Click(action)) => self.press(Some(action)),
-                Some(Target::Card) => {}
-                _ => self.start_selecting(lparam),
-            },
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
+                let target = self.target_at_client(lparam);
+                if self.view.palette.is_some() && !matches!(target, Some(Target::Card | Target::Click(Action::RunFromPalette(_)))) {
+                    self.view.palette = None;
+                    self.redraw();
+                }
+                match target {
+                    Some(Target::Header(index)) if message == WM_LBUTTONDBLCLK => self.solo(index),
+                    Some(Target::Click(action)) => self.press(Some(action)),
+                    Some(Target::Card) => {}
+                    _ => self.start_selecting(lparam),
+                }
+            }
             WM_MOUSEMOVE if self.selecting => self.extend_selection(lparam),
             WM_MOUSEMOVE => self.on_mouse_move(lparam),
             // The title bar is a non-client area, so it gets its own mouse messages.
@@ -459,19 +508,23 @@ impl Window {
             WM_TIMER if wparam.0 == METER_TIMER => self.update_meters(),
             WM_TIMER if wparam.0 == REBIND_TIMER => self.finish_rebinding(None),
             WM_TIMER if wparam.0 == CLIPBOARD_TIMER => self.give_back_clipboard(),
+            WM_TIMER if wparam.0 == STEP_TIMER => {
+                unsafe { KillTimer(Some(self.hwnd), STEP_TIMER).ok() }.unwrap_or_default();
+                self.run_next_step();
+            }
             WM_TIMER if wparam.0 == DICTATE_TIMER => {
                 unsafe { KillTimer(Some(self.hwnd), DICTATE_TIMER).ok() }.unwrap_or_default();
+                self.steps.clear();
                 self.controls.dictating.store(true, Ordering::Relaxed);
                 self.redraw();
             }
-            // Sampled only while the panel's footer shows it.
-            WM_TIMER if wparam.0 == USAGE_TIMER && self.is_visible() && !self.view.collapsed => {
-                self.usage_meter.watch_helper(self.controls.helper_process());
-                let usage = self.usage_meter.sample();
-                if self.usage.map(usage_text) != Some(usage_text(usage)) {
-                    self.redraw();
+            // Macro shortcuts follow their files whether or not a model runs; usage is sampled only while the
+            // panel's footer shows it.
+            WM_TIMER if wparam.0 == USAGE_TIMER => {
+                self.refresh_macros();
+                if self.is_visible() && !self.view.collapsed {
+                    self.sample_usage();
                 }
-                self.usage = Some(usage);
             }
             WM_TIMER if wparam.0 == LIVE_TIMER => {
                 unsafe { KillTimer(Some(self.hwnd), LIVE_TIMER).ok() }.unwrap_or_default();
@@ -526,10 +579,19 @@ impl Window {
         if !matches!(action, Action::TypeWord(_) | Action::ClearWord(_)) {
             self.settings.view.typing_word = None;
         }
+        if !matches!(action, Action::Macro(_)) {
+            self.settings.view.macros.stop_typing();
+        }
+        if !matches!(action, Action::RunFromPalette(_)) {
+            self.view.palette = None;
+        }
         // Only a second press of Delete deletes, and of New code.
         let confirming = std::mem::take(&mut self.settings.view.confirm_delete);
         let confirming_new_code = std::mem::take(&mut self.settings.view.confirm_new_code);
         match action {
+            Action::Macro(action) => self.macro_action(action),
+            Action::RunFromPalette(at) => self.run_from_palette(at),
+            Action::AskForMacro => self.ask_for_macro(),
             Action::SaveAll => self.save(SaveRequest::All, "every app"),
             Action::SaveSection(index) => {
                 let label = self.captions.lock().unwrap().sections[index].label.clone();
@@ -727,6 +789,13 @@ impl Window {
                     self.finish_rebinding(None);
                 }
                 self.settings.show_tab(tab);
+                if tab == Tab::Macros {
+                    let mut macros = MacroTab::open(&paths::custom_dir());
+                    macros.set_settings(&self.keybinds, self.controls.dictation_only.load(Ordering::Relaxed), self.settings.view.macros.wake());
+                    macros.set_policy(self.settings.view.macros.policy());
+                    macros.set_phrases(self.settings.view.macros.phrases());
+                    self.settings.view.macros = macros;
+                }
                 self.settings.view.confirm_new_code = false;
                 self.controls.words.refresh();
                 self.watch_meters();
@@ -768,6 +837,7 @@ impl Window {
             Action::ResetKeys => {
                 self.keybinds = Keybinds::default();
                 keys::set_keybinds(self.keybinds.clone());
+                self.macro_settings_changed();
                 self.save_settings();
                 self.notify(format!("Shortcuts reset: hold {} to dictate", self.keybinds.hold_name()), false);
             }
@@ -815,6 +885,7 @@ impl Window {
             Action::DictationOnly(on) => {
                 self.controls.dictation_only.store(on, Ordering::Relaxed);
                 self.save_settings();
+                self.macro_settings_changed();
                 let _ = self.wake_discovery.send(());
             }
             Action::ShowSubtitles(on) => self.set_subtitles(on),
@@ -950,6 +1021,7 @@ impl Window {
                 Some(Target::Card) => {}
                 _ => {
                     (self.settings.view.open_dropdown, self.settings.view.typing_word) = (None, None);
+                    self.settings.view.macros.stop_typing();
                     self.redraw();
                 }
             },
@@ -1010,6 +1082,11 @@ impl Window {
                 self.redraw();
             }
             WM_KEYDOWN if self.settings.view.open_dropdown == Some(Dropdown::Font) => self.font_list_key(VIRTUAL_KEY(wparam.0 as u16)),
+            WM_CHAR if self.settings.view.macros.typing() => {
+                self.settings.view.macros.type_unit(wparam.0 as u16);
+                self.after_macro_typing();
+            }
+            WM_KEYDOWN if self.settings.view.macros.typing() => self.macro_key(VIRTUAL_KEY(wparam.0 as u16)),
             WM_CHAR if self.settings.view.typing_word.is_some() => {
                 let view = &mut self.settings.view;
                 if let Some(which) = view.typing_word {
@@ -1019,8 +1096,9 @@ impl Window {
                 self.redraw();
             }
             WM_KEYDOWN if self.settings.view.typing_word.is_some() => self.word_box_key(VIRTUAL_KEY(wparam.0 as u16)),
-            WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && self.settings.view.typing_word.is_some() => {
+            WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && (self.settings.view.typing_word.is_some() || self.settings.view.macros.typing()) => {
                 self.settings.view.typing_word = None;
+                self.settings.view.macros.stop_typing();
                 self.redraw();
             }
             WM_KEYDOWN if wparam.0 == VK_ESCAPE.0 as usize => self.close_settings(),
@@ -1051,6 +1129,93 @@ impl Window {
         }
         if view.font_search.text != typed {
             view.search_fonts();
+        }
+        self.redraw();
+    }
+
+    /// A macros button: the tab does it, then a press step waiting for its shortcut takes the keys, and the
+    /// macros Kiku runs are read again if the file changed.
+    fn macro_action(&mut self, action: MacroAction) {
+        let macros = &mut self.settings.view.macros;
+        let before = (macros.policy(), macros.phrases());
+        macros.click(action);
+        let after = (macros.policy(), macros.phrases());
+        let recording = macros.recording().is_some();
+        match (recording, self.settings.view.rebinding) {
+            (true, _) => self.start_rebinding(Rebind::Macro),
+            (false, Some(Rebind::Macro)) => self.finish_rebinding(None),
+            _ => {}
+        }
+        if before != after {
+            self.controls.macros.set_phrases(after.1);
+            self.save_settings();
+        }
+        self.refresh_macros();
+    }
+
+    fn sample_usage(&mut self) {
+        self.usage_meter.watch_helper(self.controls.helper_process());
+        let usage = self.usage_meter.sample();
+        if self.usage.map(usage_text) != Some(usage_text(usage)) {
+            self.redraw();
+        }
+        self.usage = Some(usage);
+    }
+
+    /// Reads the macros again if their files changed, and hands the hook their shortcuts.
+    fn refresh_macros(&mut self) {
+        self.controls.macros.set_policy(self.settings.view.macros.policy());
+        if self.controls.macros.refresh(&self.controls.words.words()) {
+            self.hand_macro_hotkeys();
+        }
+    }
+
+    /// The mode macros hear in now: the chosen one, or the own mode of the app in front while it is `Normal`.
+    fn mode_in_front(&self, modes: &Modes) -> Mode {
+        if modes.is_empty() {
+            return modes.effective("", &self.controls.mode());
+        }
+        let front = unsafe { GetForegroundWindow() };
+        let mut cached = self.front_app.borrow_mut();
+        if cached.0 != front {
+            *cached = (front, keys::app_of(front, &snapshot()).unwrap_or_default());
+        }
+        modes.effective(&cached.1, &self.controls.mode())
+    }
+
+    /// Hands the hook the shortcuts of the macros that are on, and tells once of those it can't have.
+    fn hand_macro_hotkeys(&mut self) {
+        let (handed, refused) = self.controls.macros.macros().hotkeys(&self.keybinds);
+        let (hotkeys, names): (Vec<_>, Vec<_>) = handed.into_iter().unzip();
+        self.macro_shortcuts = (keys::set_macro_hotkeys(hotkeys), names);
+        let fresh: Vec<String> = refused.iter().filter(|known| !self.refused_shortcuts.contains(known)).map(|(name, why)| format!("{name}: {why}")).collect();
+        self.refused_shortcuts = refused;
+        if !fresh.is_empty() {
+            let message = format!("Macro shortcut not used, {}", fresh.join("; "));
+            log::write(&message);
+            self.notify(message, true);
+        }
+    }
+
+    /// The Macros tab and the hook follow a change of Kiku's own keys or of dictation only mode.
+    fn macro_settings_changed(&mut self) {
+        let tab = &mut self.settings.view.macros;
+        let wake = tab.wake().to_owned();
+        tab.set_settings(&self.keybinds, self.controls.dictation_only.load(Ordering::Relaxed), &wake);
+        self.hand_macro_hotkeys();
+    }
+
+    /// A key pressed while typing in one of the Macros tab's boxes.
+    fn macro_key(&mut self, key: VIRTUAL_KEY) {
+        let (ctrl, hwnd) = (ctrl_held(), self.hwnd);
+        self.settings.view.macros.key(key, ctrl, || clipboard::text(hwnd));
+        self.after_macro_typing();
+    }
+
+    /// The wake word is a setting, so it is saved as it is edited.
+    fn after_macro_typing(&mut self) {
+        if self.settings.view.macros.focus() == Some(MacroBox::Wake) {
+            self.save_settings();
         }
         self.redraw();
     }
@@ -1240,6 +1405,9 @@ impl Window {
             engine_where: self.controls.engine_where(),
             engine_host: self.controls.engine_host(),
             host_on: self.controls.host_on(),
+            macros_wake: self.settings.view.macros.wake().to_owned(),
+            run_programs: self.settings.view.macros.policy(),
+            mode_phrases: self.settings.view.macros.phrases(),
         };
         if let Err(error) = settings.save() {
             self.notify(format!("Couldn't save settings: {}", plain_error(&error)), true);
@@ -1437,11 +1605,11 @@ impl Window {
     fn extend_selection(&mut self, lparam: LPARAM) {
         let (x, y) = self.to_dips(point_from(lparam));
         let point = self.text_point(x, y, true);
-        if let (Some(selection), Some(point)) = (self.view.selection.as_mut(), point) {
-            if selection.focus != point {
-                selection.focus = point;
-                self.redraw();
-            }
+        if let (Some(selection), Some(point)) = (self.view.selection.as_mut(), point)
+            && selection.focus != point
+        {
+            selection.focus = point;
+            self.redraw();
         }
     }
 
@@ -1470,7 +1638,7 @@ impl Window {
     }
 
     fn share(&mut self, what: &str, text: &str) {
-        match share::send(self.hwnd, what, text) {
+        match share::send(self.hwnd, what, text, false) {
             Ok(share::Sent::Clipboard) => self.notify("Too long to prefill: paste into Claude with Ctrl+V".into(), false),
             Ok(_) => self.notify("Opened a new Claude chat".into(), false),
             Err(error) => self.notify(format!("Couldn't send to Claude: {error}"), true),
@@ -1504,15 +1672,7 @@ impl Window {
     /// Pastes `text` through the clipboard after taking back `erase`: one paste, where typing it
     /// would send every character as keystrokes that each app and keyboard hook has to work through.
     fn paste(&mut self, erase: Option<keys::Erase>, text: &str) -> Result<()> {
-        // A paste still holding the clipboard keeps what was there before it.
-        let contents = match self.lent.take() {
-            Some(lent) => lent.contents,
-            None => clipboard::contents(self.hwnd),
-        };
-        let lent = clipboard::lend(self.hwnd, text);
-        self.lent = Some(Lent { contents, sequence: unsafe { GetClipboardSequenceNumber() } });
-        unsafe { SetTimer(Some(self.hwnd), CLIPBOARD_TIMER, CLIPBOARD_MS, None) };
-        lent?;
+        lend_clipboard(self.hwnd, &mut self.lent, |hwnd| clipboard::lend(hwnd, text))?;
         keys::paste(erase);
         Ok(())
     }
@@ -1520,38 +1680,69 @@ impl Window {
     /// Puts back what was on the clipboard before a paste, unless something has been copied since.
     fn give_back_clipboard(&mut self) {
         unsafe { KillTimer(Some(self.hwnd), CLIPBOARD_TIMER).ok() }.unwrap_or_default();
-        let unchanged = |lent: &Lent| lent.sequence == unsafe { GetClipboardSequenceNumber() };
-        if let Some(lent) = self.lent.take().filter(unchanged) {
-            if let Err(error) = clipboard::restore(self.hwnd, &lent.contents) {
-                log::write(format!("couldn't put the clipboard back: {error}"));
-            }
-        }
+        give_back(self.hwnd, &mut self.lent);
     }
 
-    /// Pastes dictated lines as they finish, all those waiting at once.
+    /// Plans what was said into steps and starts running them: the dictated lines waiting (text to paste, keys
+    /// to press, macros) and the lines heard that listening macros run.
     fn type_dictation(&mut self) {
         let lines = self.controls.take_typing();
-        if lines.is_empty() {
+        if lines.is_empty() && !self.controls.has_heard() {
             return;
         }
         let app = keys::focused_app().unwrap_or_default();
-        let text: String = lines
-            .iter()
-            .map(|line| self.controls.words.apply(line, &app, Output::Dictation))
-            .filter(|line| !line.is_empty())
-            .map(|line| dictated(&line))
-            .collect();
-        if text.is_empty() {
+        self.refresh_macros();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let mut steps = self.controls.macros.macros().plan(&lines, &app, &self.controls.words.settings(), &self.controls.mode());
+        steps.extend(heard_steps(&self.controls, &app, self.settings.view.macros.wake()));
+        self.run_steps(steps);
+    }
+
+    /// Queues `steps` after those waiting and starts running them unless a timer already will.
+    fn run_steps(&mut self, steps: Vec<Step>) {
+        self.steps.extend(steps);
+        if !self.step_waiting {
+            self.run_next_step();
+        }
+    }
+
+    /// Runs the next step; when more wait, they follow on a timer so the app has read the clipboard
+    /// before it is lent again, later still after a `wait` step.
+    fn run_next_step(&mut self) {
+        self.step_waiting = false;
+        let Some(step) = self.steps.pop_front() else {
             return;
+        };
+        let lent = RefCell::new(self.lent.take());
+        let run = MacroRun::new(self.hwnd, &self.controls, &self.captions, &lent);
+        let kept = run_step(&step, &run, &run);
+        let done = run.finish();
+        self.lent = lent.into_inner();
+        if let Some((name, value)) = kept {
+            let values = [(name.as_str(), value)];
+            self.steps = self.steps.iter().map(|waiting| waiting.bound(&values)).collect();
         }
-        if let Err(error) = self.paste(None, &text) {
-            return self.notify(format!("Couldn't paste what you said: {}", plain_error(&error)), true);
+        let before = self.typed.map(|typed| typed.erase.0);
+        self.typed = undo_after(before, &step, done.erase).map(|chars| Typed { erase: keys::Erase(chars), lines: 0, at: Instant::now() });
+        for notice in done.notices {
+            self.notify(notice, done.failed);
         }
-        self.typed = Some(Typed { erase: keys::Erase(text.chars().count()), lines: 0, at: Instant::now() });
+        if done.palette {
+            self.open_palette();
+        }
+        if done.failed {
+            self.steps.clear();
+        }
+        if !self.steps.is_empty() {
+            self.step_waiting = true;
+            let wait = u32::try_from(done.delay.as_millis()).unwrap_or(u32::MAX).max(STEP_MS);
+            unsafe { SetTimer(Some(self.hwnd), STEP_TIMER, wait, None) };
+        }
     }
 
     /// Erases what this app last typed.
     fn undo_typing(&mut self) {
+        self.steps.clear();
         if let Some(typed) = self.typed.take() {
             keys::erase(typed.erase);
         }
@@ -1701,6 +1892,9 @@ impl Window {
         if let keys::KeyEvent::Captured { vk, down } = event {
             return self.on_captured(vk, down);
         }
+        if matches!(event, keys::KeyEvent::Macro { generation, .. } if generation != self.macro_shortcuts.0) {
+            return;
+        }
         if event == keys::KeyEvent::Held {
             if self.controls.stopped.load(Ordering::Relaxed) {
                 self.notify(format!("Captioning is stopped: {} starts it", self.keybinds.shortcut(Command::Stop)), false);
@@ -1720,6 +1914,8 @@ impl Window {
             keys::KeyEvent::Command(Command::Hide) => self.set_display_visible(!self.display_visible()),
             keys::KeyEvent::Command(Command::Subtitles) => self.set_subtitles(!self.subtitles.settings.on),
             keys::KeyEvent::Command(Command::Quit) => return self.quit("the quit shortcut"),
+            keys::KeyEvent::Command(Command::Palette) => self.toggle_palette(),
+            keys::KeyEvent::Macro { index, .. } => self.run_macro_shortcut(index),
             keys::KeyEvent::Command(Command::SaveMiss) => {
                 self.controls.save_miss.store(true, Ordering::Relaxed);
                 self.notify("Saved the last 30 s of audio to the misses folder".into(), false);
@@ -1727,6 +1923,54 @@ impl Window {
             _ => {}
         }
         self.redraw();
+    }
+
+    /// Closes the macro palette, or opens it for the app in front.
+    fn toggle_palette(&mut self) {
+        if self.view.palette.take().is_none() {
+            self.open_palette();
+        }
+    }
+
+    /// Shows what can be said in the app in front, in the mode it hears now.
+    fn open_palette(&mut self) {
+        if self.subtitles.settings.on {
+            return self.notify("Leave captions mode to see what you can say".into(), false);
+        }
+        if !matches!(self.view.screen, Screen::Live) {
+            self.perform(Action::ShowLive);
+        }
+        let macros = self.controls.macros.macros();
+        let app = keys::focused_app().unwrap_or_default();
+        self.view.palette = Some(Palette::open(&macros, &app, &self.mode_in_front(macros.modes())));
+        self.view.scrolls.remove(&ScrollArea::Palette);
+        self.set_visible(true);
+        self.redraw();
+    }
+
+    /// Runs the palette's entry at `at` in the app that was in front when it opened.
+    fn run_from_palette(&mut self, at: usize) {
+        let Some(palette) = self.view.palette.take() else { return };
+        match palette.steps(at, &self.controls.macros.macros()) {
+            Ok(steps) => self.run_steps(steps),
+            Err(why) => self.notify(why, true),
+        }
+    }
+
+    /// Opens Claude with how macros are written and a request for help making one.
+    fn ask_for_macro(&mut self) {
+        let request = "Help me write a macro for Kiku: ask what it should say and do, then give me the [[macro]] to add to custom\\macros.toml.";
+        self.share("how Kiku's voice macros are written", &format!("{README}\n\n{request}"));
+    }
+
+    /// Runs the macro whose shortcut was pressed, alone, in the app in front.
+    fn run_macro_shortcut(&mut self, index: usize) {
+        let Some(name) = self.macro_shortcuts.1.get(index) else { return };
+        let app = keys::focused_app().unwrap_or_default();
+        match self.controls.macros.macros().plan_macro(name, &app, &self.controls.mode()) {
+            Ok(steps) => self.run_steps(steps),
+            Err(why) => self.notify(why, true),
+        }
     }
 
     /// Waits for the keys of the shortcut picked in settings. Every key goes here and to no app until done.
@@ -1751,7 +1995,7 @@ impl Window {
                 let result = self.keybinds.set_command(command, key);
                 self.finish_rebinding(Some(result.map(|()| format!("{} is now {}", command.short(), self.keybinds.shortcut(command)))));
             }
-            Rebind::Hold if down => {
+            Rebind::Hold | Rebind::Macro if down => {
                 if !self.captured.contains(&key) {
                     self.captured.push(key);
                 }
@@ -1760,10 +2004,15 @@ impl Window {
                 }
                 self.redraw();
             }
-            Rebind::Hold => {
+            Rebind::Hold | Rebind::Macro => {
                 self.captured_down.retain(|&v| v != vk);
                 if self.captured_down.is_empty() && !self.captured.is_empty() {
-                    let result = self.keybinds.set_hold(std::mem::take(&mut self.captured));
+                    let keys = std::mem::take(&mut self.captured);
+                    if rebind == Rebind::Macro {
+                        self.settings.view.macros.record(&keys);
+                        return self.finish_rebinding(None);
+                    }
+                    let result = self.keybinds.set_hold(keys);
                     self.finish_rebinding(Some(result.map(|()| format!("Hold {} to dictate", self.keybinds.hold_name()))));
                 }
             }
@@ -1776,10 +2025,12 @@ impl Window {
         keys::set_capturing(false);
         unsafe { KillTimer(Some(self.hwnd), REBIND_TIMER).ok() }.unwrap_or_default();
         self.settings.view.rebinding = None;
+        self.settings.view.macros.cancel_recording();
         self.captured.clear();
         match result {
             Some(Ok(done)) => {
                 keys::set_keybinds(self.keybinds.clone());
+                self.macro_settings_changed();
                 self.save_settings();
                 self.notify(done, false);
             }
@@ -2060,6 +2311,7 @@ impl Window {
         let blocked = self.controls.blocked();
         let import = self.import.lock().unwrap().clone();
         let words = self.controls.words.words();
+        let macros = self.controls.macros.macros();
         let captions = self.captions.lock().unwrap();
         self.schedule_next_change(&captions);
         let height = match self.view.collapsed {
@@ -2096,6 +2348,7 @@ impl Window {
             locked_opacity: self.locked_opacity,
             subtitles: &self.subtitles.settings,
             words: &words,
+            macros: &macros,
             word_settings: self.controls.words.settings(),
             settings_open: self.settings.is_open(),
             usage: self.usage,
@@ -2103,6 +2356,8 @@ impl Window {
             width: (bounds.right - bounds.left) as f32 / scale - HANDLE_STRIP,
             height: height as f32 / scale,
             dpi: scale * 96.0,
+            now: Instant::now(),
+            mode: self.mode_in_front(macros.modes()),
         };
         let mut panel_regions = None;
         if panel_shows {
@@ -2220,6 +2475,24 @@ impl Window {
     }
 }
 
+/// The steps of the listening macros the mic's lines said without the dictation key run, in `app`; `wake`
+/// (empty is none) must start each line.
+pub(super) fn heard_steps(controls: &Controls, app: &str, wake: &str) -> Vec<Step> {
+    let macros = controls.macros.macros();
+    let mode = controls.mode();
+    controls.take_heard().iter().filter_map(|line| macros.plan_heard(line, app, wake, &mode)).flatten().collect()
+}
+
+/// What undo takes back after `step` ran (`pasted`: the characters it pasted, if it pasted): a paste is kept
+/// across steps that leave the app's text alone (a wait, a notice, a mode), and lost to any other.
+pub(super) fn undo_after(before: Option<usize>, step: &Step, pasted: Option<usize>) -> Option<usize> {
+    match step {
+        _ if pasted.is_some() => pasted,
+        Step::Wait(_) | Step::Notify(_) | Step::SetMode(_) => before,
+        _ => None,
+    }
+}
+
 fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
@@ -2244,6 +2517,29 @@ fn wheel_notches(wparam: WPARAM) -> f32 {
 }
 
 /// A short form of an OS error, e.g. "access denied" rather than "Access is denied. (os error 5)".
+/// Puts `put`'s contents on the clipboard for a paste. A paste still holding the clipboard keeps what
+/// was there before it; [`give_back`] runs from a timer.
+fn lend_clipboard(hwnd: HWND, lent: &mut Option<Lent>, put: impl FnOnce(HWND) -> Result<()>) -> Result<()> {
+    let contents = match lent.take() {
+        Some(lent) => lent.contents,
+        None => clipboard::contents(hwnd),
+    };
+    let put = put(hwnd);
+    *lent = Some(Lent { contents, sequence: unsafe { GetClipboardSequenceNumber() } });
+    unsafe { SetTimer(Some(hwnd), CLIPBOARD_TIMER, CLIPBOARD_MS, None) };
+    put
+}
+
+/// Puts back what `lent` kept, unless something has been copied since.
+fn give_back(hwnd: HWND, lent: &mut Option<Lent>) {
+    let unchanged = |lent: &Lent| lent.sequence == unsafe { GetClipboardSequenceNumber() };
+    if let Some(lent) = lent.take().filter(unchanged)
+        && let Err(error) = clipboard::restore(hwnd, &lent.contents)
+    {
+        log::write(format!("couldn't put the clipboard back: {error}"));
+    }
+}
+
 fn plain_error(error: &dyn std::error::Error) -> String {
     let text = error.to_string();
     let text = text.split(" (os error").next().unwrap_or(&text);
@@ -2375,22 +2671,5 @@ fn create_window() -> Result<HWND> {
             Some(instance.into()),
             None,
         )
-    }
-}
-
-/// A dictated line as typed: a space after it, so the next line or dictation doesn't run on.
-fn dictated(line: &str) -> String {
-    format!("{line} ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dictated_lines_end_with_a_space_so_the_next_one_does_not_run_on() {
-        assert_eq!(dictated("That's exactly."), "That's exactly. ");
-        let typed = ["That's exactly", "And also."].map(dictated).concat();
-        assert_eq!(typed, "That's exactly And also. ");
     }
 }

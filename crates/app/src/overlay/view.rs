@@ -6,6 +6,8 @@ use super::{
     field::Field,
     finder::{Finder, Period, TextBox},
     folds::Folds,
+    macro_tab::{MacroAction, MacroTab},
+    palette::Palette,
     render::font_list_scroll,
     selection::Selection,
 };
@@ -45,6 +47,7 @@ pub enum Tab {
     Words,
     Appearance,
     Shortcuts,
+    Macros,
 }
 
 /// A step of the setup the settings window walks through on first run: each has a default, so Next
@@ -80,7 +83,7 @@ impl SetupStep {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [Tab::General, Tab::Listening, Tab::Apps, Tab::Words, Tab::Appearance, Tab::Shortcuts];
+    pub const ALL: [Tab; 7] = [Tab::General, Tab::Listening, Tab::Apps, Tab::Words, Tab::Macros, Tab::Appearance, Tab::Shortcuts];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -90,6 +93,7 @@ impl Tab {
             Tab::Words => "Words",
             Tab::Appearance => "Appearance",
             Tab::Shortcuts => "Shortcuts",
+            Tab::Macros => "Macros",
         }
     }
 }
@@ -97,6 +101,12 @@ impl Tab {
 /// Something the user can click.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
+    /// The Macros tab's buttons.
+    Macro(MacroAction),
+    /// Runs the palette's entry at this place.
+    RunFromPalette(usize),
+    /// Opens Claude to help write a macro.
+    AskForMacro,
     /// Manual save mode's buttons: save every app, or one, to the history database.
     SaveAll,
     SaveSection(usize),
@@ -305,6 +315,8 @@ impl Paint {
 pub enum Rebind {
     Hold,
     Command(Command),
+    /// The shortcut of a macro's press step.
+    Macro,
 }
 
 /// A caption line in a section. Lines are named by stream and id, which survive older lines being dropped.
@@ -383,6 +395,8 @@ pub enum ScrollArea {
     Table,
     Settings,
     Dropdown(Dropdown),
+    /// The macro palette's entries.
+    Palette,
 }
 
 /// Interactive regions from the last drawn frame, in DIPs.
@@ -605,6 +619,9 @@ pub struct View {
     pub font_matches: Vec<usize>,
     /// The Words tab's Try box, its correction, and which of their boxes keys go to.
     pub try_words: Field,
+    pub macros: MacroTab,
+    /// The macro palette, open over the panel.
+    pub palette: Option<Palette>,
     /// The code of the host to run models on, as typed.
     pub host_code: Field,
     pub correction: Correction,
@@ -651,6 +668,8 @@ impl View {
             font_search: Field::default(),
             font_matches: Vec::new(),
             try_words: Field::default(),
+            macros: MacroTab::default(),
+            palette: None,
             host_code: Field::default(),
             correction: Correction::default(),
             typing_word: None,
@@ -712,7 +731,7 @@ impl View {
 /// rest follow their newest lines.
 fn first_scroll(area: ScrollArea) -> Scroll {
     match area {
-        ScrollArea::Settings | ScrollArea::SavedList | ScrollArea::Results | ScrollArea::Table => Scroll::at_top(),
+        ScrollArea::Settings | ScrollArea::SavedList | ScrollArea::Results | ScrollArea::Table | ScrollArea::Palette => Scroll::at_top(),
         _ => Scroll::default(),
     }
 }

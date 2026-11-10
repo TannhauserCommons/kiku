@@ -35,7 +35,7 @@ pub fn shared_path() -> PathBuf {
 
 /// Replaces a file's text in one step: written whole to a temporary file, flushed to disk, then
 /// renamed over it, so readers never see half a file and a crash or power cut leaves the old one.
-pub(crate) fn replace(path: &Path, text: &str) -> io::Result<()> {
+pub fn replace(path: &Path, text: &str) -> io::Result<()> {
     let temporary = path.with_extension("tmp");
     let mut file = File::create(&temporary)?;
     file.write_all(text.as_bytes())?;

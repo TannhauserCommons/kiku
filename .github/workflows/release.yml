@@ -226,6 +226,7 @@ jobs:
 
       # ghcr.io wants a lowercase name. A new package starts private: see docs/RELEASING.md.
       - name: Build and push the image
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

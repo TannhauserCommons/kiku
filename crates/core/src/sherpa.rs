@@ -132,7 +132,7 @@ impl EngineStream for PhraseStream<'_> {
     fn push(&mut self, audio: &[f32]) -> Result<()> {
         self.pending.extend_from_slice(audio);
         let whole = self.pending.len() / VAD_WINDOW * VAD_WINDOW;
-        for window in self.pending[..whole].chunks_exact(VAD_WINDOW) {
+        for window in self.pending[..whole].as_chunks::<VAD_WINDOW>().0 {
             self.vad.accept_waveform(window);
             self.heard.push(window);
         }

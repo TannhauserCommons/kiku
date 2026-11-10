@@ -30,8 +30,9 @@ pub enum Sent {
     Clipboard,
 }
 
-/// Opens a new Claude chat about `text`, described as `what` (e.g. "a line from Discord").
-pub fn send(owner: HWND, what: &str, text: &str) -> Result<Sent> {
+/// Opens a new Claude chat about `text`, described as `what` (e.g. "a line from Discord"); `private` text
+/// stays out of the clipboard's history if it has to go by the clipboard.
+pub fn send(owner: HWND, what: &str, text: &str, private: bool) -> Result<Sent> {
     transcripts::write_shared(text)?;
     let (prompt, sent) = if mcp_set_up() {
         (format!("I shared {what} from Kiku. Read it with the kiku get_shared tool."), Sent::ThroughMcp)
@@ -40,7 +41,7 @@ pub fn send(owner: HWND, what: &str, text: &str) -> Result<Sent> {
         if prompt.chars().count() <= PREFILL_LIMIT {
             (prompt, Sent::Prefilled)
         } else {
-            clipboard::copy(owner, &prompt)?;
+            if private { clipboard::copy_private(owner, &prompt)? } else { clipboard::copy(owner, &prompt)? }
             (String::new(), Sent::Clipboard)
         }
     };

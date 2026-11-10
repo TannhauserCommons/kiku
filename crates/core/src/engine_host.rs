@@ -185,7 +185,7 @@ pub fn serve() {
                 Vec::new()
             })),
             (PUSH, _) => {
-                let audio: Vec<f32> = payload[8..].chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+                let audio: Vec<f32> = payload[8..].as_chunks::<4>().0.iter().map(|&b| f32::from_le_bytes(b)).collect();
                 if let Some(Err(error)) = streams.get_mut(&id).map(|stream| stream.push(&audio)) {
                     failed.insert(id, error.to_string());
                 }

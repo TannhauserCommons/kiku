@@ -413,6 +413,9 @@ enum Stop {
     Lost,
 }
 
+/// The picks (pending, active), whether each can load, the fallback, and where models run with the host code.
+type Readiness = (Option<Choice>, Choice, [bool; 2], Option<Choice>, (EngineWhere, String));
+
 impl Decoder {
     /// Decodes until capture ends, switching models when the user asks and releasing the model while stopped.
     fn run(&self, chunks: &Receiver<Chunk>, source_events: &Receiver<SourceEvent>, overlay: overlay::Handle) {
@@ -532,7 +535,7 @@ impl Decoder {
                 let collect = if dictating { Collect::Dictating } else { Collect::Poll };
                 if self.collect_all(engine, &mut streams, sources, collect) {
                     overlay.refresh();
-                    if dictating {
+                    if dictating || self.controls.has_heard() {
                         overlay.type_queued();
                     }
                 }
@@ -587,6 +590,9 @@ impl Decoder {
     /// Ends every line in progress now and saves it, before this engine's streams go away.
     fn finish_speech<'e>(&self, engine: &'e dyn Engine, streams: &mut [Option<Stream<'e>>], sources: &mut Sources, overlay: overlay::Handle) {
         self.collect_all(engine, streams, sources, Collect::FlushAll);
+        if self.controls.has_heard() {
+            overlay.type_queued();
+        }
         self.recorder.borrow_mut().write();
         overlay.refresh();
     }
@@ -624,7 +630,7 @@ impl Decoder {
     }
 
     /// What decides which model can load: the picks, and which of them can run.
-    fn readiness(&self) -> (Option<Choice>, Choice, [bool; 2], Option<Choice>, (EngineWhere, String)) {
+    fn readiness(&self) -> Readiness {
         let state = self.controls.model();
         let ready = [state.pending.is_some_and(|choice| self.can_load(choice)), self.can_load(state.active)];
         (state.pending, state.active, ready, download::fallback(), (self.controls.engine_where(), self.controls.engine_host()))
@@ -936,6 +942,7 @@ impl Decoder {
     }
 
     /// Applies every stream's new lines; returns whether any captions changed.
+    #[allow(clippy::needless_range_loop)] // `reopen` takes the stream's slot while the loop holds the index
     fn collect_all<'e>(&self, engine: &'e dyn Engine, streams: &mut [Option<Stream<'e>>], sources: &mut Sources, collect: Collect) -> bool {
         let now = Instant::now();
         let mut changed = false;
@@ -970,8 +977,9 @@ impl Decoder {
                 None => captions.update_mic(stream.id, &shown, in_front.as_deref()),
             }
             self.recorder.borrow_mut().note(&self.controls, &captions, stream.id, section, &shown);
-            if mic && matches!(collect, Collect::Dictating | Collect::FlushMic) {
-                lines.iter().filter(|l| l.complete && !l.text.is_empty()).for_each(|l| self.controls.queue_typing(l.text.clone()));
+            if mic {
+                let dictated = matches!(collect, Collect::Dictating | Collect::FlushMic);
+                lines.iter().filter(|l| l.complete && !l.text.is_empty()).for_each(|l| self.controls.queue_mic_line(l.text.clone(), dictated));
             }
             changed = true;
         }

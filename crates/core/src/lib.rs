@@ -1,14 +1,17 @@
+pub mod actions;
 pub mod captions;
 pub mod catalog;
 pub mod controls;
 pub mod download;
 pub mod engine;
 pub mod engine_host;
+pub mod file_watch;
 pub mod hardware;
 pub mod history;
 pub mod imports;
 pub mod keybinds;
 pub mod log;
+pub mod macros;
 pub mod misses;
 pub mod models_cli;
 mod moonshine;

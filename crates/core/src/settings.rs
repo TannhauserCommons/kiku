@@ -3,6 +3,7 @@
 use std::{fs, path::PathBuf};
 
 use crate::{
+    macros::{BuiltinPhrases, CommandPolicy},
     controls::{DEFAULT_KEEP_DAYS, THRESHOLD_MAX_DB, THRESHOLD_MIN_DB},
     catalog::{self, Choice},
     engine::Device,
@@ -75,6 +76,12 @@ pub struct Settings {
     pub engine_host: String,
     /// Whether this PC hosts its models for other computers.
     pub host_on: bool,
+    /// Words that must start a line for a listening macro to run (`macros.wake`); empty is none.
+    pub macros_wake: String,
+    /// Whether macros may run programs, and from anywhere (`macros.run`, `macros.run_anywhere`; off).
+    pub run_programs: CommandPolicy,
+    /// The built-in phrases dictation hears (`macros.phrases`, the ones turned off; all on by default).
+    pub mode_phrases: BuiltinPhrases,
 }
 
 /// Where the model runs.
@@ -166,6 +173,9 @@ impl Default for Settings {
             engine_where: EngineWhere::ThisPc,
             engine_host: String::new(),
             host_on: false,
+            macros_wake: String::new(),
+            run_programs: CommandPolicy::default(),
+            mode_phrases: BuiltinPhrases::default(),
         }
     }
 }
@@ -213,6 +223,10 @@ impl Settings {
                 "engine.where" => settings.engine_where = if value == "host" { EngineWhere::Host } else { EngineWhere::ThisPc },
                 "engine.host" => settings.engine_host = value.to_owned(),
                 "host.on" => settings.host_on = value == "true",
+                "macros.wake" => settings.macros_wake = value.to_owned(),
+                "macros.run" => settings.run_programs.enabled = value == "on",
+                "macros.run_anywhere" => settings.run_programs.anywhere = value == "on",
+                "macros.phrases" => settings.mode_phrases = BuiltinPhrases::from_turned_off(value),
                 "window_opacity" => settings.opacity.window = percent(value, MIN_WINDOW_OPACITY).unwrap_or(settings.opacity.window),
                 "text_opacity" => settings.opacity.text = percent(value, MIN_TEXT_OPACITY).unwrap_or(settings.opacity.text),
                 "locked_window_opacity" => locked_window = percent(value, MIN_WINDOW_OPACITY),
@@ -237,7 +251,7 @@ impl Settings {
         let blocked: String = self.blocked.iter().map(|name| format!("blocked = {name}\n")).collect();
         let pinned: String = self.pinned.iter().map(|name| format!("pinned = {name}\n")).collect();
         format!(
-            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\nengine.where = {}\nengine.host = {}\nhost.on = {}\n{}{blocked}{pinned}{}{}{}",
+            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\nengine.where = {}\nengine.host = {}\nhost.on = {}\nmacros.wake = {}\nmacros.run = {}\nmacros.run_anywhere = {}\nmacros.phrases = {}\n{}{blocked}{pinned}{}{}{}",
             self.mic_threshold_db,
             self.computer_threshold_db,
             self.model,
@@ -257,6 +271,10 @@ impl Settings {
             if self.engine_where == EngineWhere::Host { "host" } else { "this-pc" },
             self.engine_host,
             self.host_on,
+            self.macros_wake,
+            if self.run_programs.enabled { "on" } else { "off" },
+            if self.run_programs.anywhere { "on" } else { "off" },
+            self.mode_phrases.turned_off(),
             self.themes.to_settings(),
             self.keybinds.to_settings(),
             self.subtitles.to_settings(),
@@ -321,6 +339,9 @@ mod tests {
             engine_where: EngineWhere::Host,
             engine_host: "kiku://studio:7300/#ab.cd".into(),
             host_on: true,
+            macros_wake: String::new(),
+            run_programs: CommandPolicy { enabled: true, anywhere: true },
+            mode_phrases: BuiltinPhrases { dictation_off: false, what_can_i_say: false, ..BuiltinPhrases::default() },
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
         assert_eq!(Settings::parse("mic_threshold_db = loud\nunknown = 1"), Settings::default());

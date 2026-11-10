@@ -1,5 +1,7 @@
 //! Putting text on the clipboard, and lending the clipboard to a paste.
 
+use std::{os::windows::ffi::OsStrExt, path::PathBuf};
+
 use windows::{
     core::{w, Result, PCWSTR},
     Win32::{
@@ -12,7 +14,7 @@ use windows::{
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
             Ole::{
                 CF_BITMAP, CF_DIB, CF_DIBV5, CF_DSPBITMAP, CF_DSPENHMETAFILE, CF_DSPMETAFILEPICT, CF_ENHMETAFILE, CF_GDIOBJFIRST,
-                CF_GDIOBJLAST, CF_METAFILEPICT, CF_OEMTEXT, CF_OWNERDISPLAY, CF_PALETTE, CF_PRIVATEFIRST, CF_PRIVATELAST, CF_TEXT,
+                CF_GDIOBJLAST, CF_HDROP, CF_METAFILEPICT, CF_OEMTEXT, CF_OWNERDISPLAY, CF_PALETTE, CF_PRIVATEFIRST, CF_PRIVATELAST, CF_TEXT,
                 CF_UNICODETEXT,
             },
         },
@@ -39,9 +41,19 @@ pub fn copy(owner: HWND, text: &str) -> Result<()> {
     replace(owner, &[text_format(text)])
 }
 
+/// Replaces the clipboard's contents with `text`, kept out of clipboard history.
+pub fn copy_private(owner: HWND, text: &str) -> Result<()> {
+    lend(owner, text)
+}
+
 /// Puts `text` on the clipboard for a paste, kept out of clipboard history.
 pub fn lend(owner: HWND, text: &str) -> Result<()> {
     replace(owner, &[vec![text_format(text)], private_marks()].concat())
+}
+
+/// Puts `files` on the clipboard as files for a paste, kept out of clipboard history.
+pub fn lend_files(owner: HWND, paths: &[PathBuf]) -> Result<()> {
+    replace(owner, &[vec![(CF_HDROP.0 as u32, files(paths))], private_marks()].concat())
 }
 
 /// Puts back what [`contents`] read, kept out of clipboard history since it is already there.
@@ -135,4 +147,13 @@ fn text_format(text: &str) -> (u32, Vec<u8>) {
 
 fn private_marks() -> Vec<(u32, Vec<u8>)> {
     PRIVATE_MARKS.iter().map(|&name| (unsafe { RegisterClipboardFormatW(name) }, 0u32.to_le_bytes().to_vec())).collect()
+}
+
+/// The `CF_HDROP` block for `files`: a `DROPFILES` header, then each path in UTF-16 ending in a NUL, then a NUL.
+/// Slashes become backslashes, which Explorer-style paste targets need.
+pub fn files(files: &[PathBuf]) -> Vec<u8> {
+    let header = [20u32, 0, 0, 0, 1].into_iter().flat_map(u32::to_le_bytes);
+    let backslash = |unit: u16| if unit == u16::from(b'/') { u16::from(b'\\') } else { unit };
+    let paths = files.iter().flat_map(|file| file.as_os_str().encode_wide().map(backslash).chain([0])).chain([0]);
+    header.chain(paths.flat_map(u16::to_le_bytes)).collect()
 }

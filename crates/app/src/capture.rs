@@ -162,7 +162,7 @@ fn read_packets(capture: &AudioCaptureClient, packet: &mut Vec<u8>, samples: &mu
             samples.resize(samples.len() + read as usize, 0.0);
         } else {
             let bytes = &packet[..read as usize * BYTES_PER_SAMPLE];
-            samples.extend(bytes.chunks_exact(BYTES_PER_SAMPLE).map(|b| f32::from_le_bytes(b.try_into().unwrap())));
+            samples.extend(bytes.as_chunks::<BYTES_PER_SAMPLE>().0.iter().map(|&b| f32::from_le_bytes(b)));
         }
     }
     Ok(())

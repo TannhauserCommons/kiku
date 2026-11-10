@@ -16,14 +16,22 @@ If you choose to, the speech model can run on another computer of yours instead.
   always-on-top panel; quiet apps fold away by themselves.
 - **Captions mode:** the newest lines as subtitles over the screen, in the font, size and colours you pick.
 - **Dictation:** hold Ctrl+Win to type what you say into any app; paste or undo it with a key. Every
-  shortcut can be changed.
+  shortcut can be changed. Voice actions in `words.txt` press keys or paste saved text when you say a phrase.
+- **Voice macros:** say a phrase to run several steps in the app in front: paste text with variables (date,
+  clipboard, what was just said), press key sequences, paste or attach files. Edit them in Settings → Macros.
+- **Drive the PC by voice:** macros can open a link, file or app, bring an app's window to the front, run your
+  own scripts, and hand text (a transcript, say) to Claude. Running programs is off until you turn it on, and
+  each command and script is approved by you in the app first. Modes (normal, commands only, dictation off,
+  and your own, even per app) change what dictation does, and Ctrl+Win+M, or saying "what can I say", shows
+  the macros you can say right now. Claude can help write them, and an assistant on your PC can check them
+  through the MCP server.
 - **Offline speech models:** Parakeet (English, or 25 languages) and Moonshine, on the CPU or an NVIDIA
   GPU. Setup recommends one for your PC and downloads it; you can also add your own sherpa-onnx or
   Moonshine model.
 - **History:** search past captions by words, app or day, or with SQL. Lines are kept for as many days
   as you choose, or only when you press save.
 - **For assistants on your PC:** an MCP server (`kiku-mcp.exe`) lets a local AI assistant read and search
-  your captions, if you set it up.
+  your captions, and look over your macros, if you set it up.
 - **The model on another computer:** a PC with a good GPU can share its models, and other PCs caption
   with them over the network (see below).
 - Themes, a light and dark look, and per-app blocking.
@@ -76,6 +84,9 @@ models you pick (from Hugging Face, NVIDIA, Microsoft's ONNX Runtime releases an
 releases) and, if *Check for updates* is on, once a day to read the latest version from this repository's
 releases. Nothing else is sent, unless you choose **Another computer** under **Where models run**: then the
 audio being captioned goes, encrypted, to the computer whose code you pasted, and only there.
+
+Text Kiku pastes or copies (dictation, macros) is kept out of Windows clipboard history and the cloud
+clipboard; a selection copied by the app in front for a macro (`{selection}`, `copy = true`) is not.
 
 ## Building from source
 

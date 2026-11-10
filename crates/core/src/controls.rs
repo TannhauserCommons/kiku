@@ -15,6 +15,7 @@ use crate::{
     catalog::Choice,
     engine::{Hotword, SAMPLE_RATE},
     update::Release,
+    macros::{MacroBook, Mode},
     words::WordBook,
 };
 
@@ -63,6 +64,8 @@ pub struct Controls {
     blocked: Mutex<Vec<Blocked>>,
     /// Dictated text waiting for the overlay to type it.
     typing: Mutex<Vec<String>>,
+    /// Mic lines said without the dictation key, waiting for the listening macros.
+    heard: Mutex<Vec<String>>,
     mic: InputControls,
     computer: InputControls,
     model: Mutex<ModelState>,
@@ -78,6 +81,10 @@ pub struct Controls {
     checked: Mutex<Option<Result<bool, String>>>,
     /// Word rules for captions and dictation, from `words.txt`, and where they apply.
     pub words: WordBook,
+    /// Voice macros, from `custom\macros.toml` and `variables.toml`, and `words.txt`'s `>` lines.
+    pub macros: MacroBook,
+    /// The mode macros hear in, as chosen by the steps that set it.
+    mode: Mutex<Mode>,
     /// The words the model listens for, and whether they changed since the decoder last took them.
     hotwords: Mutex<(Vec<Hotword>, bool)>,
     /// Where the model runs and which host, and whether the decoder has yet to load again for a change.
@@ -148,6 +155,7 @@ impl Controls {
             save_miss: AtomicBool::new(false),
             blocked: Mutex::new(Vec::new()),
             typing: Mutex::new(Vec::new()),
+            heard: Mutex::new(Vec::new()),
             mic: InputControls::new(mic_threshold_db),
             computer: InputControls::new(computer_threshold_db),
             model: Mutex::new(ModelState { active: model, pending: None, failed: None, failure: None, loaded: false, gpu_fallback: None, remote: None }),
@@ -157,12 +165,23 @@ impl Controls {
             update: Mutex::new(None),
             checked: Mutex::new(None),
             words: WordBook::default(),
+            macros: MacroBook::default(),
+            mode: Mutex::new(Mode::Normal),
             hotwords: Mutex::new((Vec::new(), false)),
             engine_place: Mutex::new(EnginePlace { place: EngineWhere::ThisPc, code: String::new(), changed: false }),
             host_on: AtomicBool::new(false),
             hosted_code: Mutex::new(None),
             new_code: AtomicBool::new(false),
         }
+    }
+
+    /// The mode chosen for macros; an app's own mode applies on top while it is `Normal`.
+    pub fn mode(&self) -> Mode {
+        self.mode.lock().unwrap().clone()
+    }
+
+    pub fn set_mode(&self, mode: Mode) {
+        *self.mode.lock().unwrap() = mode;
     }
 
     pub fn model(&self) -> ModelState {
@@ -355,6 +374,26 @@ impl Controls {
     /// Dictated text not yet typed, oldest first.
     pub fn take_typing(&self) -> Vec<String> {
         std::mem::take(&mut *self.typing.lock().unwrap())
+    }
+
+    /// A finished line from your mic: `dictated` (said holding the dictation key) it is typed; otherwise it
+    /// waits for the panel's listening macros, only while some macro listens.
+    pub fn queue_mic_line(&self, text: String, dictated: bool) {
+        if dictated {
+            self.queue_typing(text);
+        } else if self.macros.macros().listens() {
+            self.heard.lock().unwrap().push(text);
+        }
+    }
+
+    /// Whether mic lines are waiting for the listening macros.
+    pub fn has_heard(&self) -> bool {
+        !self.heard.lock().unwrap().is_empty()
+    }
+
+    /// Mic lines said without the dictation key, waiting for the listening macros, oldest first.
+    pub fn take_heard(&self) -> Vec<String> {
+        std::mem::take(&mut *self.heard.lock().unwrap())
     }
 
     pub fn threshold_db(&self, input: Input) -> f32 {

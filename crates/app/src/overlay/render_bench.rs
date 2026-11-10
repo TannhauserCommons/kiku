@@ -2,7 +2,7 @@
 //! gives the same pixels as drawing everything, and what a frame costs, pushed to a layered window that
 //! is never shown (run with `cargo test --release -p kiku render_cost -- --ignored --nocapture`).
 
-use std::time::{Duration, Instant};
+use std::{fs, path::PathBuf, time::{Duration, Instant}};
 
 use windows::{
     core::w,
@@ -23,6 +23,8 @@ use windows::{
 
 use super::{
     finder::{Found, TextBox, Who},
+    macro_tab::{MacroAction, MacroTab},
+    palette::Palette,
     render::{Frame, Icon, Meter, Panel, Renderer, Speaker, SubtitleLine, SubtitleScene, Surface},
     usage::Usage,
     view::{Action, BlockPrompt, Correction, Dropdown, ImportStatus, LineRef, Screen, Scroll, ScrollArea, SetupStep, Tab, Target, View, WordBox},
@@ -32,7 +34,8 @@ use kiku_core::{
     controls::{Blocked, Input, ModelState},
     engine::{Device, Line},
     history::{Session, StoredLine, Table},
-    keybinds::Keybinds,
+    keybinds::{Key, Keybinds},
+    macros::{CommandPolicy, Macros, Mode, Variables},
     catalog::{self, Choice},
     download::Downloads,
     hardware::{Gpu, Hardware},
@@ -114,10 +117,15 @@ static SUBTITLES: std::sync::LazyLock<SubtitleSettings> = std::sync::LazyLock::n
 static HARDWARE: std::sync::LazyLock<Hardware> = std::sync::LazyLock::new(Hardware::default);
 static DOWNLOADS: std::sync::LazyLock<Downloads> = std::sync::LazyLock::new(|| Downloads::start(|| {}));
 static WORD_RULES: std::sync::LazyLock<Words> = std::sync::LazyLock::new(|| Words::parse(SNAPSHOT_WORDS));
-/// A word rules file with an entry of each kind, sections and a line it skips.
-const SNAPSHOT_WORDS: &str = "# mine\nkicku => Kiku\num =>\n@ Tannhauser\n@ Lull :2.8\n! capitalise\nnot a rule\n[Discord]\ngg => good game\n! no-trailing-punctuation\n";
+static MACROS: std::sync::LazyLock<Macros> = std::sync::LazyLock::new(|| Macros::parse("", &WORD_RULES, &Variables::default()));
+/// A macros file with a macro of two phrases, a shortcut and one turned off with three steps.
+const SNAPSHOT_MACROS: &str = "[[macro]]\nname = \"Paste my email\"\nsay = [\"paste my email\", \"my email\"]\nsteps = [ { paste = \"me@example.com\" } ]\n\n[[macro]]\nname = \"New tab\"\nsay = \"open a tab\"\nsteps = [ { press = \"ctrl+t\" } ]\n\n[[macro]]\nname = \"Sign off\"\nsay = \"sign off\"\nhotkey = \"Ctrl+Alt+S\"\nlisten = true\nenabled = false\nsteps = [ { paste = \"Thanks,\\nTannhauser\" }, { wait = 200 }, { notify = \"Signed off\" } ]\n";
+/// More macros for the snapshots: one that runs a program, asks Claude and changes mode, and one with a shortcut only.
+const SNAPSHOT_MORE_MACROS: &str = "\n[[macro]]\nname = \"Search the web\"\nsay = \"search for {words}\"\nsteps = [ { run = \"search.ps1\", args = [\"{words}\", \"--quiet\"], output = \"paste\" }, { ask_claude = \"Summarise {clipboard}\" }, { mode = \"commands\" } ]\n\n[[macro]]\nname = \"Reopen tab\"\nhotkey = \"Ctrl+Alt+R\"\nsteps = [ { press = \"ctrl+shift+t\" } ]\n";
+/// A word rules file with an entry of each kind (two actions everywhere, one in Discord), sections and a line it skips.
+const SNAPSHOT_WORDS: &str = "# mine\nkicku => Kiku\num =>\n@ Tannhauser\n@ Lull :2.8\n! capitalise\n> select all => press ctrl+a\n> paste email => paste me@example.com\nnot a rule\n[Discord]\ngg => good game\n> paste address => paste 1 Main St\\n2nd floor\n! no-trailing-punctuation\n";
 
-fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, width: f32) -> Panel<'a> {
+pub(super) fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, width: f32) -> Panel<'a> {
     let choice = Choice { model: catalog::by_id_or_default(catalog::DEFAULT_ID), device: Device::Cpu };
     let meter = |input| Meter { input, threshold_db: -50.0, level_db: -30.0 };
     Panel {
@@ -150,6 +158,7 @@ fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, wid
         locked_opacity: Opacity::default(),
         subtitles: &SUBTITLES,
         words: &WORD_RULES,
+        macros: &MACROS,
         word_settings: WordSettings::default(),
         settings_open: false,
         usage: None,
@@ -157,6 +166,8 @@ fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Keybinds, wid
         width,
         height: 420.0,
         dpi: 144.0,
+        now: Instant::now(),
+        mode: Mode::Normal,
     }
 }
 
@@ -187,6 +198,10 @@ fn render_cost() {
         draw(panel(&captions, &view, &keybinds, 560.0));
     });
     measure("live: resized each frame", 50, |i| draw(panel(&captions, &view, &keybinds, 560.0 + (i % 2) as f32 * 40.0)));
+    let palette_macros = Macros::parse(&many_macros(200), &WORD_RULES, &Variables::default());
+    view.palette = Some(Palette::open(&palette_macros, "Discord", &Mode::Normal));
+    measure("live: macro palette open, 200 macros", 50, |_| draw(panel(&captions, &view, &keybinds, 560.0)));
+    view.palette = None;
 
     let lines = (0..10_000).map(|i| format!("[14:{:02}] Discord: {}", i % 60, line(i, i as usize).text)).collect();
     view.screen = Screen::SavedFile { session: 1, title: "Discord  ·  Oct 30, 14:05".into(), lines, focus: None };
@@ -206,6 +221,21 @@ fn render_cost() {
         draw(Panel { meters: [meter(Input::Mic), meter(Input::Computer)], ..panel(&captions, &settings, &keybinds, 560.0) });
     });
 
+    // The Macros tab beside the Words tab, each with 500 entries.
+    let many_words = Words::parse(&(0..500).map(|i| format!("word{i} => replacement {i}\n")).collect::<String>());
+    settings.tab = Tab::Words;
+    measure("settings: words tab, 500 entries", 50, |_| draw(Panel { words: &many_words, ..panel(&captions, &settings, &keybinds, 560.0) }));
+    let folder = macros_folder(&many_macros(500));
+    (settings.tab, settings.macros) = (Tab::Macros, MacroTab::open(&folder));
+    measure("settings: macros tab, 500 macros", 50, |_| draw(panel(&captions, &settings, &keybinds, 560.0)));
+    let _ = fs::remove_dir_all(folder);
+    let programs = (0..50).map(|i| format!("[[macro]]\nname = \"Program {i}\"\nsay = \"run program {i}\"\nsteps = [ {{ run = \"tool{i}.ps1\", args = [\"{{words}}\"] }} ]\n\n")).collect::<String>();
+    let folder = macros_folder(&(many_macros(500) + &programs));
+    (settings.tab, settings.macros) = (Tab::Macros, MacroTab::open(&folder));
+    settings.macros.set_policy(CommandPolicy { enabled: true, anywhere: true });
+    measure("settings: macros tab, 50 commands to approve", 50, |_| draw(panel(&captions, &settings, &keybinds, 560.0)));
+    let _ = fs::remove_dir_all(folder);
+
     let (look, mut surface) = (SubtitleSettings::default().look(&Themes::default()), Surface::default());
     let mut draw = |text: &str| {
         let lines = [SubtitleLine { text: &line(1, 1).text, speaker: Speaker::App(None) }, SubtitleLine { text, speaker: Speaker::You }];
@@ -217,8 +247,21 @@ fn render_cost() {
     measure("captions mode: last line grew a word", 200, |i| draw(&format!("so the meeting moved {i}")));
 }
 
+/// A `macros.toml` of `count` macros of two steps each.
+fn many_macros(count: usize) -> String {
+    (0..count).map(|i| format!("[[macro]]\nname = \"Macro {i}\"\nsay = \"run macro {i}\"\nsteps = [ {{ paste = \"text {i}\" }}, {{ press = \"ctrl+a\" }} ]\n\n")).collect()
+}
+
+/// A temporary folder holding a `macros.toml` of `text`.
+fn macros_folder(text: &str) -> PathBuf {
+    let folder = std::env::temp_dir().join(format!("kiku-macros-bench-{}-{}", std::process::id(), text.len()));
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("macros.toml"), text).unwrap();
+    folder
+}
+
 /// `panel` sized as the settings window.
-fn settings_window(panel: Panel) -> Panel {
+pub(super) fn settings_window(panel: Panel) -> Panel {
     Panel { width: super::settings::SIZE.0, height: super::settings::SIZE.1, ..panel }
 }
 
@@ -479,6 +522,18 @@ fn snapshots() {
         let shown = Panel { usage, themes: Themes::from(theme), height: 420.0, shown_opacity: Opacity { window: 30, text: 100 }, ..panel(&captions, &view, &keybinds, 560.0) };
         write_png(&folder.join(format!("panel-see-through-{}.png", name(theme))), renderer.render(&mut surface, &shown).unwrap().0);
     }
+    // The macro palette over the live panel, and the title bar's chip for a mode that isn't normal.
+    let palette_macros = Macros::parse(&[SNAPSHOT_MACROS, SNAPSHOT_MORE_MACROS].concat(), &WORD_RULES, &Variables::default());
+    let mut asking = View::new();
+    asking.palette = Some(Palette::open(&palette_macros, "Discord", &Mode::Normal));
+    asking.hovered = Some(Action::RunFromPalette(1));
+    for theme in [Theme::Night, Theme::Day] {
+        for (shot, view, mode) in [("panel-macro-palette", &asking, Mode::Normal), ("panel-mode-chip", &View::new(), Mode::Commands)] {
+            let mut surface = Surface::default();
+            let shown = Panel { usage, themes: Themes::from(theme), height: 420.0, mode, ..panel(&captions, view, &keybinds, 560.0) };
+            write_png(&folder.join(format!("{shot}-{}.png", name(theme))), renderer.render(&mut surface, &shown).unwrap().0);
+        }
+    }
     let mut save_panel = |name: &str, view: &View, themes: Themes, height: f32| {
         let mut surface = Surface::default();
         let (frame, _) = renderer.render(&mut surface, &Panel { usage, themes, height, ..panel(&captions, view, &keybinds, 560.0) }).unwrap();
@@ -564,6 +619,11 @@ fn snapshots() {
     (trying.tab, trying.typing_word) = (Tab::Words, Some(WordBox::Try));
     trying.try_words.set("um, gg kicku.");
     trying.scrolls.insert(ScrollArea::Settings, Scroll::at(280.0));
+    // The Try box with a snippet's phrase said in a line.
+    let mut trying_action = View::new();
+    (trying_action.tab, trying_action.typing_word) = (Tab::Words, Some(WordBox::Try));
+    trying_action.try_words.set("My email is paste email.");
+    trying_action.scrolls.insert(ScrollArea::Settings, Scroll::at(280.0));
     // The Listening tab's remote cards: a host answering, an invalid code, and sharing with a code.
     let key = "A".repeat(43);
     let code = format!("kiku://192.168.1.20:7300/#{key}.{key}");
@@ -593,6 +653,9 @@ fn snapshots() {
         let hosting = Panel { themes, host_on: true, hosted_code: Some(code.clone()), ..panel(&captions, &sharing, &keybinds, 560.0) };
         save_settings_window(&mut renderer, &folder.join(format!("settings-remote-sharing-{}.png", name(theme))), hosting);
     }
+    let mut entries = View::new();
+    entries.tab = Tab::Words;
+    entries.scrolls.insert(ScrollArea::Settings, Scroll::at(f32::MAX));
     // A line's misheard word being corrected, opened from Discord.
     let mut correcting = View::new();
     (correcting.tab, correcting.typing_word) = (Tab::Words, Some(WordBox::Fix));
@@ -603,14 +666,52 @@ fn snapshots() {
         let themes = Themes::from(theme);
         save_settings_window(&mut renderer, &folder.join(format!("settings-words-try-{}.png", name(theme))), Panel { themes, ..panel(&captions, &trying, &keybinds, 560.0) });
         save_settings_window(&mut renderer, &folder.join(format!("settings-words-correct-{}.png", name(theme))), Panel { themes, ..panel(&captions, &correcting, &keybinds, 560.0) });
+        save_settings_window(&mut renderer, &folder.join(format!("settings-words-try-action-{}.png", name(theme))), Panel { themes, ..panel(&captions, &trying_action, &keybinds, 560.0) });
+        save_settings_window(&mut renderer, &folder.join(format!("settings-words-actions-{}.png", name(theme))), Panel { themes, ..panel(&captions, &entries, &keybinds, 560.0) });
     }
-    let mut entries = View::new();
-    entries.tab = Tab::Words;
-    entries.scrolls.insert(ScrollArea::Settings, Scroll::at(f32::MAX));
     save_settings_window(&mut renderer, &folder.join("settings-words-entries-night.png"), panel(&captions, &entries, &keybinds, 560.0));
     let (empty, mut words_tab) = (Words::default(), View::new());
     words_tab.tab = Tab::Words;
     save_settings_window(&mut renderer, &folder.join("settings-words-empty-night.png"), Panel { words: &empty, ..panel(&captions, &words_tab, &keybinds, 560.0) });
+    // The Macros tab: the list, a macro being edited, and the Add step menu open.
+    let macros_dir = macros_folder(SNAPSHOT_MACROS);
+    let macros_view = |setup: &dyn Fn(&mut MacroTab)| {
+        let mut view = View::new();
+        (view.tab, view.macros) = (Tab::Macros, MacroTab::open(&macros_dir));
+        setup(&mut view.macros);
+        view
+    };
+    let more_dir = macros_folder(&[SNAPSHOT_MACROS, SNAPSHOT_MORE_MACROS].concat());
+    let programs_view = |setup: &dyn Fn(&mut MacroTab)| {
+        let mut view = View::new();
+        (view.tab, view.macros) = (Tab::Macros, MacroTab::open(&more_dir));
+        view.macros.set_policy(CommandPolicy { enabled: true, anywhere: false });
+        view.scrolls.insert(ScrollArea::Settings, Scroll::at(f32::MAX));
+        setup(&mut view.macros);
+        view
+    };
+    let macro_views = [
+        ("approval", programs_view(&|_| {})),
+        ("editor-run", programs_view(&|tab| tab.click(MacroAction::Edit(3)))),
+        ("list", macros_view(&|_| {})),
+        ("editor", macros_view(&|tab| {
+            tab.set_settings(&Keybinds::default(), false, "computer");
+            tab.click(MacroAction::Edit(2));
+        })),
+        ("shortcut-clash", macros_view(&|tab| {
+            [MacroAction::Edit(2), MacroAction::RecordHotkey].into_iter().for_each(|action| tab.click(action));
+            tab.record(&[Key::Ctrl, Key::Win, Key::Other(u16::from(b'V'))]);
+            tab.click(MacroAction::Save);
+        })),
+        ("add-step", macros_view(&|tab| [MacroAction::Edit(0), MacroAction::AddStepMenu].into_iter().for_each(|action| tab.click(action)))),
+    ];
+    for theme in [Theme::Night, Theme::Day] {
+        for (shown, view) in &macro_views {
+            save_settings_window(&mut renderer, &folder.join(format!("settings-macros-{shown}-{}.png", name(theme))), Panel { themes: Themes::from(theme), ..panel(&captions, view, &keybinds, 560.0) });
+        }
+    }
+    let _ = fs::remove_dir_all(macros_dir);
+    let _ = fs::remove_dir_all(more_dir);
     // The font list just opened on an installed font from the middle of the list, then searched.
     let mut fonts = View::new();
     (fonts.tab, fonts.fonts) = (Tab::Appearance, renderer.font_families().unwrap());

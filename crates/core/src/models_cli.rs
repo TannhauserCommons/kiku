@@ -147,7 +147,7 @@ fn fetch(model: &Model, target: Target) -> Result<(), String> {
                 State::Paused => return Err(format!("download of {} was paused", model.id)),
                 State::Queued | State::Running => {
                     pending = true;
-                    let percent = if progress.total == 0 { 0 } else { progress.done * 100 / progress.total };
+                    let percent = (progress.done * 100).checked_div(progress.total).unwrap_or(0);
                     println!("{}: {percent}% ({} of {})", target.key(), megabytes(progress.done), megabytes(progress.total));
                 }
             }

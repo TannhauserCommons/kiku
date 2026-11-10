@@ -4,6 +4,7 @@
 use windows::{core::Result, Win32::Graphics::Direct2D::Common::D2D_RECT_F};
 
 use kiku_core::{
+    actions::Effect,
     captions::YOU,
     words::{strength_text, Kind, Scope, STRENGTHS},
 };
@@ -50,11 +51,11 @@ impl Renderer {
         let area = rect(content.left, y, content.right, y + CONTROL);
         y = self.draw_text_box(&view.try_words, "Type what was said, to see what Kiku makes of it", area, role, panel, regions)?.bottom;
         if !view.try_words.text.trim().is_empty() {
-            let preview = panel.words.preview(&view.try_words.text, &settings);
+            let preview = panel.macros.preview_rows(&view.try_words.text, &settings);
             y = self.draw_card(content, y + 8.0, |renderer, inner, mut y| {
-                for (label, text) in &preview {
-                    let text = if text.is_empty() { "(nothing)" } else { text };
-                    y = renderer.draw_two_line_row(text, label, &[], inner, y, panel, regions)?;
+                for (label, text) in preview {
+                    let text = if text.is_empty() { "(nothing)" } else { &text };
+                    y = renderer.draw_two_line_row(text, &label, &[], inner, y, panel, regions)?;
                 }
                 Ok(y)
             })?;
@@ -160,6 +161,13 @@ impl Renderer {
             Kind::Rule { from, to } => (format!("{from}  →  {to}"), "rule"),
             Kind::Word { word, .. } => (word.clone(), "listen for"),
             Kind::Transform(transform) => (transform.name().to_owned(), "transform"),
+            Kind::Action(action) => {
+                let what = match action.effect {
+                    Effect::Press(_) => "command",
+                    Effect::Paste(_) => "snippet",
+                };
+                (format!("{}  →  {}", action.phrase, action.describe()), what)
+            }
         };
         let what = self.single_line(&self.fonts.small, what, f32::MAX)?;
         let what_left = right - metrics(&what)?.width;

@@ -144,10 +144,10 @@ impl Recorder {
     /// Writes what's queued and marks the session ended, as the app quits.
     pub fn finish(&mut self) {
         self.write();
-        if let Some((history, session)) = &self.history {
-            if let Err(error) = history.end_session(*session) {
-                log::write(format!("couldn't close the transcript session: {error}"));
-            }
+        if let Some((history, session)) = &self.history
+            && let Err(error) = history.end_session(*session)
+        {
+            log::write(format!("couldn't close the transcript session: {error}"));
         }
     }
 

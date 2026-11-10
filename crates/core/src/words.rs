@@ -12,25 +12,43 @@
 //! ```
 
 use std::{
-    fs, io,
+    collections::HashMap,
+    fmt, fs, io,
     ops::RangeInclusive,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime},
 };
 
-use crate::{engine::Hotword, log, paths, transcripts};
+use crate::{
+    actions::{
+        self,
+        matching::{Chunk, Index, Part, Said, Trigger},
+        Action, Effect, Step,
+    },
+    engine::Hotword,
+    file_watch::FileWatch,
+    keybinds::Key,
+    log, paths, transcripts,
+};
 
-/// The file is looked at for changes at most this often.
-const CHECK_EVERY: Duration = Duration::from_secs(1);
+/// What a line of dictation turns into.
+enum Piece {
+    /// Text ready to paste.
+    Text(String),
+    /// A whole-line snippet, pasted exactly: a space comes only before text that follows it.
+    Snippet(String),
+    Press(Vec<Key>),
+}
 
 /// What a new file starts with.
-const HEADER: &str = "\
+pub const HEADER: &str = "\
 # Kiku's word rules. Kiku reloads this file whenever it is saved.
 #   kicku => Kiku       these words, any case, become the text after => (nothing after it deletes them)
 #   @ Tannhauser        a word to listen for, in every app (Parakeet Unified listens)
 #   @ Lull :2.5         listened for with a strength of its own (Settings → Words sets the rest's; 1.5 at first)
 #   ! lowercase         a transform: lowercase, no-trailing-punctuation or capitalise
+#   > select all => press ctrl+a     a command: said as a whole line in dictation, it presses the keys
+#   > my email => paste me@example.com   said anywhere in a sentence in dictation, it pastes the text
 #   [Discord]           what follows applies only to Discord; [You] is your mic
 # Settings → Words picks whether rules and transforms apply to captions, dictation or both.
 ";
@@ -41,17 +59,23 @@ I use Kiku for live captions and dictation on Windows. Change what it does to my
 
 The steps live in one plain text file, %APPDATA%\\kiku\\words.txt, which Kiku reloads as soon as it is saved. One entry per line:
 
-    # a comment; a # with spaces around it also starts a comment at the end of a line
+    # a comment; a # with spaces around it also starts a comment at the end of a rule, @ or ! line (not a > line)
     kicku => Kiku        a rule: these words or this phrase, in any case and only as whole words (punctuation next to them is fine), become the text after => exactly as written
     um =>                nothing after => deletes the words
     @ Tannhauser         a name or word Kiku should listen for, in every app whatever section it is in (only Parakeet Unified listens; other models ignore it)
     @ Lull :2.5          listened for with a strength of its own, from 0.5 to 4 (Settings → Words sets the strength of the rest, 1.5 at first)
     ! lowercase          a transform; the built-in ones are lowercase, no-trailing-punctuation and capitalise (the first letter)
+    > select all => press ctrl+a      a command: when what I dictate is only this phrase (case and punctuation aside), press the keys instead of typing; names like Enter, Tab, Esc, Up, Home, Page Down, F1 to F24, joined by +
+    > my email => paste me@example.com
     [Discord]            the lines after it apply only to this app, named as Kiku shows it; [You] is my microphone
 
 Lines before the first [App] line apply everywhere. Rules run before transforms, the general ones before an app's, and transforms in the order listed. Where rules overlap, the longest wins. Rules are fixed text: no patterns or wildcards.
 
 Use rules for fixed swaps and deletions, such as a misheard name to its spelling, a word to an emoji, or dropping \"um\". Names and words Kiku keeps mishearing go on @ lines, which help the model hear them; a rule only changes the text afterwards, so rewriting a real word with one changes it everywhere it is said. A word still misheard can be given a higher strength, but the stronger it is, the likelier it is heard where a similar word was said; toward 4 that starts to happen. Settings → Words in Kiku chooses whether rules and transforms apply to captions (the panel, captions mode, History and Kiku's MCP server), to dictation (what Kiku types or pastes, where an app's lines apply to the app being typed into) or both; by default rules apply to both and transforms to dictation.
+
+Actions (> lines) work only when I dictate, never in captions, History or Kiku's MCP server, and an app's section applies when I dictate into that app and wins over the general ones. A > line takes no comment at its end: its text after \"paste \" is pasted exactly as written, so a # there is pasted too. A snippet, like \"my email\" above, replaces its phrase anywhere in a dictated sentence with the text after \"paste \", where \\n is a line break, \\t a tab and \\\\ a backslash; said alone it is pasted exactly. Snippets match whole words, longest phrase first; number words from zero to twenty also match digits. Win+L is refused. Choose distinctive phrases: a command fires whenever the whole line is its phrase, so \"select all\" said alone presses the keys, and a snippet's text never appears in captions, History, the log or the MCP server. My undo shortcut takes back a snippet's paste, not a key press.
+
+For several steps in one phrase (pastes, key presses, files, opening things, scripts), voice macros live in %APPDATA%\\kiku\\custom\\macros.toml. Read the README.md beside it first: it has every step, variable, trigger and mode, and the safety rules. Keep my values in variables.toml, never in a macro, and do not read variables.toml back to me unless I ask. Never route its values through {selection} or copy = true. You can't approve a script or turn on running programs: only I can, in Kiku's Macros tab.
 
 Edit the file in place, keeping my comments and the order of what is there. What I want:
 ";
@@ -180,12 +204,12 @@ impl Transform {
         }
     }
 
-    fn named(name: &str) -> Option<Transform> {
+    pub(crate) fn named(name: &str) -> Option<Transform> {
         let name = if name.eq_ignore_ascii_case("capitalize") { "capitalise" } else { name };
         Self::ALL.into_iter().find(|transform| transform.name().eq_ignore_ascii_case(name))
     }
 
-    fn apply(self, text: &str) -> String {
+    pub(crate) fn apply(self, text: &str) -> String {
         match self {
             Transform::Lowercase => text.to_lowercase(),
             Transform::NoTrailingPunctuation => text.trim_end().trim_end_matches(|c| ".,!?;:…。、！？".contains(c)).to_owned(),
@@ -205,6 +229,8 @@ pub enum Kind {
     /// A word to listen for, and how strongly if not as strongly as settings say.
     Word { word: String, strength: Option<f32> },
     Transform(Transform),
+    /// A voice action, used only by dictation.
+    Action(Action),
 }
 
 /// An entry in the file, with the app section it is in (`None` before the first section).
@@ -224,12 +250,89 @@ impl Entry {
 }
 
 /// The parsed file, with its lines as written so edits keep comments and order.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Words {
     lines: Vec<String>,
     entries: Vec<Entry>,
     /// Lines that couldn't be read: their number, from 1, and why.
     pub skipped: Vec<(usize, String)>,
+    /// The voice actions, looked up when dictating.
+    index: Index<Action>,
+}
+
+/// Counts only: the lines can hold snippet text.
+impl fmt::Debug for Words {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Words").field("lines", &self.lines.len()).field("entries", &self.entries.len()).field("skipped", &self.skipped.len()).finish()
+    }
+}
+
+impl Words {
+    /// What dictating `said` (finished lines, in order) does in the app labelled `app`: the text to paste, with
+    /// snippets spliced in, and the keys commands press, in order.
+    pub fn plan(&self, said: &[String], app: &str, settings: &WordSettings) -> Vec<Step> {
+        let mut steps = Vec::new();
+        let mut text = String::new();
+        let mut after_snippet = false;
+        for piece in self.pieces(said, app, settings, |action| match &action.effect { Effect::Paste(text) => text.reveal().to_owned(), Effect::Press(_) => String::new() }) {
+            if after_snippet && !matches!(piece, Piece::Press(_)) {
+                text.push(' ');
+            }
+            after_snippet = matches!(piece, Piece::Snippet(_));
+            match piece {
+                Piece::Text(more) | Piece::Snippet(more) => text.push_str(&more),
+                Piece::Press(keys) => {
+                    if !text.is_empty() {
+                        steps.push(Step::Paste(actions::Private::new(std::mem::take(&mut text))));
+                    }
+                    steps.push(Step::Press(keys));
+                }
+            }
+        }
+        if !text.is_empty() {
+            steps.push(Step::Paste(actions::Private::new(text)));
+        }
+        steps
+    }
+
+    /// Each line said as dictation types it, `shown` giving what a snippet is replaced with.
+    fn pieces(&self, said: &[String], app: &str, settings: &WordSettings, shown: impl Fn(&Action) -> String) -> Vec<Piece> {
+        let apply = |line: &str| self.apply(line, app, Output::Dictation, settings);
+        if self.index.is_empty() {
+            let typed = |line: String| (!line.trim().is_empty()).then(|| Piece::Text(format!("{line} ")));
+            return said.iter().filter_map(|line| typed(apply(line))).collect();
+        }
+        let sections = self.index.sections(app);
+        let piece = |line: &String| match sections.said(line, apply)? {
+            Said::Line(action, _) => Some(match &action.effect {
+                Effect::Press(keys) => Piece::Press(keys.clone()),
+                Effect::Paste(_) => Piece::Snippet(shown(action)),
+            }),
+            Said::Text(chunks) => {
+                let mut text: String = chunks.into_iter().map(|chunk| match chunk {
+                    Chunk::Text(text) => text,
+                    Chunk::Trigger(action) => shown(action),
+                }).collect();
+                text.push(' ');
+                Some(Piece::Text(text))
+            }
+        };
+        said.iter().filter_map(piece).collect()
+    }
+
+    /// Adds `action` at the end of everywhere's entries or of `app`'s section (made if missing); a phrase
+    /// already there is refused.
+    pub fn add_action(&mut self, action: &Action, app: Option<&str>) -> Result<(), String> {
+        let phrase = actions::tokens(&action.phrase);
+        let known = self.entries.iter().any(|entry| match &entry.kind {
+            Kind::Action(known) => entry.is_in(app) && actions::tokens(&known.phrase) == phrase,
+            _ => false,
+        });
+        if known {
+            return Err("There is an action for those words already".into());
+        }
+        self.insert_entry(action.to_line(), Kind::Action(action.clone()), app).map_err(|()| "That action can't be written to the file".into())
+    }
 }
 
 /// What one line of the file says.
@@ -281,18 +384,34 @@ impl Words {
     /// What `text` becomes in captions and dictation, everywhere and then in each app with a section where
     /// that differs, labelled for the Words tab's Try box.
     pub fn preview(&self, text: &str, settings: &WordSettings) -> Vec<(String, String)> {
+        self.preview_with(text, settings, |app| self.dictation_preview(text, app, settings))
+    }
+
+    /// [`Words::preview`] with `dictation` giving what dictating the text in an app shows.
+    pub(crate) fn preview_with(&self, text: &str, settings: &WordSettings, dictation: impl Fn(&str) -> String) -> Vec<(String, String)> {
         let mut shown = Vec::new();
+        let result = |app: &str, output| match output {
+            Output::Captions => self.apply(text, app, output, settings),
+            Output::Dictation => dictation(app),
+        };
         for (name, output) in [("Captions", Output::Captions), ("Dictation", Output::Dictation)] {
-            let everywhere = self.apply(text, "", output, settings);
+            let everywhere = result("", output);
             shown.push((name.to_owned(), everywhere.clone()));
             for app in self.sections() {
-                let in_app = self.apply(text, app, output, settings);
+                let in_app = result(app, output);
                 if in_app != everywhere {
                     shown.push((format!("{name} in {app}"), in_app));
                 }
             }
         }
         shown
+    }
+
+    /// Dictating `text` in `app` as the Try box shows it: a snippet as `[phrase]`, a command as `[press keys]`.
+    fn dictation_preview(&self, text: &str, app: &str, settings: &WordSettings) -> String {
+        let pieces = self.pieces(&[text.to_owned()], app, settings, Action::shown);
+        let shown: String = pieces.into_iter().map(|piece| match piece { Piece::Text(text) | Piece::Snippet(text) => text, Piece::Press(keys) => actions::press_shown(&keys) }).collect();
+        shown.strip_suffix(' ').unwrap_or(&shown).to_owned()
     }
 
     /// The apps with a section, once each, in file order.
@@ -381,7 +500,7 @@ impl Words {
             return self.read_lines();
         };
         let (start, end) = (headers[index].0, headers.get(index + 1).map_or(self.lines.len(), |&(next, _)| next - 1));
-        let last_entry = self.entries.iter().map(|entry| entry.line).filter(|line| (start..end).contains(line)).last();
+        let last_entry = self.entries.iter().map(|entry| entry.line).rfind(|line| (start..end).contains(line));
         let last_text = (start..end).rev().find(|&at| !self.lines[at].trim().is_empty());
         let at = last_entry.or(last_text).map_or(start, |last| last + 1);
         if at < self.lines.len() && self.lines[at].trim_start().starts_with('[') {
@@ -393,15 +512,36 @@ impl Words {
 
     fn read_lines(&mut self) {
         (self.entries, self.skipped) = (Vec::new(), Vec::new());
-        let mut section = None;
+        let mut section: Option<String> = None;
+        let mut phrases: HashMap<(Option<String>, Vec<String>), usize> = HashMap::new();
         for (at, text) in self.lines.iter().enumerate() {
             match parse_line(text) {
                 Ok(Parsed::Nothing) => {}
                 Ok(Parsed::Section(name)) => section = Some(name),
-                Ok(Parsed::Entry(kind)) => self.entries.push(Entry { section: section.clone(), kind, line: at }),
+                Ok(Parsed::Entry(kind)) => {
+                    if let Kind::Action(action) = &kind {
+                        let phrase = (section.as_ref().map(|name| name.to_lowercase()), actions::tokens(&action.phrase));
+                        if let Some(first) = phrases.get(&phrase) {
+                            self.skipped.push((at + 1, format!("this phrase is already used on line {first}")));
+                            continue;
+                        }
+                        phrases.insert(phrase, at + 1);
+                    }
+                    self.entries.push(Entry { section: section.clone(), kind, line: at });
+                }
                 Err(why) => self.skipped.push((at + 1, why)),
             }
         }
+        let triggers = self.entries.iter().filter_map(|entry| match &entry.kind {
+            Kind::Action(action) => Some(Trigger {
+                section: entry.section.as_deref(),
+                phrase: actions::tokens(&action.phrase).into_iter().map(Part::Word).collect(),
+                anywhere: matches!(action.effect, Effect::Paste(_)),
+                value: action.clone(),
+            }),
+            _ => None,
+        });
+        self.index = Index::build(triggers);
     }
 
     /// Rules, everywhere and then in `app`'s section, then transforms in the same order.
@@ -440,6 +580,10 @@ fn same_section(a: Option<&str>, b: Option<&str>) -> bool {
 
 /// A line of the file, or why it can't be read.
 fn parse_line(line: &str) -> Result<Parsed, String> {
+    // Read before comments and rules: a snippet's text may hold ` # ` and `=>`.
+    if let Some(action) = line.trim().strip_prefix('>') {
+        return actions::parse(action).map(|action| Parsed::Entry(Kind::Action(action)));
+    }
     let line = without_comment(line).trim();
     if line.is_empty() {
         return Ok(Parsed::Nothing);
@@ -483,7 +627,7 @@ fn parse_word(text: &str) -> Result<Kind, String> {
 }
 
 /// The line up to a comment: a # at its start, or with spaces around it.
-fn without_comment(line: &str) -> &str {
+pub(crate) fn without_comment(line: &str) -> &str {
     if line.trim_start().starts_with('#') {
         return "";
     }
@@ -560,7 +704,7 @@ fn replace(text: &str, swaps: &[Swap]) -> String {
 }
 
 /// Whether the character at `at` is part of a word: a letter or digit, or an apostrophe inside a word ("don't").
-fn in_word(text: &[char], at: usize) -> bool {
+pub(crate) fn in_word(text: &[char], at: usize) -> bool {
     let Some(&c) = text.get(at) else { return false };
     let letter = |at: Option<usize>| at.and_then(|at| text.get(at)).is_some_and(|c| c.is_alphanumeric());
     c.is_alphanumeric() || (matches!(c, '\'' | '’') && letter(at.checked_sub(1)) && letter(Some(at + 1)))
@@ -580,10 +724,7 @@ pub struct WordBook {
 struct Loaded {
     words: Arc<Words>,
     settings: WordSettings,
-    /// The file's modified time when last read; `None` if it was missing.
-    modified: Option<SystemTime>,
-    /// When the file was last looked at; `None` before the first look.
-    checked: Option<Instant>,
+    watch: FileWatch,
 }
 
 impl Default for WordBook {
@@ -605,15 +746,9 @@ impl WordBook {
     /// Reads the file again if it changed, looking at most once a second; returns whether it was read.
     pub fn refresh(&self) -> bool {
         let mut state = self.state.lock().unwrap();
-        if state.checked.is_some_and(|checked| checked.elapsed() < CHECK_EVERY) {
+        if !state.watch.changed(&self.path) {
             return false;
         }
-        let first = state.checked.replace(Instant::now()).is_none();
-        let modified = fs::metadata(&self.path).and_then(|file| file.modified()).ok();
-        if !first && modified == state.modified {
-            return false;
-        }
-        state.modified = modified;
         state.words = Arc::new(self.read());
         true
     }
@@ -657,6 +792,17 @@ impl WordBook {
         self.edit(|words| words.add_rule(from, to, app))
     }
 
+    /// What dictating `said` does in `app`; see [`Words::plan`].
+    pub fn plan(&self, said: &[String], app: &str) -> Vec<Step> {
+        let state = self.state.lock().unwrap();
+        state.words.plan(said, app, &state.settings)
+    }
+
+    /// Adds a voice action; see [`Words::add_action`]. Saved at once.
+    pub fn add_action(&self, action: &Action, app: Option<&str>) -> io::Result<()> {
+        self.edit(|words| words.add_action(action, app))
+    }
+
     /// Adds a word to listen for; see [`Words::add_word`]. Saved at once.
     pub fn add_word(&self, word: &str) -> io::Result<()> {
         self.edit(|words| words.add_word(word))
@@ -693,7 +839,7 @@ impl WordBook {
             fs::create_dir_all(folder)?;
         }
         transcripts::replace(&self.path, &words.to_text())?;
-        state.modified = fs::metadata(&self.path).and_then(|file| file.modified()).ok();
+        state.watch.wrote(&self.path);
         state.words = Arc::new(words.clone());
         Ok(())
     }
@@ -708,7 +854,8 @@ impl WordBook {
     }
 }
 
-fn path() -> PathBuf {
+/// Where `words.txt` is.
+pub fn path() -> PathBuf {
     paths::data_dir().join("words.txt")
 }
 
@@ -720,6 +867,28 @@ mod tests {
 
     fn run(file: &str, text: &str, app: &str) -> String {
         Words::parse(file).apply(text, app, Output::Captions, &BOTH)
+    }
+
+    fn plan_text(file: &str, said: &[&str], app: &str) -> Vec<String> {
+        let said: Vec<String> = said.iter().map(|line| line.to_string()).collect();
+        let steps = Words::parse(file).plan(&said, app, &BOTH);
+        steps.into_iter().map(|step| match step { Step::Paste(text) => text.reveal().to_owned(), Step::Press(_) => "<press>".into() }).collect()
+    }
+
+    #[test]
+    fn a_snippet_line_is_spaced_from_text_after_it_only() {
+        let file = "> sig => paste Regards\n";
+        assert_eq!(plan_text(file, &["sig", "thanks"], ""), ["Regards thanks "]);
+        assert_eq!(plan_text(file, &["thanks", "sig"], ""), ["thanks Regards"]);
+        assert_eq!(plan_text(file, &["sig"], ""), ["Regards"]);
+    }
+
+    #[test]
+    fn an_apps_action_beats_everywheres_whole_line_action() {
+        let file = "> save => press ctrl+s\n> done => paste D\n[Discord]\n> save => paste X\n> done => press ctrl+d\n";
+        assert_eq!(plan_text(file, &["save"], "Discord"), ["X"]);
+        assert_eq!(plan_text(file, &["done"], "Discord"), ["<press>"]);
+        assert_eq!(plan_text(file, &["save"], "Notepad"), ["<press>"]);
     }
 
     #[test]

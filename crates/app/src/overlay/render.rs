@@ -42,6 +42,7 @@ use windows_numerics::Matrix3x2;
 mod design;
 mod history;
 mod icon;
+mod macros;
 mod remote;
 mod subtitles;
 mod words;
@@ -72,6 +73,7 @@ use kiku_core::{
     engine::Device,
     hardware::{gb, Gpu, Hardware},
     keybinds::{Command, Key, Keybinds},
+    macros::{Macros, Mode},
     settings::{BlockAnswer, EngineWhere, Opacity, YourLines},
     subtitles::SubtitleSettings,
     theme::{CustomTheme, Theme, Themes},
@@ -182,6 +184,8 @@ pub struct Panel<'a> {
     pub subtitles: &'a SubtitleSettings,
     /// The word rules file as last read, and where its rules and transforms apply.
     pub words: &'a Words,
+    /// The macros as last read, which the Try box shows by name.
+    pub macros: &'a Macros,
     pub word_settings: WordSettings,
     pub settings_open: bool,
     pub usage: Option<Usage>,
@@ -190,6 +194,10 @@ pub struct Panel<'a> {
     pub width: f32,
     pub height: f32,
     pub dpi: f32,
+    /// When the frame is drawn: Live badges and auto-folding are judged at this time, so a frame drawn twice is the same.
+    pub now: Instant,
+    /// What dictation does now, shown as a chip in the title bar unless it is normal.
+    pub mode: Mode,
 }
 
 /// One input's sensitivity: its threshold and the loudest level heard lately.
@@ -333,6 +341,12 @@ pub struct Surface {
 impl Surface {
     pub fn frame(&mut self) -> Option<&mut Frame> {
         self.frame.as_mut()
+    }
+
+    /// The texts the last frame laid out, for tests that check what a screen says.
+    #[cfg(test)]
+    pub fn texts(&self) -> Vec<String> {
+        self.layouts.current.keys().map(|key| key.text.clone()).collect()
     }
 }
 
@@ -578,6 +592,9 @@ impl Renderer {
             }
             self.draw_footer(panel, regions)?;
             self.draw_resize_grips(panel, regions)?;
+            if let (Screen::Live, Some(palette)) = (&panel.view.screen, &panel.view.palette) {
+                self.draw_macro_palette(palette, panel, regions)?;
+            }
             if let (Screen::Live, Some(prompt)) = (&panel.view.screen, panel.view.blocking) {
                 self.draw_block_prompt(prompt, panel, regions)?;
             }
@@ -649,6 +666,9 @@ impl Renderer {
             hidden if hidden > 0 && !panel.view.collapsed => status_right = self.draw_hidden_chip(hidden, status_right, middle, panel, regions)? - 8.0,
             _ => {}
         }
+        if panel.mode != Mode::Normal {
+            status_right = self.draw_mode_chip(&panel.mode, status_right, middle)? - 8.0;
+        }
         self.draw_status(panel, title_right + 14.0, status_right, middle, regions)?;
 
         let mut x = buttons_left;
@@ -707,6 +727,20 @@ impl Renderer {
         self.draw_layout(&text, x, middle - size.height / 2.0, status.color)
     }
 
+    /// The mode dictation is in, as a chip ending at `right`. Returns its left edge.
+    fn draw_mode_chip(&mut self, mode: &Mode, right: f32, middle: f32) -> Result<f32> {
+        let label = match mode {
+            Mode::Commands => "Commands".to_owned(),
+            Mode::Off => "Dictation off".to_owned(),
+            Mode::Normal | Mode::Own(_) => mode.name().to_owned(),
+        };
+        let label = self.layout(&self.fonts.strong, &label, f32::MAX)?;
+        let chip = rect(right - (metrics(&label)?.width + 20.0).ceil(), middle - 11.0, right, middle + 11.0);
+        self.glass(chip, 11.0, self.palette.card)?;
+        self.draw_layout(&label, chip.left + 10.0, middle - height_of(&label)? / 2.0, self.palette.accent)?;
+        Ok(chip.left)
+    }
+
     /// "N hidden  Show" ending at `right`, which brings the hidden apps back. Returns its left edge.
     fn draw_hidden_chip(&mut self, hidden: usize, right: f32, middle: f32, panel: &Panel, regions: &mut Regions) -> Result<f32> {
         const CHIP_ICON: f32 = 12.0;
@@ -730,7 +764,7 @@ impl Renderer {
     /// its header alone; the open ones share the rest fairly, each in its own scrollable area. An empty
     /// section says what the app is waiting for.
     fn draw_live(&mut self, panel: &Panel, content: D2D_RECT_F, regions: &mut Regions) -> Result<()> {
-        let (now, folds) = (Instant::now(), &panel.view.folds);
+        let (now, folds) = (panel.now, &panel.view.folds);
         let auto_fold = auto_fold_after(panel.auto_fold);
         let sections: Vec<(usize, &Section, bool)> = panel
             .captions
@@ -1042,7 +1076,7 @@ impl Renderer {
             right = self.draw_toolbar(&groups, header.right - TOOLBAR_INSET, middle, panel, regions)? - 6.0;
         }
 
-        let live = (!panel.stopped && section.speaking(Instant::now())).then(|| self.layout(&self.fonts.strong, "Live", f32::MAX)).transpose()?;
+        let live = (!panel.stopped && section.speaking(panel.now)).then(|| self.layout(&self.fonts.strong, "Live", f32::MAX)).transpose()?;
         let badge_width = live.as_ref().map_or(Ok(0.0), |live| metrics(live).map(|m| (m.width + 27.0).ceil()))?;
         let label_x = icon_x + ICON + 8.0;
         let label = self.single_line(&self.fonts.label, &section.label, right - label_x - badge_width - 8.0)?;
@@ -1388,6 +1422,7 @@ impl Renderer {
                 bottom
             }
             (None, Tab::Shortcuts) => self.draw_shortcuts(panel, content, y, regions)?,
+            (None, Tab::Macros) => self.draw_macro_settings(panel, content, y, regions)?,
         };
         if top > 0.0 {
             self.fade(rect(content.left, content.top, content.right, content.top + SETTINGS_FADE), Edge::Top, panel.height)?;
@@ -1861,7 +1896,7 @@ impl Renderer {
                     }
                     (true, _) => {
                         let prompt = match rebind {
-                            Rebind::Hold => "Hold the new keys, then let go (Esc cancels)".to_owned(),
+                            Rebind::Hold | Rebind::Macro => "Hold the new keys, then let go (Esc cancels)".to_owned(),
                             Rebind::Command(_) => format!("Press the key to use with {} (Esc cancels)", binds.hold_name()),
                         };
                         let prompt = renderer.layout(&renderer.fonts.small, &prompt, f32::MAX)?;
@@ -2007,11 +2042,20 @@ impl Renderer {
     /// A name over a detail on the left, and buttons on the right. Returns the y below.
     #[allow(clippy::too_many_arguments)]
     fn draw_two_line_row(&mut self, name: &str, detail: &str, buttons: &[RowButton], content: D2D_RECT_F, y: f32, panel: &Panel, regions: &mut Regions) -> Result<f32> {
+        self.draw_keyed_row(name, detail, &[], buttons, content, y, panel, regions)
+    }
+
+    /// A two-line row with the `keys` of a shortcut, as key caps, left of its buttons. Returns the y below.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_keyed_row(&mut self, name: &str, detail: &str, keys: &[String], buttons: &[RowButton], content: D2D_RECT_F, y: f32, panel: &Panel, regions: &mut Regions) -> Result<f32> {
         self.begin_row(content, y)?;
         let middle = y + MODEL_ROW / 2.0;
         let mut right = content.right;
         for &(label, icon, action, emphasis) in buttons.iter().rev() {
             right = self.draw_text_button(label, icon, action, emphasis, right, middle, panel, regions)? - 6.0;
+        }
+        if !keys.is_empty() {
+            right = self.draw_key_caps(keys, right - 6.0, middle)? - 6.0;
         }
         let name = self.single_line(&self.fonts.body, name, right - content.left - 8.0)?;
         let detail = self.single_line(&self.fonts.small, detail, right - content.left - 8.0)?;
@@ -2541,6 +2585,7 @@ fn tab_icon(tab: Tab) -> Icon {
         Tab::Words => Icon::SpellCheck,
         Tab::Appearance => Icon::Palette,
         Tab::Shortcuts => Icon::Keyboard,
+        Tab::Macros => Icon::Play,
     }
 }
 
@@ -2548,6 +2593,9 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
     let (view, binds) = (panel.view, panel.keybinds);
     let with_shortcut = |text: &str, command| format!("{text} ({})", binds.shortcut(command));
     Some(match action {
+        Action::Macro(action) => return macros::tooltip(action),
+        Action::RunFromPalette(_) => "Run this macro".into(),
+        Action::AskForMacro => "Open Claude with how macros are written, to help you make one".into(),
         Action::ShowSettings if panel.settings_open => "Close settings".into(),
         Action::ShowSettings => "Settings".into(),
         Action::ShowShortcuts => "Every shortcut".into(),
@@ -2560,7 +2608,7 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::CopySection(_) => "Copy this app's transcript (or drag over text to copy just that)".into(),
         Action::ToggleFold(index) => {
             let section = &panel.captions.sections[index];
-            match view.folds.folded(index, section, auto_fold_after(panel.auto_fold), Instant::now()) {
+            match view.folds.folded(index, section, auto_fold_after(panel.auto_fold), panel.now) {
                 true => "Open this app (double-click its name to show it alone)".into(),
                 false => "Fold this app to one row (double-click its name to show it alone)".into(),
             }

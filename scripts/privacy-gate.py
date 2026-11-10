@@ -18,6 +18,8 @@ PATTERNS = {
 }
 # Addresses third-party code ships with: a CA certificate's (webpki-roots) and OpenSSL's assembly credits (ring).
 ALLOWED = {'info@e-szigno.hu', 'appro@openssl.org'}
+# Domains reserved for examples (RFC 2606), which no one's address can be at; tests and docs use them.
+EXAMPLE_DOMAINS = ('@example.com', '@example.org', '@example.net')
 # Files quoting other people's licences, copyright lines and addresses included; private words still count.
 QUOTES = {'THIRD-PARTY-NOTICES.txt': {'an email address'}}
 # Upstream libraries shipped as built (builders' paths, random bytes that look like addresses); only the
@@ -57,7 +59,7 @@ def findings(path, words):
             if upstream or what in QUOTES.get(path.name, ()):
                 continue
             for match in re.finditer(pattern, text, re.ASCII):
-                if match.group() not in ALLOWED:
+                if match.group() not in ALLOWED and not match.group().lower().endswith(EXAMPLE_DOMAINS):
                     found.add(f'{what}: {redact(match.group(), words)}')
         lowered = text.lower()
         found.update('a private word' for word in words if word.lower() in lowered)

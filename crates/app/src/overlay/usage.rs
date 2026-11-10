@@ -52,6 +52,12 @@ struct GpuCounters {
     memory: PDH_HCOUNTER,
 }
 
+impl Default for UsageMeter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UsageMeter {
     pub fn new() -> Self {
         let own = ProcessMeter::new(unsafe { GetCurrentProcessId() }, unsafe { GetCurrentProcess() }, false);

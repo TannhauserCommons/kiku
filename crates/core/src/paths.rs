@@ -8,6 +8,11 @@ pub fn data_dir() -> PathBuf {
     dirs::data_dir().unwrap_or_default().join("kiku")
 }
 
+/// What people and agents write for Kiku, beside `words.txt`: `macros.toml`, `variables.toml` and `snippets`.
+pub fn custom_dir() -> PathBuf {
+    data_dir().join("custom")
+}
+
 /// Downloaded models, kept per user and out of roaming profiles: `%LOCALAPPDATA%\kiku\models` on
 /// Windows, `~/Library/Application Support/kiku/models` on macOS and `~/.local/share/kiku/models` on Linux.
 /// `KIKU_MODELS_DIR` names another, e.g. for trying downloads without touching the real one.

@@ -18,7 +18,9 @@ use std::{
 
 use kiku_core::{
     history::{self, History, Query, Table},
-    status, transcripts,
+    macros::Customization,
+    paths, status, transcripts,
+    words::{self, Words},
 };
 use serde_json::{json, Map, Value};
 
@@ -43,7 +45,7 @@ const STATUS_STALE: Duration = Duration::from_secs(2 * status::HEARTBEAT.as_secs
 
 fn main() -> io::Result<()> {
     let database = env::args_os().nth(1).map_or_else(history::path, PathBuf::from);
-    let mut server = Server::new(database, transcripts::shared_path(), status::path());
+    let mut server = Server::new(database, transcripts::shared_path(), status::path(), paths::custom_dir(), words::path());
     let mut stdout = io::stdout().lock();
     for line in io::stdin().lock().lines() {
         if let Some(reply) = server.handle(&line?) {
@@ -59,13 +61,17 @@ struct Server {
     database: PathBuf,
     shared: PathBuf,
     status: PathBuf,
+    /// `custom\`, with `macros.toml` and `variables.toml`.
+    custom: PathBuf,
+    /// The word rules file, whose `>` lines are macros too.
+    words: PathBuf,
     /// Opened by the first call that needs it, once Kiku has created the database.
     history: Option<History>,
 }
 
 impl Server {
-    fn new(database: PathBuf, shared: PathBuf, status: PathBuf) -> Self {
-        Self { database, shared, status, history: None }
+    fn new(database: PathBuf, shared: PathBuf, status: PathBuf, custom: PathBuf, words: PathBuf) -> Self {
+        Self { database, shared, status, custom, words, history: None }
     }
 
     /// The reply to one JSON-RPC message; none for notifications and blank lines.
@@ -120,6 +126,9 @@ impl Server {
         if tool == "get_status" {
             return Ok(status_text(&self.status));
         }
+        if let "list_macros" | "check_customization" | "try_phrase" = tool {
+            return Ok(self.customization_answer(tool, arguments));
+        }
         let Some(history) = self.history()? else { return Ok(NOTHING_SAVED.into()) };
         match tool {
             "get_live_captions" => match history.latest_session()? {
@@ -142,6 +151,20 @@ impl Server {
                 Ok(table_text(&history.read_sql(sql, arguments.limit)?, arguments.limit))
             }
             tool => Err(format!("{tool} isn't implemented").into()),
+        }
+    }
+
+    /// A macro tool's answer, from `custom\` as it is now.
+    fn customization_answer(&self, tool: &str, arguments: &Arguments) -> String {
+        let words = Words::parse(&fs::read_to_string(&self.words).unwrap_or_default());
+        let custom = Customization::read(&self.custom, &words);
+        match tool {
+            "list_macros" => custom.list_macros(),
+            "check_customization" => match custom.problems() {
+                [] => "No problems: every macro and variable loads.".into(),
+                problems => problems.iter().map(|(place, why)| format!("{place}: {why}")).collect::<Vec<_>>().join("\n"),
+            },
+            _ => custom.try_phrase(arguments.phrase.as_deref().unwrap_or_default(), arguments.app.as_deref().unwrap_or_default()),
         }
     }
 
@@ -213,6 +236,24 @@ fn tools() -> Value {
             &[],
         ),
         tool(
+            "list_macros",
+            "The user's voice macros from macros.toml (and words.txt's > lines): each one's name, phrases, apps, modes, step kinds, shortcut, whether it listens without the dictation key and whether it is on. Never what a step pastes or types, a variable's value, or a program's arguments.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "check_customization",
+            "Every problem in the user's custom folder (macros.toml, variables.toml), each with its file and line and why, never a value. Call it after editing those files to see whether every macro loads.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "try_phrase",
+            "What saying a phrase while dictating would do: the macro it runs and each of its steps by kind (text is shown as [private], keys by name), or that it would just be dictated, or nothing. Nothing is run.",
+            json!({ "phrase": { "type": "string", "description": "What is said, as a whole line" }, "app": { "type": "string", "description": "The app in front, as captions name it, e.g. Discord (default: none)" } }),
+            &["phrase"],
+        ),
+        tool(
             "describe_database",
             "The transcript database's tables and columns, how many lines, sessions and speakers it holds and the time it spans, with what query_database needs to know.",
             json!({}),
@@ -256,6 +297,9 @@ struct Arguments {
     from_line: usize,
     /// An agent's own read-only SQL.
     sql: Option<String>,
+    /// A phrase to try, and the app it is said in.
+    phrase: Option<String>,
+    app: Option<String>,
     limit: usize,
 }
 
@@ -278,7 +322,7 @@ impl Arguments {
             }
         }
         let mut parsed =
-            Self { speaker: None, conversation: None, since: None, text: None, session: None, before: None, from_line: 1, sql: None, limit: DEFAULT_LIMIT };
+            Self { speaker: None, conversation: None, since: None, text: None, session: None, before: None, from_line: 1, sql: None, phrase: None, app: None, limit: DEFAULT_LIMIT };
         // A share was sent on purpose, so it comes whole unless it's longer than a page.
         if tool == "get_shared" {
             parsed.limit = PAGE;
@@ -293,6 +337,8 @@ impl Arguments {
                 "minutes" => parsed.since = minutes_ago(positive(name, value)?),
                 "text" => parsed.text = Some(value.as_str().ok_or_else(|| format!("text must be a string, not {value}"))?.to_owned()),
                 "sql" => parsed.sql = Some(value.as_str().ok_or_else(|| format!("sql must be a string, not {value}"))?.to_owned()),
+                "phrase" => parsed.phrase = Some(value.as_str().ok_or_else(|| format!("phrase must be a string, not {value}"))?.to_owned()),
+                "app" => parsed.app = Some(value.as_str().ok_or_else(|| format!("app must be a string, not {value}"))?.to_owned()),
                 "id" => parsed.session = Some(whole(name, value)?),
                 "before" => parsed.before = Some(whole(name, value)?),
                 "from_line" => parsed.from_line = whole(name, value)? as usize,
@@ -519,7 +565,7 @@ mod tests {
 
     fn server(database: PathBuf) -> Server {
         let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
-        Server::new(database, target.join("test-mcp-shared.txt"), target.join("test-mcp-status.json"))
+        Server::new(database, target.join("test-mcp-shared.txt"), target.join("test-mcp-status.json"), target.join("test-mcp-custom"), target.join("test-mcp-words.txt"))
     }
 
     fn request(server: &mut Server, method: &str, params: Value) -> Value {
@@ -641,6 +687,23 @@ mod tests {
         assert!(call(&mut server, "get_status", json!({})).starts_with("Kiku isn't running; it was last seen"));
         fs::remove_file(&server.status).unwrap();
         assert_eq!(call(&mut server, "get_status", json!({})), "Kiku isn't running.");
+    }
+
+    #[test]
+    fn macro_tools_list_check_and_try_without_values() {
+        let mut server = server(scratch("macros"));
+        fs::create_dir_all(&server.custom).unwrap();
+        fs::write(server.custom.join("variables.toml"), "email = \"me@example.com\"\n").unwrap();
+        fs::write(server.custom.join("macros.toml"), "[[macro]]\nname = \"mail\"\nsay = \"my email\"\nsteps = [ { paste = \"{email}\" }, { press = \"enter\" } ]\n\n[[macro]]\nname = \"bad\"\nsay = \"bad\"\nsteps = [ { fly = \"away\" } ]\n").unwrap();
+        let listed = call(&mut server, "list_macros", json!({}));
+        assert!(listed.contains("mail") && listed.contains("my email") && listed.contains("paste, press"), "{listed}");
+        assert!(!listed.contains("me@example.com") && !listed.contains("{email}"), "{listed}");
+        assert!(call(&mut server, "check_customization", json!({})).starts_with("macros.toml:6: "));
+        let tried = call(&mut server, "try_phrase", json!({ "phrase": "my email", "app": "Notepad" }));
+        assert!(tried.contains("[mail]") && tried.contains("paste [private]") && tried.contains("press Enter"), "{tried}");
+        assert!(!tried.contains("me@example.com"), "{tried}");
+        assert_eq!(error_code(&mut server, "try_phrase", json!({})), INVALID_PARAMS);
+        fs::remove_dir_all(&server.custom).unwrap();
     }
 
     #[test]
