@@ -1,6 +1,7 @@
 //! What the voice macros tests share (`.loop/voice-macros/SPINE.md`): a fake [`Context`] with a fixed clock,
 //! set clipboard, selection, files and transcript, and an [`Executor`] that records what it was asked to do
-//! (phase 2's steps too: `.loop/voice-macros-2/SPINE.md`).
+//! (phase 2's steps too: `.loop/voice-macros-2/SPINE.md`; phase 3's `kiku` steps and Kiku's state:
+//! `.loop/voice-macros-3/SPINE.md`).
 #![allow(dead_code)]
 
 use std::{
@@ -13,7 +14,10 @@ use chrono::{NaiveDate, NaiveDateTime};
 use kiku_core::{
     actions::Private,
     keybinds::Key,
-    macros::{read_text_file, run, Context, Executor, HowMuch, Macros, Mode, OpenTarget, Transcript, TranscriptLine, Variables, Who},
+    macros::{
+        read_text_file, run, Context, Executor, HowMuch, KikuAction, KikuRequest, KikuState, Macros, Mode, OpenTarget, SettingsTab, Transcript, TranscriptLine,
+        Variables, Who,
+    },
     words::{Output, WordSettings, Words},
 };
 
@@ -38,6 +42,8 @@ pub struct Fake {
     pub transcript: Transcript,
     pub words: Words,
     pub picked: usize,
+    /// What `{dictating}`, `{captions}` and `{mode}` give.
+    pub state: KikuState,
 }
 
 impl Fake {
@@ -53,6 +59,7 @@ impl Fake {
             transcript: Transcript::default(),
             words: Words::default(),
             picked: 0,
+            state: KikuState { dictating: true, captions: true, mode: "normal".into() },
         }
     }
 }
@@ -91,6 +98,9 @@ impl Context for Fake {
     fn pick(&self, _choices: &[&str]) -> usize {
         self.picked
     }
+    fn state(&self) -> KikuState {
+        self.state.clone()
+    }
 }
 
 /// What a run asked the executor to do.
@@ -110,7 +120,8 @@ pub enum Event {
     Run(PathBuf, Vec<String>),
     AskClaude(String),
     SetMode(Mode),
-    ShowPalette,
+    /// A Kiku action, its tab, its search revealed, and whether it was at once.
+    Kiku(KikuAction, Option<SettingsTab>, Option<String>, bool),
 }
 
 pub struct Recorder {
@@ -176,8 +187,9 @@ impl Executor for Recorder {
     fn set_mode(&self, mode: &Mode) {
         self.events.borrow_mut().push(Event::SetMode(mode.clone()));
     }
-    fn show_palette(&self) {
-        self.events.borrow_mut().push(Event::ShowPalette);
+    fn kiku(&self, request: &KikuRequest) {
+        let search = request.search.as_ref().map(|search| search.reveal().to_owned());
+        self.events.borrow_mut().push(Event::Kiku(request.action, request.tab, search, request.at_once));
     }
 }
 

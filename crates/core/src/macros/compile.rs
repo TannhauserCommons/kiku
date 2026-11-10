@@ -5,6 +5,7 @@ use std::{path::PathBuf, time::Duration};
 use super::{
     commands::Command,
     file::{Macro, StepSpec, Variables, MAX_ATTACHED},
+    kiku::{check_options, KikuAction, KikuStep, Named, SettingsTab},
     modes::{Mode, Modes},
     open::check_open,
     plan::{Beat, Prepared, Step, Times, MAX_REPEAT},
@@ -143,7 +144,24 @@ fn step_of(spec: &StepSpec, name: &str, known: &impl Fn(&str) -> bool, slot: &im
             Step::Run { command, from, contents: None }
         }
         StepSpec::AskClaude(text) => Step::AskClaude { text: template(text, known)?, from },
+        StepSpec::Kiku { action, tab, search } => Step::Kiku(kiku_step(action, tab.as_deref(), search.as_deref(), from, known)?),
     }))
+}
+
+/// A `kiku` step: a plain action or tab name is checked now, one with braces when it runs.
+fn kiku_step(action: &str, tab: Option<&str>, search: Option<&str>, from: String, known: &impl Fn(&str) -> bool) -> Result<KikuStep, String> {
+    let action = named(action, KikuAction::parse, known)?;
+    let tab = tab.map(|tab| named(tab, SettingsTab::parse, known)).transpose()?;
+    let search = search.map(|search| template(search, known)).transpose()?;
+    if let Named::Known(action) = action {
+        check_options(action, tab.is_some(), search.is_some())?;
+    }
+    let later = matches!(action, Named::Later(_)) || matches!(tab, Some(Named::Later(_))) || search.is_some();
+    Ok(KikuStep { action, tab, search, at_once: false, from: later.then_some(from) })
+}
+
+fn named<T>(text: &str, parse: fn(&str) -> Result<T, String>, known: &impl Fn(&str) -> bool) -> Result<Named<T>, String> {
+    if text.contains('{') { Ok(Named::Later(template(text, known)?)) } else { parse(text).map(Named::Known) }
 }
 
 /// Whether `name` can hold a program's output: a plain name nothing else uses.

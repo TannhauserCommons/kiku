@@ -16,6 +16,7 @@ mod book;
 mod commands;
 mod compile;
 mod file;
+mod kiku;
 mod modes;
 mod open;
 mod palette;
@@ -29,6 +30,7 @@ mod triggers;
 pub use chrono::NaiveDateTime;
 pub use book::MacroBook;
 pub use commands::{approvals_path, contents_hash, Approvals, Command, CommandPolicy, RunOutput};
+pub use kiku::{KikuAction, KikuRequest, KikuState, KikuStep, Named, SettingsTab};
 pub use file::{read_text_file, Macro, StepSpec, Variables, MAX_ATTACHED, MAX_FILE_BYTES};
 pub use modes::{BuiltinPhrases, Mode, Modes};
 pub use open::{open_target, OpenTarget};
@@ -92,6 +94,8 @@ pub struct Macros {
     approvals: Approvals,
     /// Every `run` step's command with its macro's name, in file order.
     commands: Vec<(String, Command)>,
+    /// Phrases that end dictation at the end of a dictated line (Settings).
+    stop: Vec<String>,
 }
 
 impl Default for Macros {
@@ -171,6 +175,11 @@ impl Macros {
         (self.policy, self.approvals) = (policy, approvals);
     }
 
+    /// The phrases that end dictation when a dictated line ends with one (Settings' `dictation.stop`).
+    pub fn set_stop_phrases(&mut self, phrases: Vec<String>) {
+        self.stop = phrases;
+    }
+
     /// Every `run` step's command, in file order, with its macro's name: what the Macros tab asks to approve.
     pub fn commands(&self) -> Vec<(String, Command)> {
         self.commands.clone()
@@ -182,9 +191,9 @@ impl Macros {
     }
 
     fn reload(&mut self, text: String) {
-        let (phrases, policy, approvals) = (self.phrases, self.policy, std::mem::take(&mut self.approvals));
+        let (phrases, policy, approvals, stop) = (self.phrases, self.policy, std::mem::take(&mut self.approvals), std::mem::take(&mut self.stop));
         *self = Macros::build(text, std::mem::take(&mut self.words), std::mem::take(&mut self.variables));
-        (self.phrases, self.policy, self.approvals) = (phrases, policy, approvals);
+        (self.phrases, self.policy, self.approvals, self.stop) = (phrases, policy, approvals, stop);
     }
 
     fn build(text: String, words: Words, variables: Variables) -> Macros {
@@ -250,7 +259,7 @@ impl Macros {
         }
         let scoped = triggers.into_iter().map(|(mode, (said, listened))| (mode, Scoped { index: Index::build(said.into_iter()), listening: Index::build(listened.into_iter()) })).collect();
         let (phrases, policy, approvals) = Default::default();
-        Macros { skipped, text, words, variables, entries, tables, runs, labels, run_of, scoped, modes, phrases, policy, approvals, commands }
+        Macros { skipped, text, words, variables, entries, tables, runs, labels, run_of, scoped, modes, phrases, policy, approvals, commands, stop: Vec::new() }
     }
 }
 

@@ -7,7 +7,9 @@ use std::{fs, path::{Path, PathBuf}};
 
 use common::{events, events_in, macros, Event, Fake, Recorder};
 use kiku_core::{
-    macros::{open_target, run, run_step, Approvals, BuiltinPhrases, CommandPolicy, Customization, Macros, Mode, OpenTarget, Step, Variables},
+    macros::{
+        open_target, run, run_step, Approvals, BuiltinPhrases, CommandPolicy, Customization, KikuAction, KikuStep, Macros, Mode, OpenTarget, Step, Variables,
+    },
     settings::Settings,
     words::{WordSettings, Words},
 };
@@ -491,10 +493,10 @@ fn n7_palette_lists_what_can_be_said_here() {
     assert_eq!(listed[1].phrase, None);
     assert_eq!(listed[1].hotkey.as_ref().map(|hotkey| hotkey.name()), Some("Ctrl+Alt+B".to_owned()));
 
-    assert_eq!(plan(&macros, &["What can I say?"], "Notepad", &Mode::Normal), [Step::ShowPalette]);
-    assert_eq!(plan(&macros, &["what can I say"], "Notepad", &Mode::Off), [Step::ShowPalette], "heard while off too");
+    assert_eq!(plan(&macros, &["What can I say?"], "Notepad", &Mode::Normal), [Step::Kiku(KikuStep::new(KikuAction::ShowPalette))]);
+    assert_eq!(plan(&macros, &["what can I say"], "Notepad", &Mode::Off), [Step::Kiku(KikuStep::new(KikuAction::ShowPalette))], "heard while off too");
     macros.set_phrases(BuiltinPhrases { what_can_i_say: false, ..BuiltinPhrases::default() });
-    assert!(!plan(&macros, &["what can I say"], "Notepad", &Mode::Normal).contains(&Step::ShowPalette));
+    assert!(!plan(&macros, &["what can I say"], "Notepad", &Mode::Normal).contains(&Step::Kiku(KikuStep::new(KikuAction::ShowPalette))));
 }
 
 fn macros_names(macros: &Macros, app: &str, mode: &Mode) -> Vec<String> {

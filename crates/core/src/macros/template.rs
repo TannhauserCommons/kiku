@@ -12,7 +12,10 @@ use chrono::{
     NaiveDateTime,
 };
 
-use super::transcript::{HowMuch, TranscriptLine, Who};
+use super::{
+    kiku::KikuState,
+    transcript::{HowMuch, TranscriptLine, Who},
+};
 use crate::{actions::Private, words::Transform};
 
 /// What filling a template needs from the world; the app's reads the clipboard, captions and files.
@@ -37,6 +40,8 @@ pub trait Context {
     fn apply_rules(&self, text: &str) -> String;
     /// Which of `choices` `{random:...}` gives.
     fn pick(&self, choices: &[&str]) -> usize;
+    /// Kiku's state, for `{dictating}`, `{captions}` and `{mode}`.
+    fn state(&self) -> KikuState;
 }
 
 /// A parsed template. Its `Debug` shows no text, as it can hold private text.
@@ -70,6 +75,9 @@ enum Source {
     Selection,
     App,
     Window,
+    Dictating,
+    Captions,
+    Mode,
     File(String),
     Random(Vec<String>),
     Transcript(Who, HowMuch),
@@ -251,6 +259,9 @@ impl Source {
             "selection" => none(Source::Selection),
             "app" => none(Source::App),
             "window" => none(Source::Window),
+            "dictating" => none(Source::Dictating),
+            "captions" => none(Source::Captions),
+            "mode" => none(Source::Mode),
             "file" => Ok(Source::File(needed()?.to_owned())),
             "random" => Ok(Source::Random(needed()?.split('|').map(str::to_owned).collect())),
             "transcript" => {
@@ -277,6 +288,9 @@ impl Source {
             Source::Selection => context.selection().reveal().to_owned(),
             Source::App => context.app(),
             Source::Window => context.window(),
+            Source::Dictating => on_off(context.state().dictating),
+            Source::Captions => on_off(context.state().captions),
+            Source::Mode => context.state().mode,
             Source::File(path) => context.read_file(&context.resolve(Path::new(path)))?.reveal().to_owned(),
             Source::Random(choices) => {
                 let choices: Vec<&str> = choices.iter().map(String::as_str).collect();
@@ -414,6 +428,10 @@ fn parse_how_much(text: &str) -> Result<HowMuch, String> {
             .or_else(|| lower.strip_suffix('s').and_then(|digits| seconds(number(digits), 1)).map(|s| HowMuch::Last(Duration::from_secs(s)))),
     };
     parsed.ok_or(format!("{} isn't an amount of transcript (line, N lines, Nm, Ns, paragraph, since me or session)", shown(text, "that")))
+}
+
+fn on_off(on: bool) -> String {
+    (if on { "on" } else { "off" }).to_owned()
 }
 
 /// Upper-cases the first letter of each word.

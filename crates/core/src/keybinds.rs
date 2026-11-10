@@ -1,6 +1,8 @@
 //! Keyboard shortcuts: the captions key that is held (Ctrl+Win by default), and the key that runs
 //! each command while it is held. Saved in settings as e.g. `hold = ctrl+win` and `key.paste = V`.
 
+use crate::{dictation::DictationKey, macros::KikuAction};
+
 /// A key as people name it. Modifiers match either the left or the right one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -130,6 +132,21 @@ impl Command {
         Command::Palette,
     ];
 
+    /// The Kiku action this key does; none for Quit, which only a key does.
+    pub fn action(self) -> Option<KikuAction> {
+        Some(match self {
+            Command::Paste => KikuAction::PasteWhatISaid,
+            Command::Undo => KikuAction::Undo,
+            Command::Stop => KikuAction::ToggleCaptions,
+            Command::Lock => KikuAction::ToggleLock,
+            Command::Hide => KikuAction::TogglePanel,
+            Command::Quit => return None,
+            Command::SaveMiss => KikuAction::SaveMiss,
+            Command::Subtitles => KikuAction::ToggleCaptionsMode,
+            Command::Palette => KikuAction::ShowPalette,
+        })
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Command::Paste => "Paste what I said (again: reach further back)",
@@ -250,6 +267,15 @@ impl Keybinds {
     /// E.g. "Ctrl+Win".
     pub fn hold_name(&self) -> String {
         self.hold.iter().map(|k| k.name()).collect::<Vec<_>>().join("+")
+    }
+
+    /// How `key` dictates, e.g. "Hold Ctrl+Win to dictate".
+    pub fn dictate_words(&self, key: DictationKey) -> String {
+        let verb = match key {
+            DictationKey::Hold => "Hold",
+            DictationKey::Toggle => "Press",
+        };
+        format!("{verb} {} to dictate", self.hold_name())
     }
 
     /// E.g. "Ctrl+Win+S".

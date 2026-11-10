@@ -1,7 +1,11 @@
 //! Modes change what dictation does: `normal` (dictation and macros), `commands` (only macros), `off` (only
 //! the phrases that change modes), and the user's own from `macros.toml`'s `[[mode]]` tables.
 
-use super::{file::Macro, plan::Step};
+use super::{
+    file::Macro,
+    kiku::{KikuAction, KikuStep},
+    plan::Step,
+};
 use crate::actions;
 
 /// What dictation does now.
@@ -150,7 +154,7 @@ impl BuiltinPhrases {
             "normal mode" => (self.normal_mode, Step::SetMode(Mode::Normal)),
             "dictation off" => (self.dictation_off, Step::SetMode(Mode::Off)),
             "dictation on" => (self.dictation_on, Step::SetMode(Mode::Normal)),
-            "what can i say" => (self.what_can_i_say, Step::ShowPalette),
+            "what can i say" => (self.what_can_i_say, Step::Kiku(KikuStep::new(KikuAction::ShowPalette))),
             _ => return None,
         };
         on.then_some(step)
@@ -202,8 +206,8 @@ mod tests {
     #[test]
     fn a_phrase_with_detached_punctuation_is_heard() {
         let phrases = BuiltinPhrases::default();
-        assert_eq!(phrases.heard("What can I say ?"), Some(Step::ShowPalette));
-        assert_eq!(phrases.heard("What can I say?"), Some(Step::ShowPalette));
+        assert_eq!(phrases.heard("What can I say ?"), Some(Step::Kiku(KikuStep::new(KikuAction::ShowPalette))));
+        assert_eq!(phrases.heard("What can I say?"), Some(Step::Kiku(KikuStep::new(KikuAction::ShowPalette))));
         assert_eq!(phrases.heard("what can I say about the weather today in this very long line"), None);
     }
 }

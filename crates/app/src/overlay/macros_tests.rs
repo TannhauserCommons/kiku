@@ -12,7 +12,7 @@ use std::{
 use kiku_core::{
     actions::{sequence_strokes, Private},
     keybinds::Key,
-    macros::{run, Context, Executor, HowMuch, Macros, Mode, NaiveDateTime, OpenTarget, TranscriptLine, Variables, Who},
+    macros::{run, Context, Executor, HowMuch, KikuRequest, KikuState, Macros, Mode, NaiveDateTime, OpenTarget, TranscriptLine, Variables, Who},
     words::{WordSettings, Words},
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_KEYBOARD, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP};
@@ -67,6 +67,9 @@ impl Context for Fake {
     fn pick(&self, _choices: &[&str]) -> usize {
         0
     }
+    fn state(&self) -> KikuState {
+        KikuState { dictating: true, captions: true, mode: "normal".into() }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -83,7 +86,7 @@ pub(super) enum Done {
     Run(PathBuf, Vec<String>),
     AskClaude(String),
     SetMode(Mode),
-    ShowPalette,
+    Kiku(KikuRequest),
 }
 
 #[derive(Default)]
@@ -141,8 +144,8 @@ impl Executor for Recorder {
     fn set_mode(&self, mode: &Mode) {
         self.done.borrow_mut().push(Done::SetMode(mode.clone()));
     }
-    fn show_palette(&self) {
-        self.done.borrow_mut().push(Done::ShowPalette);
+    fn kiku(&self, request: &KikuRequest) {
+        self.done.borrow_mut().push(Done::Kiku(request.clone()));
     }
 }
 

@@ -9,6 +9,7 @@ use std::{
 
 use super::{
     commands::{contents_hash, Command, RunOutput},
+    kiku::{check_options, KikuAction, KikuRequest, KikuStep, Listed, Named},
     modes::Mode,
     open::{open_target, OpenTarget},
     template::{Context, Template},
@@ -16,6 +17,7 @@ use super::{
 };
 use crate::{
     actions::{matching::{Chunk, Said}, Private},
+    dictation,
     keybinds::Key,
     words::{Output, WordSettings},
 };
@@ -50,8 +52,8 @@ pub enum Step {
     /// Its filled text, handed to Claude.
     AskClaude { text: Template, from: String },
     SetMode(Mode),
-    /// Opens the palette of what can be said here.
-    ShowPalette,
+    /// One of Kiku's own actions.
+    Kiku(KikuStep),
 }
 
 /// What runs steps in the app in front: the app's goes through the lent clipboard and the keyboard.
@@ -78,7 +80,8 @@ pub trait Executor {
     /// Hands `text` to Claude as the ✨ buttons do.
     fn ask_claude(&self, text: &Private) -> Result<(), String>;
     fn set_mode(&self, mode: &Mode);
-    fn show_palette(&self);
+    /// One of Kiku's own actions, filled and checked.
+    fn kiku(&self, request: &KikuRequest);
 }
 
 impl Macros {
@@ -86,53 +89,66 @@ impl Macros {
     /// chosen; an app's own mode applies by [`super::Modes::effective`]): text not taken by a macro goes through
     /// the word rules as dictation does, and adjacent text is one paste.
     pub fn plan(&self, lines: &[&str], app: &str, settings: &WordSettings, mode: &Mode) -> Vec<Step> {
-        let apply = |line: &str| self.words.apply(line, app, Output::Dictation, settings);
         let mut chosen = mode.clone();
         let mut batch = Batch::default();
         for line in lines {
-            if let Some(step) = self.phrases.heard(line) {
-                chosen = step.mode_set().unwrap_or(chosen);
-                batch.steps(vec![step]);
+            let before = dictation::stop_phrase(line, &self.stop);
+            let line = before.unwrap_or(line);
+            if !line.is_empty() {
+                self.plan_line(line, app, settings, &mut chosen, &mut batch);
+            }
+            if before.is_some() {
+                batch.steps(vec![Step::Kiku(KikuStep { at_once: true, ..KikuStep::new(KikuAction::StopDictation) })]);
                 batch.after_paste = false;
-                continue;
-            }
-            let mode = self.modes.effective(app, &chosen);
-            let index = &self.scoped(&mode).index;
-            let pastes = !matches!(mode, Mode::Commands | Mode::Off);
-            if index.is_empty() {
-                let text = apply(line);
-                if pastes && !text.trim().is_empty() {
-                    batch.text(&text);
-                    batch.text(" ");
-                }
-                continue;
-            }
-            match index.sections(app).said(line, apply) {
-                Some(Said::Line(target, taken)) => {
-                    let steps = self.steps(target, taken, line);
-                    let after_paste = matches!(steps.last(), Some(Step::Paste { .. }));
-                    if matches!(steps.first(), Some(Step::Paste { .. })) {
-                        batch.space_after_paste();
-                    }
-                    chosen = steps.iter().rev().find_map(Step::mode_set).unwrap_or(chosen);
-                    batch.steps(steps);
-                    batch.after_paste = after_paste;
-                }
-                Some(Said::Text(chunks)) if pastes => {
-                    batch.space_after_paste();
-                    for chunk in chunks {
-                        match chunk {
-                            Chunk::Text(text) => batch.text(&text),
-                            Chunk::Trigger(target) => batch.steps(self.steps(target, Vec::new(), line)),
-                        }
-                    }
-                    batch.text(" ");
-                    batch.after_paste = false;
-                }
-                _ => {}
             }
         }
         batch.finish()
+    }
+
+    /// Adds what dictating one `line` does to `batch`; `chosen` is the mode as chosen so far.
+    fn plan_line(&self, line: &str, app: &str, settings: &WordSettings, chosen: &mut Mode, batch: &mut Batch) {
+        let apply = |line: &str| self.words.apply(line, app, Output::Dictation, settings);
+        if let Some(step) = self.phrases.heard(line) {
+            *chosen = step.mode_set().unwrap_or_else(|| chosen.clone());
+            batch.steps(vec![step]);
+            batch.after_paste = false;
+            return;
+        }
+        let mode = self.modes.effective(app, chosen);
+        let index = &self.scoped(&mode).index;
+        let pastes = !matches!(mode, Mode::Commands | Mode::Off);
+        if index.is_empty() {
+            let text = apply(line);
+            if pastes && !text.trim().is_empty() {
+                batch.text(&text);
+                batch.text(" ");
+            }
+            return;
+        }
+        match index.sections(app).said(line, apply) {
+            Some(Said::Line(target, taken)) => {
+                let steps = self.steps(target, taken, line);
+                let after_paste = matches!(steps.last(), Some(Step::Paste { .. }));
+                if matches!(steps.first(), Some(Step::Paste { .. })) {
+                    batch.space_after_paste();
+                }
+                *chosen = steps.iter().rev().find_map(Step::mode_set).unwrap_or_else(|| chosen.clone());
+                batch.steps(steps);
+                batch.after_paste = after_paste;
+            }
+            Some(Said::Text(chunks)) if pastes => {
+                batch.space_after_paste();
+                for chunk in chunks {
+                    match chunk {
+                        Chunk::Text(text) => batch.text(&text),
+                        Chunk::Trigger(target) => batch.steps(self.steps(target, Vec::new(), line)),
+                    }
+                }
+                batch.text(" ");
+                batch.after_paste = false;
+            }
+            _ => {}
+        }
     }
 
     /// The steps of the macro `target` finds, with its slots taking `taken` and `{heard}` the line.
@@ -250,6 +266,12 @@ impl Step {
             Step::Switch { app, from } => Step::Switch { app: bind(app), from: from.clone() },
             Step::AskClaude { text, from } => Step::AskClaude { text: bind(text), from: from.clone() },
             Step::Run { command, from, contents } => Step::Run { command: command.with_args(command.args.iter().map(bind).collect()), from: from.clone(), contents: contents.clone() },
+            Step::Kiku(step) => Step::Kiku(KikuStep {
+                action: step.action.bound(bind),
+                tab: step.tab.as_ref().map(|tab| tab.bound(bind)),
+                search: step.search.as_ref().map(bind),
+                ..step.clone()
+            }),
             other => other.clone(),
         }
     }
@@ -364,7 +386,7 @@ pub fn run_step(step: &Step, context: &dyn Context, executor: &dyn Executor) -> 
         Step::Wait(how_long) => executor.wait(*how_long),
         Step::Notify(message) => executor.notify(message),
         Step::SetMode(mode) => executor.set_mode(mode),
-        Step::ShowPalette => executor.show_palette(),
+        Step::Kiku(step) => kiku_step(step, context, executor),
         Step::Open { target, from } => {
             let from = Some(from.as_str());
             let text = fill(target, from)?;
@@ -405,6 +427,34 @@ pub fn run_step(step: &Step, context: &dyn Context, executor: &dyn Executor) -> 
         }
     }
     None
+}
+
+/// Fills and checks a `kiku` step and hands it to the executor; an action or tab that a template made unknown
+/// is a notice listing the valid ones.
+fn kiku_step(step: &KikuStep, context: &dyn Context, executor: &dyn Executor) {
+    match kiku_request(step, context) {
+        Ok(request) => executor.kiku(&request),
+        Err(why) => notice(executor, step.from.as_deref(), &why),
+    }
+}
+
+fn kiku_request(step: &KikuStep, context: &dyn Context) -> Result<KikuRequest, String> {
+    let action = resolved(&step.action, context)?;
+    check_options(action, step.tab.is_some(), step.search.is_some())?;
+    Ok(KikuRequest {
+        action,
+        tab: step.tab.as_ref().map(|tab| resolved(tab, context)).transpose()?,
+        search: step.search.as_ref().map(|search| search.fill(context)).transpose()?,
+        at_once: step.at_once,
+    })
+}
+
+/// A name as it is, or a template filled and looked up; a filled value is never quoted, as it may be private.
+fn resolved<T: Listed>(name: &Named<T>, context: &dyn Context) -> Result<T, String> {
+    match name {
+        Named::Known(known) => Ok(*known),
+        Named::Later(template) => T::find(template.fill(context)?.reveal()).ok_or_else(|| T::unknown("what it filled in")),
+    }
 }
 
 /// Whether the program file still holds what was approved; one that can't be read (or is huge) doesn't.
@@ -463,7 +513,10 @@ mod tests {
     use chrono::NaiveDateTime;
 
     use super::*;
-    use crate::macros::transcript::{HowMuch, TranscriptLine, Who};
+    use crate::macros::{
+        kiku::KikuState,
+        transcript::{HowMuch, TranscriptLine, Who},
+    };
 
     struct FileContext(&'static str);
 
@@ -501,6 +554,9 @@ mod tests {
         fn pick(&self, _: &[&str]) -> usize {
             0
         }
+        fn state(&self) -> KikuState {
+            KikuState::default()
+        }
     }
 
     #[derive(Default)]
@@ -532,7 +588,7 @@ mod tests {
             Ok(())
         }
         fn set_mode(&self, _: &Mode) {}
-        fn show_palette(&self) {}
+        fn kiku(&self, _: &KikuRequest) {}
     }
 
     #[test]
@@ -544,6 +600,24 @@ mod tests {
         assert_eq!(notices.len(), 1);
         assert!(notices[0].contains("sign off") && notices[0].contains("notes.txt"), "{notices:?}");
         assert!(!notices[0].contains("sk_live_abc"), "{notices:?}");
+    }
+
+    #[test]
+    fn a_templated_kiku_name_that_is_unknown_is_never_quoted() {
+        let step = KikuStep { action: Named::Later(Template::literal("hunter2")), from: Some("go".into()), ..KikuStep::new(KikuAction::Undo) };
+        let executor = Notices::default();
+        run(&[Step::Kiku(step)], &FileContext(""), &executor);
+        let notices = executor.0.take();
+        assert!(notices.len() == 1 && notices[0].starts_with("go: ") && notices[0].contains("start dictation"), "{notices:?}");
+        assert!(!notices[0].contains("hunter2"), "{notices:?}");
+    }
+
+    #[test]
+    fn a_templated_action_takes_only_its_own_options() {
+        let step = KikuStep { action: Named::Later(Template::literal("undo")), search: Some(Template::literal("x")), from: Some("go".into()), ..KikuStep::new(KikuAction::Undo) };
+        let executor = Notices::default();
+        run(&[Step::Kiku(step)], &FileContext(""), &executor);
+        assert_eq!(executor.0.take(), ["go: search is only for open history"]);
     }
 
     fn run_step_of(program: &Path, contents: &[u8]) -> Step {

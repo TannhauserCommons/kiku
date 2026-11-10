@@ -40,6 +40,7 @@ use windows::{
 use windows_numerics::Matrix3x2;
 
 mod design;
+mod dictation;
 mod history;
 mod icon;
 mod macros;
@@ -66,6 +67,7 @@ use super::{
     },
 };
 use kiku_core::{
+    dictation::DictationKey,
     captions::{Caption, Captions, Section, YOU, YOU_SECTION},
     catalog::{self, Choice, Model, GPU_PACK},
     controls::{Blocked, Input, ModelState, THRESHOLD_MAX_DB, THRESHOLD_MIN_DB},
@@ -149,6 +151,12 @@ pub struct Panel<'a> {
     pub view: &'a View,
     pub stopped: bool,
     pub dictating: bool,
+    /// Dictating until told (a toggle press or a start step): the title bar shows the Dictating badge.
+    pub latched: bool,
+    /// How to end dictation that goes on until told.
+    pub stop_hint: &'a str,
+    /// How the dictation key dictates, for the footer's hint.
+    pub dictation_key: DictationKey,
     pub keybinds: &'a Keybinds,
     /// Keys pressed so far while setting the captions key.
     pub captured: &'a [Key],
@@ -669,6 +677,9 @@ impl Renderer {
         if panel.mode != Mode::Normal {
             status_right = self.draw_mode_chip(&panel.mode, status_right, middle)? - 8.0;
         }
+        if panel.latched {
+            status_right = self.draw_chip("Dictating", status_right, middle)? - 8.0;
+        }
         self.draw_status(panel, title_right + 14.0, status_right, middle, regions)?;
 
         let mut x = buttons_left;
@@ -730,11 +741,16 @@ impl Renderer {
     /// The mode dictation is in, as a chip ending at `right`. Returns its left edge.
     fn draw_mode_chip(&mut self, mode: &Mode, right: f32, middle: f32) -> Result<f32> {
         let label = match mode {
-            Mode::Commands => "Commands".to_owned(),
-            Mode::Off => "Dictation off".to_owned(),
-            Mode::Normal | Mode::Own(_) => mode.name().to_owned(),
+            Mode::Commands => "Commands",
+            Mode::Off => "Dictation off",
+            Mode::Normal | Mode::Own(_) => mode.name(),
         };
-        let label = self.layout(&self.fonts.strong, &label, f32::MAX)?;
+        self.draw_chip(label, right, middle)
+    }
+
+    /// A chip of accent text ending at `right`. Returns its left edge.
+    fn draw_chip(&mut self, label: &str, right: f32, middle: f32) -> Result<f32> {
+        let label = self.layout(&self.fonts.strong, label, f32::MAX)?;
         let chip = rect(right - (metrics(&label)?.width + 20.0).ceil(), middle - 11.0, right, middle + 11.0);
         self.glass(chip, 11.0, self.palette.card)?;
         self.draw_layout(&label, chip.left + 10.0, middle - height_of(&label)? / 2.0, self.palette.accent)?;
@@ -1309,9 +1325,10 @@ impl Renderer {
     fn draw_setup_step(&mut self, step: SetupStep, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
         match step {
             SetupStep::Keys => {
-                let intro = format!("Hold {} to dictate into any app; with a letter it runs a command. Click a row to change it, or keep these.", panel.keybinds.hold_name());
+                let intro = format!("{} into any app; with a letter it runs a command. Click a row to change it, or keep these.", panel.keybinds.dictate_words(panel.view.dictation.key_chosen()));
                 let y = self.draw_intro(&intro, content, y)?;
-                self.draw_shortcuts(panel, content, y, regions)
+                let y = self.draw_card(content, y, |renderer, inner, y| renderer.draw_dictation_key_row(panel, inner, y, regions))?;
+                self.draw_shortcuts(panel, content, y + SECTION_GAP, regions)
             }
             SetupStep::Model => {
                 let y = self.draw_intro("Pick the model that turns speech into captions. Everything runs on this PC; nothing is sent anywhere.", content, y)?;
@@ -1431,7 +1448,7 @@ impl Renderer {
             self.fade(rect(content.left, content.bottom - SETTINGS_FADE, content.right, content.bottom), Edge::Bottom, panel.height)?;
         }
         match (anchors, panel.view.open_dropdown) {
-            (Some(anchors), Some(Dropdown::Font)) => self.draw_font_list(anchors.font, content.bottom, panel, regions)?,
+            (Some(anchors), Some(Dropdown::Font)) => self.draw_font_list(anchors.font, content, panel, regions)?,
             (Some(anchors), Some(Dropdown::Colour(paint))) => self.draw_palette(paint, anchors.swatch(paint), content, panel, regions)?,
             _ => {}
         }
@@ -1564,9 +1581,10 @@ impl Renderer {
         Ok(y + MODEL_ROW)
     }
 
-    /// Save mode, updates, then the way back into setup. Returns the y below.
+    /// Mode, dictation, save mode, updates, then the way back into setup. Returns the y below.
     fn draw_general_settings(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
         let y = self.draw_mode_settings(panel, content, y, regions)?;
+        let y = self.draw_dictation_settings(panel, content, y + SECTION_GAP, regions)?;
         let y = self.draw_transcript_settings(panel, content, y + SECTION_GAP, regions)?;
         let y = self.draw_update_settings(panel, content, y + SECTION_GAP, regions)?;
         let y = self.draw_heading("Setup", content, y + SECTION_GAP)?;
@@ -1779,7 +1797,7 @@ impl Renderer {
         &mut self,
         dropdown: Dropdown,
         anchor: D2D_RECT_F,
-        bottom: f32,
+        area: D2D_RECT_F,
         options: &[(&str, bool, Action)],
         panel: &Panel,
         regions: &mut Regions,
@@ -1793,7 +1811,7 @@ impl Renderer {
             widest = widest.max(metrics(&self.layout(&self.fonts.body, label, f32::MAX)?)?.width + 48.0);
         }
         let tall = extent.viewport + 8.0;
-        let list_top = list_top(anchor, tall, bottom);
+        let list_top = list_top(anchor, tall, area);
         let list = rect(anchor.right - widest, list_top, anchor.right, list_top + tall);
         self.popover(list, RADIUS_CARD)?;
         let rows = rect(list.left, list.top + 4.0, list.right, list.bottom - 4.0);
@@ -1819,7 +1837,7 @@ impl Renderer {
 
     /// The font list by its box `anchor`, drawn over the rows around it (see [`list_top`]): a search field, then
     /// the fonts matching it, the chosen one ticked, [`DROPDOWN_ROWS`] at a time. Only the rows in view are laid out.
-    fn draw_font_list(&mut self, anchor: D2D_RECT_F, bottom: f32, panel: &Panel, regions: &mut Regions) -> Result<()> {
+    fn draw_font_list(&mut self, anchor: D2D_RECT_F, area: D2D_RECT_F, panel: &Panel, regions: &mut Regions) -> Result<()> {
         const WIDTH: f32 = 280.0;
         let view = panel.view;
         // As tall as the whole list would be whatever is typed, so the field stays put while typing.
@@ -1827,7 +1845,7 @@ impl Renderer {
         let extent = Extent { content: LIST_ROW * view.font_matches.len() as f32, viewport };
         let top = view.scroll(ScrollArea::Dropdown(Dropdown::Font)).top(extent);
         let tall = 6.0 + CONTROL + 4.0 + viewport + 4.0;
-        let list_top = list_top(anchor, tall, bottom);
+        let list_top = list_top(anchor, tall, area);
         let list = rect(anchor.right - WIDTH.max(width(&anchor)), list_top, anchor.right, list_top + tall);
         self.popover(list, RADIUS_CARD)?;
         // Clicks on the field or between rows keep the list open and reach nothing under it.
@@ -2134,7 +2152,7 @@ impl Renderer {
         let binds = panel.keybinds;
         let hint = match panel.view.locked {
             true => format!("Locked: clicks pass through  ·  {} unlocks", binds.shortcut(Command::Lock)),
-            false => format!("Hold {} to dictate", binds.hold_name()),
+            false => binds.dictate_words(panel.dictation_key),
         };
         // Clear of the resize grip.
         let mut right = panel.width - 28.0;
@@ -2532,8 +2550,11 @@ fn status_text(panel: &Panel, palette: &Palette) -> Status {
             None => Status { color: palette.warn, ..state("No model yet: download one in Settings, Listening".into(), palette.warn, false) },
         };
     }
+    if panel.latched {
+        return state(panel.stop_hint.to_owned(), palette.error, false);
+    }
     if panel.dictating {
-        return state(format!("Dictating: let go of {} to finish", panel.keybinds.hold_name()), palette.error, false);
+        return state(format!("Dictation on: let go of {} to finish", panel.keybinds.hold_name()), palette.error, false);
     }
     if panel.stopped {
         return state("Stopped".into(), palette.warn, true);
@@ -2594,6 +2615,7 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
     let with_shortcut = |text: &str, command| format!("{text} ({})", binds.shortcut(command));
     Some(match action {
         Action::Macro(action) => return macros::tooltip(action),
+        Action::Dictation(action) => return dictation::tooltip(action),
         Action::RunFromPalette(_) => "Run this macro".into(),
         Action::AskForMacro => "Open Claude with how macros are written, to help you make one".into(),
         Action::ShowSettings if panel.settings_open => "Close settings".into(),
@@ -2767,9 +2789,11 @@ pub fn font_list_scroll(row: usize) -> Scroll {
     Scroll::at(LIST_ROW * row.saturating_sub((DROPDOWN_ROWS - 1) / 2) as f32)
 }
 
-/// Where a list `tall` opens by its box `anchor`: under it, or over it when that would run past `bottom`.
-fn list_top(anchor: D2D_RECT_F, tall: f32, bottom: f32) -> f32 {
-    if anchor.bottom + 4.0 + tall <= bottom { anchor.bottom + 4.0 } else { anchor.top - 4.0 - tall }
+/// Where a list `tall` opens by its box `anchor`: under it, or over it when that would run past `area`'s
+/// bottom, and in any case no further than `area`'s edges allow.
+fn list_top(anchor: D2D_RECT_F, tall: f32, area: D2D_RECT_F) -> f32 {
+    let top = if anchor.bottom + 4.0 + tall <= area.bottom { anchor.bottom + 4.0 } else { anchor.top - 4.0 - tall };
+    top.min(area.bottom - tall).max(area.top)
 }
 
 /// Where a settings heading at `y` puts a control on its right: its right edge, in line with the rows of

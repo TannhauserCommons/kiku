@@ -10,7 +10,7 @@ use std::{
     os::windows::{io::AsRawHandle, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{mpsc, Arc, Mutex, PoisonError},
+    sync::{atomic::Ordering, mpsc, Arc, Mutex, PoisonError},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -21,7 +21,7 @@ use kiku_core::{
     controls::Controls,
     keybinds::Key,
     log,
-    macros::{local_now, read_text_file, Context, Executor, HowMuch, Mode, NaiveDateTime, OpenTarget, Transcript, TranscriptLine, Variables, Who},
+    macros::{local_now, read_text_file, Context, Executor, HowMuch, KikuRequest, KikuState, Mode, NaiveDateTime, OpenTarget, Transcript, TranscriptLine, Variables, Who},
     words::Output,
 };
 use windows::{
@@ -72,8 +72,8 @@ pub struct Outcome {
     pub notices: Vec<String>,
     /// A paste couldn't be made: the steps still waiting are dropped.
     pub failed: bool,
-    /// A step asked for the macro palette.
-    pub palette: bool,
+    /// Kiku's own actions the steps asked for, in order, for the panel to perform.
+    pub actions: Vec<KikuRequest>,
 }
 
 /// One run of steps. The clipboard lent to its pastes is `lent`, which the panel keeps between runs.
@@ -89,7 +89,7 @@ pub struct MacroRun<'a> {
     delay: Cell<Duration>,
     notices: RefCell<Vec<String>>,
     failed: Cell<bool>,
-    palette: Cell<bool>,
+    actions: RefCell<Vec<KikuRequest>>,
 }
 
 impl<'a> MacroRun<'a> {
@@ -106,12 +106,12 @@ impl<'a> MacroRun<'a> {
             delay: Cell::new(Duration::ZERO),
             notices: RefCell::default(),
             failed: Cell::new(false),
-            palette: Cell::new(false),
+            actions: RefCell::default(),
         }
     }
 
     pub fn finish(self) -> Outcome {
-        Outcome { erase: self.erase.get(), delay: self.delay.get(), notices: self.notices.take(), failed: self.failed.get(), palette: self.palette.get() }
+        Outcome { erase: self.erase.get(), delay: self.delay.get(), notices: self.notices.take(), failed: self.failed.get(), actions: self.actions.take() }
     }
 
     /// Lends the clipboard with `put`, then pastes with `paste`; a failure is told and stops the rest.
@@ -200,6 +200,16 @@ impl Context for MacroRun<'_> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.subsec_nanos());
         nanos as usize % choices.len().max(1)
     }
+
+    fn state(&self) -> KikuState {
+        let macros = self.controls.macros.macros();
+        let mode = macros.modes().effective(&self.app(), &self.controls.mode());
+        KikuState {
+            dictating: self.controls.dictating.load(Ordering::Relaxed),
+            captions: !self.controls.stopped.load(Ordering::Relaxed),
+            mode: mode.name().to_owned(),
+        }
+    }
 }
 
 impl Executor for MacroRun<'_> {
@@ -283,8 +293,8 @@ impl Executor for MacroRun<'_> {
         self.controls.set_mode(mode.clone());
     }
 
-    fn show_palette(&self) {
-        self.palette.set(true);
+    fn kiku(&self, request: &KikuRequest) {
+        self.actions.borrow_mut().push(request.clone());
     }
 }
 

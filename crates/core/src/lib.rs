@@ -2,6 +2,7 @@ pub mod actions;
 pub mod captions;
 pub mod catalog;
 pub mod controls;
+pub mod dictation;
 pub mod download;
 pub mod engine;
 pub mod engine_host;

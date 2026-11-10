@@ -5,7 +5,7 @@ use windows::{core::Result, Win32::Graphics::Direct2D::Common::D2D_RECT_F};
 
 use kiku_core::{
     actions::escape,
-    macros::{Command, RunOutput},
+    macros::{Command, KikuAction, RunOutput},
 };
 
 use super::{
@@ -173,6 +173,7 @@ impl Renderer {
             y = self.draw_hint("Uses the wake word set on the Macros list.", content, y - 4.0)?;
         }
 
+        let mut picker = None;
         let (right, middle) = heading_control(content, y + SECTION_GAP);
         let button = rect(right - BUTTON, middle - CONTROL / 2.0, right, middle + CONTROL / 2.0);
         self.draw_text_button("Add step", Some(Icon::Plus), Action::Macro(MacroAction::AddStepMenu), Emphasis::Secondary, right, middle, panel, regions)?;
@@ -182,7 +183,8 @@ impl Renderer {
         } else {
             y = self.draw_card(content, y, |renderer, inner, mut y| {
                 for (at, step) in editor.steps.iter().enumerate() {
-                    y = renderer.draw_macro_step(at, step, inner, y, panel, regions)?;
+                    let (below, anchor) = renderer.draw_macro_step(at, step, inner, y, panel, regions)?;
+                    (y, picker) = (below, picker.or(anchor.map(|anchor| (at, anchor))));
                 }
                 Ok(y)
             })?;
@@ -197,7 +199,12 @@ impl Renderer {
         self.draw_text_button("Back", Some(Icon::ChevronLeft), Action::Macro(MacroAction::Back), Emphasis::Secondary, left - 8.0, middle, panel, regions)?;
         y = middle + CONTROL / 2.0;
         if tab.menu_open() {
-            self.draw_add_step_menu(button, content.bottom, panel, regions)?;
+            let kinds = StepKind::ALL.map(|kind| (kind.label(), Action::Macro(MacroAction::AddStep(kind))));
+            self.draw_two_column_menu(button, content, &kinds, panel, regions)?;
+        }
+        if let Some((step, anchor)) = picker {
+            let actions = KikuAction::ALL.map(|action| (action.label(), Action::Macro(MacroAction::PickKiku { step, action })));
+            self.draw_two_column_menu(anchor, content, &actions, panel, regions)?;
         }
         Ok(y)
     }
@@ -266,9 +273,10 @@ impl Renderer {
         Ok(y + SETTING_ROW)
     }
 
-    /// A step's kind, its box, and its Record (a press) and remove buttons. Returns the y below.
+    /// A step's kind, its box, and its Record (a press), action picker (a kiku step) and remove buttons.
+    /// Returns the y below, and the picker's button while its list is open.
     #[allow(clippy::too_many_arguments)]
-    fn draw_macro_step(&mut self, at: usize, step: &EditedStep, content: D2D_RECT_F, y: f32, panel: &Panel, regions: &mut Regions) -> Result<f32> {
+    fn draw_macro_step(&mut self, at: usize, step: &EditedStep, content: D2D_RECT_F, y: f32, panel: &Panel, regions: &mut Regions) -> Result<(f32, Option<D2D_RECT_F>)> {
         let kind = step.kind;
         self.begin_row(content, y)?;
         let middle = y + SETTING_ROW / 2.0;
@@ -283,11 +291,24 @@ impl Renderer {
             let output = format!("Output: {}", step.output());
             right = self.draw_text_button(&output, None, Action::Macro(MacroAction::CycleOutput(at)), Emphasis::Secondary, right, middle, panel, regions)? - 6.0;
         }
+        let mut anchor = None;
+        if kind == StepKind::Kiku {
+            let left = self.draw_text_button(step.action_label(), Some(Icon::ChevronDown), Action::Macro(MacroAction::KikuPicker(at)), Emphasis::Secondary, right, middle, panel, regions)?;
+            anchor = (panel.view.macros.picker() == Some(at)).then(|| rect(left, middle - CONTROL / 2.0, right, middle + CONTROL / 2.0));
+        }
         let kind_label = self.single_line(&self.fonts.small, kind.label(), KIND_WIDTH - 8.0)?;
         self.draw_layout(&kind_label, content.left, middle - height_of(&kind_label)? / 2.0, self.palette.text_dim)?;
-        let area = rect(content.left + KIND_WIDTH, middle - CONTROL / 2.0, right, middle + CONTROL / 2.0);
-        self.draw_macro_box(&step.text, kind.placeholder(), MacroBox::Step(at), None, area, panel, regions)?;
         let mut y = y + SETTING_ROW;
+        if let Some(placeholder) = step.placeholder() {
+            // A kiku step's box has a row of its own, under its picker.
+            let (top, area_right) = if kind == StepKind::Kiku { (y + SETTING_ROW / 2.0, content.right) } else { (middle, right) };
+            let area = rect(content.left + KIND_WIDTH, top - CONTROL / 2.0, area_right, top + CONTROL / 2.0);
+            if kind == StepKind::Kiku {
+                self.begin_row(content, y)?;
+                y += SETTING_ROW;
+            }
+            self.draw_macro_box(&step.text, placeholder, MacroBox::Step(at), None, area, panel, regions)?;
+        }
         for (place, argument) in step.args.iter().enumerate() {
             self.begin_row(content, y)?;
             let middle = y + SETTING_ROW / 2.0;
@@ -295,28 +316,27 @@ impl Renderer {
             self.draw_macro_box(argument, "Argument", MacroBox::Argument { step: at, at: place }, None, area, panel, regions)?;
             y += SETTING_ROW;
         }
-        Ok(y)
+        Ok((y, anchor))
     }
 
-    /// The choices of the Add step menu in two columns by its `button` (see [`list_top`]), kept above `bottom`.
-    fn draw_add_step_menu(&mut self, button: D2D_RECT_F, bottom: f32, panel: &Panel, regions: &mut Regions) -> Result<()> {
+    /// `choices` in two columns by their `button` (see [`list_top`]), kept inside `area`.
+    fn draw_two_column_menu(&mut self, button: D2D_RECT_F, area: D2D_RECT_F, choices: &[(&str, Action)], panel: &Panel, regions: &mut Regions) -> Result<()> {
         const COLUMN: f32 = 190.0;
-        let rows = StepKind::ALL.len().div_ceil(2);
+        let rows = choices.len().div_ceil(2);
         let tall = LIST_ROW * rows as f32 + 8.0;
-        let top = list_top(button, tall, bottom);
+        let top = list_top(button, tall, area);
         let list = rect(button.right - 2.0 * COLUMN, top, button.right, top + tall);
         self.popover(list, RADIUS_CARD)?;
         // Clicks between the rows keep the menu open and reach nothing under it.
         regions.targets.push((list, Target::Card));
-        for (place, kind) in StepKind::ALL.into_iter().enumerate() {
+        for (place, &(label, action)) in choices.iter().enumerate() {
             let (column, line) = (place / rows, place % rows);
             let (left, row_top) = (list.left + COLUMN * column as f32, list.top + 4.0 + LIST_ROW * line as f32);
             let row = rect(left + 4.0, row_top, left + COLUMN - 4.0, row_top + LIST_ROW);
-            let action = Action::Macro(MacroAction::AddStep(kind));
             if panel.view.hovered == Some(action) {
                 self.fill_rounded(row, RADIUS_CONTROL - 2.0, self.palette.hover)?;
             }
-            let label = self.single_line(&self.fonts.body, kind.label(), width(&row) - 16.0)?;
+            let label = self.single_line(&self.fonts.body, label, width(&row) - 16.0)?;
             self.draw_layout(&label, row.left + 8.0, (row.top + row.bottom) / 2.0 - height_of(&label)? / 2.0, self.palette.text)?;
             regions.targets.push((row, Target::Click(action)));
         }
@@ -349,6 +369,8 @@ pub(super) fn tooltip(action: MacroAction) -> Option<String> {
         MacroAction::ToggleRunPrograms => "Off: run steps only show a notice. On: approved programs may run".into(),
         MacroAction::ToggleRunAnywhere => "Also allow programs outside custom\\scripts\\ (each command still needs approving)".into(),
         MacroAction::TogglePhrase(_) => "Whether Kiku acts on this phrase or dictates it".into(),
+        MacroAction::KikuPicker(_) => "Choose what Kiku does".into(),
+        MacroAction::PickKiku { action, .. } => format!("Kiku runs \"{}\"", action.name()),
         MacroAction::CycleOutput(_) => "What happens to what the program prints: nothing, paste it or show it as a notice".into(),
         MacroAction::AddStepMenu => "Choose what the next step does".into(),
         MacroAction::RemoveStep(_) => "Remove this step".into(),

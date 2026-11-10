@@ -4,6 +4,7 @@ use std::{fs, path::PathBuf};
 
 use crate::{
     macros::{BuiltinPhrases, CommandPolicy},
+    dictation::DictationSettings,
     controls::{DEFAULT_KEEP_DAYS, THRESHOLD_MAX_DB, THRESHOLD_MIN_DB},
     catalog::{self, Choice},
     engine::Device,
@@ -82,6 +83,8 @@ pub struct Settings {
     pub run_programs: CommandPolicy,
     /// The built-in phrases dictation hears (`macros.phrases`, the ones turned off; all on by default).
     pub mode_phrases: BuiltinPhrases,
+    /// How the dictation key dictates, the release delay and the stop phrases (`dictation.*`).
+    pub dictation: DictationSettings,
 }
 
 /// Where the model runs.
@@ -176,6 +179,7 @@ impl Default for Settings {
             macros_wake: String::new(),
             run_programs: CommandPolicy::default(),
             mode_phrases: BuiltinPhrases::default(),
+            dictation: DictationSettings::default(),
         }
     }
 }
@@ -235,6 +239,7 @@ impl Settings {
                 key if key == "theme" || key.starts_with("custom.") => {}
                 key if key.starts_with("subtitles.") => subtitles.push((key, value)),
                 key if key.starts_with("words.") => settings.words.apply_setting(key, value),
+                key if key.starts_with("dictation.") => settings.dictation.apply_setting(key, value),
                 key => settings.keybinds.apply_setting(key, value),
             }
         }
@@ -251,7 +256,7 @@ impl Settings {
         let blocked: String = self.blocked.iter().map(|name| format!("blocked = {name}\n")).collect();
         let pinned: String = self.pinned.iter().map(|name| format!("pinned = {name}\n")).collect();
         format!(
-            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\nengine.where = {}\nengine.host = {}\nhost.on = {}\nmacros.wake = {}\nmacros.run = {}\nmacros.run_anywhere = {}\nmacros.phrases = {}\n{}{blocked}{pinned}{}{}{}",
+            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\nengine.where = {}\nengine.host = {}\nhost.on = {}\nmacros.wake = {}\nmacros.run = {}\nmacros.run_anywhere = {}\nmacros.phrases = {}\n{}{blocked}{pinned}{}{}{}{}",
             self.mic_threshold_db,
             self.computer_threshold_db,
             self.model,
@@ -278,7 +283,8 @@ impl Settings {
             self.themes.to_settings(),
             self.keybinds.to_settings(),
             self.subtitles.to_settings(),
-            self.words.to_settings()
+            self.words.to_settings(),
+            self.dictation.to_settings()
         )
     }
 }
@@ -342,6 +348,7 @@ mod tests {
             macros_wake: String::new(),
             run_programs: CommandPolicy { enabled: true, anywhere: true },
             mode_phrases: BuiltinPhrases { dictation_off: false, what_can_i_say: false, ..BuiltinPhrases::default() },
+            dictation: DictationSettings { key: crate::dictation::DictationKey::Toggle, release_delay: std::time::Duration::from_millis(750), stop: vec!["over and out".into(), "that's all Kiku".into()] },
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
         assert_eq!(Settings::parse("mic_threshold_db = loud\nunknown = 1"), Settings::default());

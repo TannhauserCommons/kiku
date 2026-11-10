@@ -94,13 +94,15 @@ pub enum StepSpec {
     AskClaude(String),
     /// Switches to the mode of this name.
     Mode(String),
+    /// One of Kiku's actions, by name, with `open settings`' tab or `open history`'s search; each a template.
+    Kiku { action: String, tab: Option<String>, search: Option<String> },
 }
 
 const MACRO_KEYS: [&str; 9] = ["name", "say", "apps", "anywhere", "enabled", "hotkey", "listen", "modes", "steps"];
 const MODE_KEYS: [&str; 2] = ["name", "apps"];
-const STEP_KEYS: [&str; 13] = ["paste", "paste_file", "attach", "press", "copy", "type", "wait", "notify", "mode", "open", "switch", "run", "ask_claude"];
+const STEP_KEYS: [&str; 14] = ["paste", "paste_file", "attach", "press", "copy", "type", "wait", "notify", "mode", "open", "switch", "run", "ask_claude", "kiku"];
 /// Keys that belong to a step beside its own, and the step they belong to.
-const STEP_OPTIONS: [(&str, &str); 4] = [("raw", "paste_file"), ("args", "run"), ("output", "run"), ("timeout_ms", "run")];
+const STEP_OPTIONS: [(&str, &str); 6] = [("raw", "paste_file"), ("args", "run"), ("output", "run"), ("timeout_ms", "run"), ("tab", "kiku"), ("search", "kiku")];
 
 /// A `[[macro]]` table: where its header starts (see [`line_of`]) and the macro it reads as, or why not.
 pub(crate) type Located = (usize, Result<Macro, String>);
@@ -244,6 +246,11 @@ fn read_step(table: &InlineTable) -> Result<StepSpec, String> {
                 timeout_ms: timeout.unwrap_or(DEFAULT_TIMEOUT_MS),
             }
         }
+        "kiku" => StepSpec::Kiku {
+            action: text(value, kind)?,
+            tab: table.get("tab").map(|tab| text(tab, "tab")).transpose()?,
+            search: table.get("search").map(|search| text(search, "search")).transpose()?,
+        },
         _ => StepSpec::Notify(text(value, kind)?),
     })
 }
@@ -304,6 +311,7 @@ fn write_step(step: &StepSpec) -> InlineTable {
         StepSpec::Copy(text) => text.as_ref().map_or(true.into(), Into::into),
         StepSpec::Wait(ms) => i64::try_from(*ms).unwrap_or(i64::MAX).into(),
         StepSpec::Run { program, .. } => program.into(),
+        StepSpec::Kiku { action, .. } => action.into(),
     };
     table.insert(step.kind(), value);
     match step {
@@ -319,6 +327,13 @@ fn write_step(step: &StepSpec) -> InlineTable {
             }
             if *timeout_ms != DEFAULT_TIMEOUT_MS {
                 table.insert("timeout_ms", i64::try_from(*timeout_ms).unwrap_or(i64::MAX).into());
+            }
+        }
+        StepSpec::Kiku { tab, search, .. } => {
+            for (key, option) in [("tab", tab), ("search", search)] {
+                if let Some(option) = option {
+                    table.insert(key, option.into());
+                }
             }
         }
         _ => {}
@@ -399,6 +414,7 @@ impl StepSpec {
             StepSpec::Run { .. } => "run",
             StepSpec::AskClaude(_) => "ask_claude",
             StepSpec::Mode(_) => "mode",
+            StepSpec::Kiku { .. } => "kiku",
         }
     }
 }

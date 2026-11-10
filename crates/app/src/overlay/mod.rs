@@ -9,6 +9,8 @@
 
 pub mod app_icon;
 mod clipboard;
+mod dictation_card;
+mod dispatch;
 mod field;
 mod finder;
 mod folds;
@@ -30,6 +32,8 @@ mod macros_tests;
 mod macros_ui_tests;
 #[cfg(test)]
 mod macros_phase2_tests;
+#[cfg(test)]
+mod macros_phase3_tests;
 #[cfg(test)]
 mod triggers_tests;
 mod rows;
@@ -86,9 +90,10 @@ use windows::{
 use kiku_core::{
     captions::{Caption, Captions, YOU, YOU_SECTION},
     controls::{Controls, Input, SaveRequest, THRESHOLD_MIN_DB},
+    dictation::DictationSettings,
     keybinds::{Command, Key, Keybinds},
     log,
-    macros::{run_step, Mode, Modes, Step, README},
+    macros::{run_step, KikuAction, KikuRequest, Mode, Modes, Named, SettingsTab, Step, README},
     paths,
     catalog::{self, Choice},
     download::{self, Downloads, Target as Download},
@@ -104,6 +109,8 @@ use kiku_core::{
 };
 use crate::processes::snapshot;
 use app_icon::register_class;
+use dictation_card::{DictationAction, DictationCard};
+use dispatch::Dispatch;
 use macro_run::MacroRun;
 use macro_tab::{MacroAction, MacroBox, MacroTab};
 use palette::Palette;
@@ -137,10 +144,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_NCMOUSELEAVE: u32 = 0x02A2;
 const NOTICE_TIMER: usize = 1;
 const NOTICE_MS: u32 = 3000;
-/// Dictation starts once the captions key has been held this long, so quick Ctrl+Win shortcuts
-/// (Ctrl+Win+D, Ctrl+Win+arrows) never start it.
-const DICTATE_TIMER: usize = 3;
-const DICTATE_AFTER_MS: u32 = 250;
+/// Fires when dictation's next change is due (a hold long enough to dictate, a release delay's end).
+const DISPATCH_TIMER: usize = 3;
 /// Setting a shortcut keeps every key from other apps, so it gives up after this long.
 const REBIND_TIMER: usize = 5;
 const REBIND_MS: u32 = 10_000;
@@ -243,6 +248,7 @@ pub fn run(
     let tray = Tray::add(hwnd).inspect_err(|error| log::write(format!("no tray icon: {error}"))).ok();
     let (settings, handle) = (setup.settings, Handle(hwnd.0 as isize));
     controls.macros.set_phrases(settings.mode_phrases);
+    controls.macros.set_stop_phrases(settings.dictation.stop.clone());
     let mut window = Window {
         hwnd,
         captions,
@@ -260,6 +266,7 @@ pub fn run(
             let mut window = SettingsWindow::new(hwnd, WNDPROC::Some(settings_proc))?;
             window.view.host_code.set(&settings.engine_host);
             window.view.macros.set_settings(&settings.keybinds, settings.dictation_only, &settings.macros_wake);
+            window.view.dictation = DictationCard::open(&settings.dictation);
             window.view.macros.set_policy(settings.run_programs);
             window.view.macros.set_phrases(settings.mode_phrases);
             window
@@ -270,6 +277,8 @@ pub fn run(
         tracking_mouse: false,
         tracking_title_bar: false,
         typed: None,
+        dispatch: Dispatch::new(&settings.dictation),
+        dictation: settings.dictation,
         steps: VecDeque::new(),
         step_waiting: false,
         lent: None,
@@ -382,6 +391,9 @@ struct Window {
     _keys: Option<keys::Hook>,
     /// The macros behind the shortcuts the hook has, by place, and which handing of them it was.
     macro_shortcuts: (u32, Vec<String>),
+    /// Dictation and Kiku's actions, from keys and steps; its settings as saved.
+    dispatch: Dispatch,
+    dictation: DictationSettings,
     /// Shortcuts the hook was refused (a macro, why), so each is told once.
     refused_shortcuts: Vec<(String, String)>,
     /// The window that was in front when `mode_in_front` last looked, and its app.
@@ -512,12 +524,7 @@ impl Window {
                 unsafe { KillTimer(Some(self.hwnd), STEP_TIMER).ok() }.unwrap_or_default();
                 self.run_next_step();
             }
-            WM_TIMER if wparam.0 == DICTATE_TIMER => {
-                unsafe { KillTimer(Some(self.hwnd), DICTATE_TIMER).ok() }.unwrap_or_default();
-                self.steps.clear();
-                self.controls.dictating.store(true, Ordering::Relaxed);
-                self.redraw();
-            }
+            WM_TIMER if wparam.0 == DISPATCH_TIMER => self.user_dictation(|dispatch, controls| dispatch.tick(Instant::now(), controls)),
             // Macro shortcuts follow their files whether or not a model runs; usage is sampled only while the
             // panel's footer shows it.
             WM_TIMER if wparam.0 == USAGE_TIMER => {
@@ -582,6 +589,9 @@ impl Window {
         if !matches!(action, Action::Macro(_)) {
             self.settings.view.macros.stop_typing();
         }
+        if action != Action::Dictation(DictationAction::FocusStop) {
+            self.settings.view.dictation.stop_typing();
+        }
         if !matches!(action, Action::RunFromPalette(_)) {
             self.view.palette = None;
         }
@@ -591,6 +601,7 @@ impl Window {
         match action {
             Action::Macro(action) => self.macro_action(action),
             Action::RunFromPalette(at) => self.run_from_palette(at),
+            Action::Dictation(action) => self.dictation_action(action),
             Action::AskForMacro => self.ask_for_macro(),
             Action::SaveAll => self.save(SaveRequest::All, "every app"),
             Action::SaveSection(index) => {
@@ -800,7 +811,7 @@ impl Window {
                 self.controls.words.refresh();
                 self.watch_meters();
             }
-            Action::ToggleStop => self.toggle_stop(),
+            Action::ToggleStop => self.perform_action(KikuRequest::new(KikuAction::ToggleCaptions)),
             Action::Rebind(rebind) => self.start_rebinding(rebind),
             Action::ToggleDropdown(dropdown) => {
                 let view = &mut self.settings.view;
@@ -839,7 +850,7 @@ impl Window {
                 keys::set_keybinds(self.keybinds.clone());
                 self.macro_settings_changed();
                 self.save_settings();
-                self.notify(format!("Shortcuts reset: hold {} to dictate", self.keybinds.hold_name()), false);
+                self.notify(format!("Shortcuts reset. {}", self.keybinds.dictate_words(self.dictation.key)), false);
             }
             Action::PickModel(model) => {
                 self.controls.request_model(Choice { model, ..self.controls.model().wanted() });
@@ -1022,6 +1033,7 @@ impl Window {
                 _ => {
                     (self.settings.view.open_dropdown, self.settings.view.typing_word) = (None, None);
                     self.settings.view.macros.stop_typing();
+                    self.settings.view.dictation.stop_typing();
                     self.redraw();
                 }
             },
@@ -1082,6 +1094,11 @@ impl Window {
                 self.redraw();
             }
             WM_KEYDOWN if self.settings.view.open_dropdown == Some(Dropdown::Font) => self.font_list_key(VIRTUAL_KEY(wparam.0 as u16)),
+            WM_CHAR if self.settings.view.dictation.typing() => {
+                self.settings.view.dictation.type_unit(wparam.0 as u16);
+                self.dictation_edited();
+            }
+            WM_KEYDOWN if self.settings.view.dictation.typing() => self.dictation_key(VIRTUAL_KEY(wparam.0 as u16)),
             WM_CHAR if self.settings.view.macros.typing() => {
                 self.settings.view.macros.type_unit(wparam.0 as u16);
                 self.after_macro_typing();
@@ -1096,9 +1113,13 @@ impl Window {
                 self.redraw();
             }
             WM_KEYDOWN if self.settings.view.typing_word.is_some() => self.word_box_key(VIRTUAL_KEY(wparam.0 as u16)),
-            WM_ACTIVATE if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE && (self.settings.view.typing_word.is_some() || self.settings.view.macros.typing()) => {
+            WM_ACTIVATE
+                if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE
+                    && (self.settings.view.typing_word.is_some() || self.settings.view.macros.typing() || self.settings.view.dictation.typing()) =>
+            {
                 self.settings.view.typing_word = None;
                 self.settings.view.macros.stop_typing();
+                self.settings.view.dictation.stop_typing();
                 self.redraw();
             }
             WM_KEYDOWN if wparam.0 == VK_ESCAPE.0 as usize => self.close_settings(),
@@ -1203,6 +1224,31 @@ impl Window {
         let wake = tab.wake().to_owned();
         tab.set_settings(&self.keybinds, self.controls.dictation_only.load(Ordering::Relaxed), &wake);
         self.hand_macro_hotkeys();
+    }
+
+    /// A Dictation card control was clicked: the card changes, then dictation follows.
+    fn dictation_action(&mut self, action: DictationAction) {
+        self.settings.view.dictation.click(action);
+        self.dictation_edited();
+    }
+
+    /// A key pressed while typing in the stop phrases' box.
+    fn dictation_key(&mut self, key: VIRTUAL_KEY) {
+        let (ctrl, hwnd) = (ctrl_held(), self.hwnd);
+        self.settings.view.dictation.key(key, ctrl, || clipboard::text(hwnd));
+        self.dictation_edited();
+    }
+
+    /// New dictation settings from the card go to the one dispatch and the macros' stop phrases, and are saved.
+    fn dictation_edited(&mut self) {
+        let edited = self.settings.view.dictation.settings();
+        if edited != self.dictation {
+            self.dispatch.set(&edited);
+            self.controls.macros.set_stop_phrases(edited.stop.clone());
+            self.dictation = edited;
+            self.save_settings();
+        }
+        self.redraw();
     }
 
     /// A key pressed while typing in one of the Macros tab's boxes.
@@ -1408,6 +1454,7 @@ impl Window {
             macros_wake: self.settings.view.macros.wake().to_owned(),
             run_programs: self.settings.view.macros.policy(),
             mode_phrases: self.settings.view.macros.phrases(),
+            dictation: self.dictation.clone(),
         };
         if let Err(error) = settings.save() {
             self.notify(format!("Couldn't save settings: {}", plain_error(&error)), true);
@@ -1727,8 +1774,8 @@ impl Window {
         for notice in done.notices {
             self.notify(notice, done.failed);
         }
-        if done.palette {
-            self.open_palette();
+        for request in done.actions {
+            self.perform_action(request);
         }
         if done.failed {
             self.steps.clear();
@@ -1895,34 +1942,113 @@ impl Window {
         if matches!(event, keys::KeyEvent::Macro { generation, .. } if generation != self.macro_shortcuts.0) {
             return;
         }
-        if event == keys::KeyEvent::Held {
-            if self.controls.stopped.load(Ordering::Relaxed) {
-                self.notify(format!("Captioning is stopped: {} starts it", self.keybinds.shortcut(Command::Stop)), false);
-            } else {
-                unsafe { SetTimer(Some(self.hwnd), DICTATE_TIMER, DICTATE_AFTER_MS, None) };
-            }
+        if event == keys::KeyEvent::Held && self.controls.stopped.load(Ordering::Relaxed) {
+            self.notify(format!("Captioning is stopped: {} starts it", self.keybinds.shortcut(Command::Stop)), false);
             return self.redraw();
         }
-        // Anything else ends dictation; what was said so far is still typed.
-        unsafe { KillTimer(Some(self.hwnd), DICTATE_TIMER).ok() }.unwrap_or_default();
-        self.controls.dictating.store(false, Ordering::Relaxed);
+        // Anything but holding the key ends or settles dictation; what was said so far is still typed.
+        let action = self.user_dictation(|dispatch, controls| dispatch.key(event, Instant::now(), controls));
         match event {
-            keys::KeyEvent::Command(Command::Paste) => self.paste_said(),
-            keys::KeyEvent::Command(Command::Undo) => self.undo_typing(),
-            keys::KeyEvent::Command(Command::Stop) => self.toggle_stop(),
-            keys::KeyEvent::Command(Command::Lock) => self.toggle_lock(),
-            keys::KeyEvent::Command(Command::Hide) => self.set_display_visible(!self.display_visible()),
-            keys::KeyEvent::Command(Command::Subtitles) => self.set_subtitles(!self.subtitles.settings.on),
             keys::KeyEvent::Command(Command::Quit) => return self.quit("the quit shortcut"),
-            keys::KeyEvent::Command(Command::Palette) => self.toggle_palette(),
             keys::KeyEvent::Macro { index, .. } => self.run_macro_shortcut(index),
-            keys::KeyEvent::Command(Command::SaveMiss) => {
+            _ => {}
+        }
+        if let Some(action) = action {
+            self.perform_action(KikuRequest::new(action));
+        }
+        self.redraw();
+    }
+
+    /// Runs `call` on the dispatch for what the user did (a key, the timer): dictation they begin
+    /// drops the steps still waiting.
+    fn user_dictation<R>(&mut self, call: impl FnOnce(&mut Dispatch, &Controls) -> R) -> R {
+        let was = self.controls.dictating.load(Ordering::Relaxed);
+        let result = self.dispatching(call);
+        if !was && self.controls.dictating.load(Ordering::Relaxed) {
+            self.steps.clear();
+        }
+        result
+    }
+
+    /// Runs `call` on the dispatch, then sets the timer for what dictation does next and redraws.
+    fn dispatching<R>(&mut self, call: impl FnOnce(&mut Dispatch, &Controls) -> R) -> R {
+        let result = call(&mut self.dispatch, &self.controls);
+        match self.dispatch.next_wake() {
+            Some(at) => {
+                let wait = u32::try_from(at.saturating_duration_since(Instant::now()).as_millis() + 1).unwrap_or(u32::MAX);
+                unsafe { SetTimer(Some(self.hwnd), DISPATCH_TIMER, wait, None) };
+            }
+            None => unsafe { KillTimer(Some(self.hwnd), DISPATCH_TIMER).ok() }.unwrap_or_default(),
+        }
+        self.redraw();
+        result
+    }
+
+    /// Does Kiku's action `request` (a command key's, or a step's): dictation's through the dispatch, the
+    /// rest by the panel.
+    fn perform_action(&mut self, request: KikuRequest) {
+        if let Some(request) = self.dispatching(|dispatch, controls| dispatch.perform(request, Instant::now(), controls)) {
+            self.perform_kiku(request);
+        }
+    }
+
+    /// Does what `request` asks of the panel; dictation's actions are the dispatch's.
+    fn perform_kiku(&mut self, request: KikuRequest) {
+        let stopped = self.controls.stopped.load(Ordering::Relaxed);
+        match request.action {
+            KikuAction::StartDictation | KikuAction::StopDictation | KikuAction::ToggleDictation => {}
+            KikuAction::StartCaptions if stopped => self.toggle_stop(),
+            KikuAction::StopCaptions if !stopped => self.toggle_stop(),
+            KikuAction::StartCaptions | KikuAction::StopCaptions => {}
+            KikuAction::ToggleCaptions => self.toggle_stop(),
+            KikuAction::ShowPanel => self.set_display_visible(true),
+            KikuAction::HidePanel => self.set_display_visible(false),
+            KikuAction::TogglePanel => self.set_display_visible(!self.display_visible()),
+            KikuAction::LockPanel if !self.view.locked => self.toggle_lock(),
+            KikuAction::UnlockPanel if self.view.locked => self.toggle_lock(),
+            KikuAction::LockPanel | KikuAction::UnlockPanel => {}
+            KikuAction::ToggleLock => self.toggle_lock(),
+            KikuAction::CaptionsModeOn => self.set_subtitles(true),
+            KikuAction::CaptionsModeOff => self.set_subtitles(false),
+            KikuAction::ToggleCaptionsMode => self.set_subtitles(!self.subtitles.settings.on),
+            KikuAction::PasteWhatISaid => self.paste_said(),
+            KikuAction::Undo => self.undo_typing(),
+            KikuAction::SaveMiss => {
                 self.controls.save_miss.store(true, Ordering::Relaxed);
                 self.notify("Saved the last 30 s of audio to the misses folder".into(), false);
             }
-            _ => {}
+            KikuAction::ShowPalette => self.toggle_palette(),
+            KikuAction::OpenSettings => {
+                if !self.settings.is_open() {
+                    self.perform(Action::ShowSettings);
+                }
+                if let Some(tab) = request.tab {
+                    self.perform(Action::ShowTab(tab_of(tab)));
+                }
+            }
+            KikuAction::OpenHistory => self.open_history(request.search.as_ref().map(|search| search.reveal())),
         }
         self.redraw();
+    }
+
+    /// Shows History in the panel, searching for `search` if there is one.
+    fn open_history(&mut self, search: Option<&str>) {
+        if let Some(search) = search {
+            self.view.finder.search.set(search);
+        }
+        self.set_subtitles(false);
+        self.set_visible(true);
+        self.view.screen = Screen::Live;
+        self.perform(Action::ShowSaved);
+    }
+
+    /// How to end dictation that goes on until told: the key, or the first stop phrase.
+    fn stop_hint(&self) -> String {
+        let key = self.keybinds.hold_name();
+        match self.dictation.stop.first() {
+            Some(phrase) => format!("{key} or \"{phrase}\" stops"),
+            None => format!("{key} stops"),
+        }
     }
 
     /// Closes the macro palette, or opens it for the app in front.
@@ -2013,7 +2139,7 @@ impl Window {
                         return self.finish_rebinding(None);
                     }
                     let result = self.keybinds.set_hold(keys);
-                    self.finish_rebinding(Some(result.map(|()| format!("Hold {} to dictate", self.keybinds.hold_name()))));
+                    self.finish_rebinding(Some(result.map(|()| self.keybinds.dictate_words(self.dictation.key))));
                 }
             }
             Rebind::Command(_) => {}
@@ -2054,7 +2180,7 @@ impl Window {
                     Some(MenuChoice::ShowOrHide) => self.set_display_visible(!state.visible),
                     Some(MenuChoice::ToggleSubtitles) => self.set_subtitles(!state.subtitles),
                     Some(MenuChoice::ToggleLock) => self.toggle_lock(),
-                    Some(MenuChoice::ToggleStop) => self.toggle_stop(),
+                    Some(MenuChoice::ToggleStop) => self.perform_action(KikuRequest::new(KikuAction::ToggleCaptions)),
                     Some(MenuChoice::Quit) => return self.quit("Quit in the tray menu"),
                     None => {}
                 }
@@ -2291,8 +2417,9 @@ impl Window {
 
     fn draw_subtitles(&mut self) -> Result<()> {
         let hint = format!("Captions mode  ·  {} or double-click the tab beside them for the transcript", self.keybinds.shortcut(Command::Subtitles));
+        let dictating = self.dispatch.latched().then(|| format!("Dictating  ·  {}", self.stop_hint()));
         let captions = self.captions.lock().unwrap();
-        self.subtitles.draw(&mut self.renderer, &captions, &hint)
+        self.subtitles.draw(&mut self.renderer, &captions, &hint, dictating.as_deref())
     }
 
     /// Draws captions mode or the panel, whichever shows, and the settings window if it is open. A panel
@@ -2318,11 +2445,15 @@ impl Window {
             true => (TITLE_HEIGHT * scale).round() as i32,
             false => panel_shows.then(|| self.restore_height.take()).flatten().unwrap_or(bounds.bottom - bounds.top),
         };
+        let stop_hint = self.stop_hint();
         let panel = Panel {
             captions: &captions,
             view: &self.view,
             stopped: self.controls.stopped.load(Ordering::Relaxed),
             dictating: self.controls.dictating.load(Ordering::Relaxed),
+            latched: self.dispatch.latched(),
+            stop_hint: &stop_hint,
+            dictation_key: self.dictation.key,
             keybinds: &self.keybinds,
             captured: &self.captured,
             model: self.controls.model(),
@@ -2483,12 +2614,26 @@ pub(super) fn heard_steps(controls: &Controls, app: &str, wake: &str) -> Vec<Ste
     controls.take_heard().iter().filter_map(|line| macros.plan_heard(line, app, wake, &mode)).flatten().collect()
 }
 
+/// The settings window's tab for a `kiku` step's.
+fn tab_of(tab: SettingsTab) -> Tab {
+    match tab {
+        SettingsTab::General => Tab::General,
+        SettingsTab::Listening => Tab::Listening,
+        SettingsTab::Apps => Tab::Apps,
+        SettingsTab::Words => Tab::Words,
+        SettingsTab::Appearance => Tab::Appearance,
+        SettingsTab::Shortcuts => Tab::Shortcuts,
+        SettingsTab::Macros => Tab::Macros,
+    }
+}
+
 /// What undo takes back after `step` ran (`pasted`: the characters it pasted, if it pasted): a paste is kept
 /// across steps that leave the app's text alone (a wait, a notice, a mode), and lost to any other.
 pub(super) fn undo_after(before: Option<usize>, step: &Step, pasted: Option<usize>) -> Option<usize> {
     match step {
         _ if pasted.is_some() => pasted,
         Step::Wait(_) | Step::Notify(_) | Step::SetMode(_) => before,
+        Step::Kiku(step) if matches!(&step.action, Named::Known(action) if !matches!(action, KikuAction::Undo | KikuAction::PasteWhatISaid)) => before,
         _ => None,
     }
 }

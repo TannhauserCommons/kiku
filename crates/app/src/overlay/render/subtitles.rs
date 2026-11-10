@@ -482,7 +482,7 @@ impl Renderer {
         let more = self.layout(&self.fonts.small, "More colours…", f32::MAX)?;
         let grid = (COLUMNS as f32 * (CELL + SPACE) - SPACE, offered.len().div_ceil(COLUMNS) as f32 * (CELL + SPACE));
         let (wide, tall) = (grid.0 + 2.0 * INSET, 2.0 * INSET + grid.1 + height_of(&more)?);
-        let top = list_top(anchor, tall, content.bottom);
+        let top = list_top(anchor, tall, content);
         // Lined up with the swatch's right edge, moved right only as far as keeps it in the content.
         let left = (anchor.right - wide).max(content.left);
         let list = rect(left, top, left + wide, top + tall);

@@ -15,15 +15,18 @@ If you choose to, the speech model can run on another computer of yours instead.
 - **A caption section per app** (Discord, a browser, a game, ...) plus one for your microphone, in a small
   always-on-top panel; quiet apps fold away by themselves.
 - **Captions mode:** the newest lines as subtitles over the screen, in the font, size and colours you pick.
-- **Dictation:** hold Ctrl+Win to type what you say into any app; paste or undo it with a key. Every
-  shortcut can be changed. Voice actions in `words.txt` press keys or paste saved text when you say a phrase.
+- **Dictation:** hold Ctrl+Win to type what you say into any app, or press it to start and again to stop;
+  optionally keep listening a moment after you let go; end it by saying "that's all Kiku" (your phrases). Paste or undo
+  it with a key. Every shortcut can be changed. Voice actions in `words.txt` press keys or paste saved text when you say a phrase.
 - **Voice macros:** say a phrase to run several steps in the app in front: paste text with variables (date,
   clipboard, what was just said), press key sequences, paste or attach files. Edit them in Settings → Macros.
 - **Drive the PC by voice:** macros can open a link, file or app, bring an app's window to the front, run your
   own scripts, and hand text (a transcript, say) to Claude. Running programs is off until you turn it on, and
   each command and script is approved by you in the app first. Modes (normal, commands only, dictation off,
   and your own, even per app) change what dictation does, and Ctrl+Win+M, or saying "what can I say", shows
-  the macros you can say right now. Claude can help write them, and an assistant on your PC can check them
+  the macros you can say right now. A `kiku` step does Kiku's own actions (start or stop dictation or captions,
+  show or lock the panel, open a settings tab or search History); state variables `{dictating}`, `{captions}`
+  and `{mode}` fill into any step. Claude can help write them, and an assistant on your PC can check them
   through the MCP server.
 - **Offline speech models:** Parakeet (English, or 25 languages) and Moonshine, on the CPU or an NVIDIA
   GPU. Setup recommends one for your PC and downloads it; you can also add your own sherpa-onnx or

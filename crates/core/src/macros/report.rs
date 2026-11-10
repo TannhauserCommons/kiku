@@ -3,10 +3,11 @@
 
 use std::{fs, io, path::Path};
 
-use super::{Approvals, CommandPolicy, Macro, Macros, Mode, Step, Variables};
+use super::{Approvals, CommandPolicy, KikuStep, Macro, Macros, Mode, Named, Step, StepSpec, Variables};
 use crate::words::{WordSettings, Words};
 
 const PRIVATE: &str = "[private]";
+const TEMPLATE: &str = "(a template)";
 
 /// `custom\`'s macros and variables as read, with their problems.
 pub struct Customization {
@@ -87,7 +88,7 @@ fn describe(macro_: &Macro) -> String {
     if !macro_.modes.is_empty() {
         parts.push(format!("modes: {}", macro_.modes.join(", ")));
     }
-    parts.push(format!("steps: {}", macro_.steps.iter().map(|step| step.kind()).collect::<Vec<_>>().join(", ")));
+    parts.push(format!("steps: {}", macro_.steps.iter().map(describe_spec).collect::<Vec<_>>().join(", ")));
     if let Some(hotkey) = &macro_.hotkey {
         parts.push(format!("shortcut: {}", hotkey.name()));
     }
@@ -95,6 +96,15 @@ fn describe(macro_: &Macro) -> String {
         parts.push("listens without the dictation key".into());
     }
     parts.join("; ")
+}
+
+/// A step as written, by kind; a `kiku` step with its action, unless a template picks it.
+fn describe_spec(step: &StepSpec) -> String {
+    match step {
+        StepSpec::Kiku { action, .. } if action.contains('{') => format!("kiku: {TEMPLATE}"),
+        StepSpec::Kiku { action, .. } => format!("kiku: {action}"),
+        other => other.kind().to_owned(),
+    }
 }
 
 fn describe_step(step: &Step) -> String {
@@ -116,7 +126,16 @@ fn describe_step(step: &Step) -> String {
         ),
         Step::AskClaude { .. } => format!("ask Claude {PRIVATE}"),
         Step::SetMode(mode) => format!("switch to {} mode", mode.name()),
-        Step::ShowPalette => "show the palette".into(),
+        Step::Kiku(KikuStep { action, search, .. }) => {
+            let action = match action {
+                Named::Known(action) => action.name(),
+                Named::Later(_) => TEMPLATE,
+            };
+            match search {
+                Some(_) => format!("kiku: {action} (search {PRIVATE})"),
+                None => format!("kiku: {action}"),
+            }
+        }
     }
 }
 

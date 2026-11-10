@@ -151,8 +151,8 @@ impl Subtitles {
         }
     }
 
-    /// Draws the newest lines; anything said since the last frame keeps them up for another quiet spell.
-    pub fn draw(&mut self, renderer: &mut Renderer, captions: &Captions, hint: &str) -> Result<()> {
+    /// Draws the newest lines, and `dictating` (the badge's text) while dictation goes on until told; anything said since the last frame keeps them up for another quiet spell.
+    pub fn draw(&mut self, renderer: &mut Renderer, captions: &Captions, hint: &str, dictating: Option<&str>) -> Result<()> {
         if self.hidden {
             return Ok(());
         }
@@ -172,6 +172,9 @@ impl Subtitles {
             .collect();
         if self.hint {
             lines.push(SubtitleLine { text: hint, speaker: Speaker::Kiku });
+        }
+        if let Some(badge) = dictating {
+            lines.push(SubtitleLine { text: badge, speaker: Speaker::Kiku });
         }
         if lines.is_empty() {
             self.show(false);

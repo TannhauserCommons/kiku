@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use super::{
+    dictation_card::{DictationAction, DictationCard},
     field::Field,
     finder::{Finder, Period, TextBox},
     folds::Folds,
@@ -103,6 +104,8 @@ impl Tab {
 pub enum Action {
     /// The Macros tab's buttons.
     Macro(MacroAction),
+    /// Settings → General's Dictation card.
+    Dictation(DictationAction),
     /// Runs the palette's entry at this place.
     RunFromPalette(usize),
     /// Opens Claude to help write a macro.
@@ -622,6 +625,8 @@ pub struct View {
     pub macros: MacroTab,
     /// The macro palette, open over the panel.
     pub palette: Option<Palette>,
+    /// Settings → General's Dictation card.
+    pub dictation: DictationCard,
     /// The code of the host to run models on, as typed.
     pub host_code: Field,
     pub correction: Correction,
@@ -670,6 +675,7 @@ impl View {
             try_words: Field::default(),
             macros: MacroTab::default(),
             palette: None,
+            dictation: DictationCard::default(),
             host_code: Field::default(),
             correction: Correction::default(),
             typing_word: None,

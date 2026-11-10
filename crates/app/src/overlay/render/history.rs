@@ -87,7 +87,7 @@ impl Renderer {
             let names: Vec<String> = choices.iter().map(Who::name).collect();
             let options: Vec<_> =
                 choices.iter().zip(&names).enumerate().map(|(index, (who, name))| (name.as_str(), *who == finder.who, Action::SetWho(index))).collect();
-            self.draw_dropdown_list(Dropdown::Who, who_box, area.bottom, &options, panel, regions)?;
+            self.draw_dropdown_list(Dropdown::Who, who_box, area, &options, panel, regions)?;
         }
         Ok(())
     }

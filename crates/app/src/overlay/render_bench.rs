@@ -22,8 +22,9 @@ use windows::{
 };
 
 use super::{
+    dictation_card::DictationCard,
     finder::{Found, TextBox, Who},
-    macro_tab::{MacroAction, MacroTab},
+    macro_tab::{MacroAction, MacroBox, MacroTab, StepKind},
     palette::Palette,
     render::{Frame, Icon, Meter, Panel, Renderer, Speaker, SubtitleLine, SubtitleScene, Surface},
     usage::Usage,
@@ -31,11 +32,12 @@ use super::{
 };
 use kiku_core::{
     captions::Captions,
+    dictation::{DictationKey, DictationSettings},
     controls::{Blocked, Input, ModelState},
     engine::{Device, Line},
     history::{Session, StoredLine, Table},
     keybinds::{Key, Keybinds},
-    macros::{CommandPolicy, Macros, Mode, Variables},
+    macros::{CommandPolicy, KikuAction, Macros, Mode, Variables},
     catalog::{self, Choice},
     download::Downloads,
     hardware::{Gpu, Hardware},
@@ -122,6 +124,9 @@ static MACROS: std::sync::LazyLock<Macros> = std::sync::LazyLock::new(|| Macros:
 const SNAPSHOT_MACROS: &str = "[[macro]]\nname = \"Paste my email\"\nsay = [\"paste my email\", \"my email\"]\nsteps = [ { paste = \"me@example.com\" } ]\n\n[[macro]]\nname = \"New tab\"\nsay = \"open a tab\"\nsteps = [ { press = \"ctrl+t\" } ]\n\n[[macro]]\nname = \"Sign off\"\nsay = \"sign off\"\nhotkey = \"Ctrl+Alt+S\"\nlisten = true\nenabled = false\nsteps = [ { paste = \"Thanks,\\nTannhauser\" }, { wait = 200 }, { notify = \"Signed off\" } ]\n";
 /// More macros for the snapshots: one that runs a program, asks Claude and changes mode, and one with a shortcut only.
 const SNAPSHOT_MORE_MACROS: &str = "\n[[macro]]\nname = \"Search the web\"\nsay = \"search for {words}\"\nsteps = [ { run = \"search.ps1\", args = [\"{words}\", \"--quiet\"], output = \"paste\" }, { ask_claude = \"Summarise {clipboard}\" }, { mode = \"commands\" } ]\n\n[[macro]]\nname = \"Reopen tab\"\nhotkey = \"Ctrl+Alt+R\"\nsteps = [ { press = \"ctrl+shift+t\" } ]\n";
+/// What the Dictating badge's status line says in the snapshots.
+const DICTATING_HINT: &str = "Ctrl+Win or \"that's all Kiku\" stops";
+
 /// A word rules file with an entry of each kind (two actions everywhere, one in Discord), sections and a line it skips.
 const SNAPSHOT_WORDS: &str = "# mine\nkicku => Kiku\num =>\n@ Tannhauser\n@ Lull :2.8\n! capitalise\n> select all => press ctrl+a\n> paste email => paste me@example.com\nnot a rule\n[Discord]\ngg => good game\n> paste address => paste 1 Main St\\n2nd floor\n! no-trailing-punctuation\n";
 
@@ -133,6 +138,9 @@ pub(super) fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Ke
         view,
         stopped: false,
         dictating: false,
+        latched: false,
+        stop_hint: "",
+        dictation_key: DictationKey::Hold,
         keybinds,
         captured: &[],
         model: ModelState { active: choice, pending: None, failed: None, failure: None, loaded: true, gpu_fallback: None, remote: None },
@@ -202,6 +210,7 @@ fn render_cost() {
     view.palette = Some(Palette::open(&palette_macros, "Discord", &Mode::Normal));
     measure("live: macro palette open, 200 macros", 50, |_| draw(panel(&captions, &view, &keybinds, 560.0)));
     view.palette = None;
+    measure("live: Dictating badge showing", 200, |_| draw(Panel { dictating: true, latched: true, stop_hint: DICTATING_HINT, ..panel(&captions, &view, &keybinds, 560.0) }));
 
     let lines = (0..10_000).map(|i| format!("[14:{:02}] Discord: {}", i % 60, line(i, i as usize).text)).collect();
     view.screen = Screen::SavedFile { session: 1, title: "Discord  ·  Oct 30, 14:05".into(), lines, focus: None };
@@ -235,6 +244,9 @@ fn render_cost() {
     settings.macros.set_policy(CommandPolicy { enabled: true, anywhere: true });
     measure("settings: macros tab, 50 commands to approve", 50, |_| draw(panel(&captions, &settings, &keybinds, 560.0)));
     let _ = fs::remove_dir_all(folder);
+
+    settings.tab = Tab::General;
+    measure("settings: general tab with the Dictation card", 200, |_| draw(panel(&captions, &settings, &keybinds, 560.0)));
 
     let (look, mut surface) = (SubtitleSettings::default().look(&Themes::default()), Surface::default());
     let mut draw = |text: &str| {
@@ -534,6 +546,18 @@ fn snapshots() {
             write_png(&folder.join(format!("{shot}-{}.png", name(theme))), renderer.render(&mut surface, &shown).unwrap().0);
         }
     }
+    // Dictation: the General tab's card, and the badge while dictation stays on until told.
+    let mut general = View::new();
+    general.tab = Tab::General;
+    general.dictation = DictationCard::open(&DictationSettings { key: DictationKey::Toggle, release_delay: Duration::from_millis(500), ..DictationSettings::default() });
+    let idle = View::new();
+    for theme in [Theme::Night, Theme::Day] {
+        let themes = Themes::from(theme);
+        save_settings_window(&mut renderer, &folder.join(format!("settings-general-dictation-{}.png", name(theme))), Panel { themes, ..panel(&captions, &general, &keybinds, 560.0) });
+        let mut surface = Surface::default();
+        let badge = Panel { usage, themes, height: 420.0, dictating: true, latched: true, stop_hint: DICTATING_HINT, ..panel(&captions, &idle, &keybinds, 560.0) };
+        write_png(&folder.join(format!("panel-dictating-badge-{}.png", name(theme))), renderer.render(&mut surface, &badge).unwrap().0);
+    }
     let mut save_panel = |name: &str, view: &View, themes: Themes, height: f32| {
         let mut surface = Surface::default();
         let (frame, _) = renderer.render(&mut surface, &Panel { usage, themes, height, ..panel(&captions, view, &keybinds, 560.0) }).unwrap();
@@ -703,6 +727,11 @@ fn snapshots() {
             tab.record(&[Key::Ctrl, Key::Win, Key::Other(u16::from(b'V'))]);
             tab.click(MacroAction::Save);
         })),
+        ("editor-kiku-step", macros_view(&kiku_steps)),
+        ("editor-kiku", macros_view(&|tab| {
+            kiku_steps(tab);
+            tab.click(MacroAction::KikuPicker(1));
+        })),
         ("add-step", macros_view(&|tab| [MacroAction::Edit(0), MacroAction::AddStepMenu].into_iter().for_each(|action| tab.click(action)))),
     ];
     for theme in [Theme::Night, Theme::Day] {
@@ -763,6 +792,13 @@ fn snapshots() {
         let mut surface = Surface::default();
         let (frame, _) = renderer.render_subtitles(&mut surface, &scene).unwrap();
         write_png(&folder.join(format!("captions-{name}.png")), frame);
+    }
+    for theme in [Theme::Night, Theme::Day] {
+        let themes = Themes::from(theme);
+        let badge = [SubtitleLine { text: lines[0].text, speaker: lines[0].speaker }, SubtitleLine { text: &format!("Dictating  ·  {DICTATING_HINT}"), speaker: Speaker::Kiku }];
+        let look = SubtitleSettings::default().look(&themes);
+        let scene = SubtitleScene { themes, ..subtitles(&renderer, &badge, &look, 92, 144.0) };
+        write_png(&folder.join(format!("captions-dictating-badge-{}.png", name(theme))), renderer.render_subtitles(&mut Surface::default(), &scene).unwrap().0);
     }
     for (name, themes, hovered) in [("night", Themes::default(), false), ("day", Themes::from(Theme::Day), true), ("custom", custom_themes(), false)] {
         let mut surface = Surface::default();
@@ -879,6 +915,14 @@ fn snapshot_captions() -> Captions {
         captions.update_mic(2, &[said(id as u64, text, true)], Some("Discord"));
     }
     captions
+}
+
+/// A new macro with two Kiku steps, the first Open settings on the words tab.
+fn kiku_steps(tab: &mut MacroTab) {
+    let steps = [MacroAction::New, MacroAction::AddStepMenu, MacroAction::AddStep(StepKind::Kiku), MacroAction::PickKiku { step: 0, action: KikuAction::OpenSettings }, MacroAction::Focus(MacroBox::Step(0))];
+    steps.into_iter().for_each(|action| tab.click(action));
+    tab.type_text("words");
+    [MacroAction::AddStepMenu, MacroAction::AddStep(StepKind::Kiku)].into_iter().for_each(|action| tab.click(action));
 }
 
 fn discord_exe() -> Option<std::path::PathBuf> {

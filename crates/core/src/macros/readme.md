@@ -90,6 +90,9 @@ Each step has exactly one of these keys. Steps run in order, 150 ms apart.
 { switch = "Discord" }                           # bring that app's window to the front
 { run = "search.ps1", args = ["{words}"], output = "paste" } # run your own script (see Run)
 { ask_claude = "Summarise:\n{transcript:Discord:10m|names}" } # hand this text to Claude
+{ kiku = "toggle dictation" }                    # one of Kiku's own actions (see Kiku's actions)
+{ kiku = "open settings", tab = "words" }        # some actions take an option
+{ kiku = "open history", search = "{words}" }
 ```
 
 In TOML text `\n` is a line break; use `'''...'''` for several lines.
@@ -111,8 +114,13 @@ Write `{{` and `}}` for literal braces.
 | `{random:CHOICES}` | One of the choices, see below |
 | `{transcript:WHO:HOW_MUCH}` | Captions, see below (HOW_MUCH defaults to `line`) |
 | `{last_line:WHO}`, `{last_minute:WHO}` | Shorthands for `line` and `1m` |
+| `{dictating}`, `{captions}` | `on` or `off`: whether Kiku is dictating, whether captioning runs |
+| `{mode}` | The name of the mode in effect now (`normal`, `commands`, `off` or yours) |
 
 Choices are separated by a plain `|`, e.g. `{random:yes|no|maybe}`.
+
+`{dictating}`, `{captions}` and `{mode}` are Kiku's own state, read when the step runs. A `variables.toml`
+entry with one of those names isn't used. They work wherever a variable does, in a `kiku` step's `search` too.
 
 WHO: `you`, `others`, `everyone`, `front` (the app in front), or an app's name as Kiku shows it.
 HOW_MUCH: `line` (newest finished line), `N lines`, `Ns`, `Nm` (heard that long ago or later), `paragraph`,
@@ -187,6 +195,80 @@ steps = [ { run = "search.ps1", args = ["{words}", "--quiet"], output = "paste",
   1 MiB is kept, one trailing line break is dropped, and it is never logged.
 - `timeout_ms`: 10000 by default, at most 60000. The script is ended at the timeout. Kiku's panel waits
   for it meanwhile, so keep scripts quick.
+
+## Kiku's actions
+
+`{ kiku = "name" }` makes Kiku do something itself, as a key of its own would. Names are written in lower case
+(any case is read). Dictation actions need captioning to be running: while it is stopped, `start dictation` and
+`toggle dictation` do nothing, and stopping captions ends dictation.
+
+| Name | Does |
+| --- | --- |
+| `start dictation` | Dictation starts and stays on (see Dictation) |
+| `stop dictation` | Ends it, after the release delay |
+| `toggle dictation` | Starts it, or ends it when it is on |
+| `start captions`, `stop captions`, `toggle captions` | Captioning on or off (also ends dictation) |
+| `show panel`, `hide panel`, `toggle panel` | The panel |
+| `lock panel`, `unlock panel`, `toggle lock` | Click-through lock |
+| `captions mode on`, `captions mode off`, `toggle captions mode` | Subtitles over the screen |
+| `paste what I said` | As Ctrl+Win+V; again reaches further back |
+| `undo` | As Ctrl+Win+Z: takes back the last paste |
+| `save miss` | As Ctrl+Win+B: saves the last 30 s of audio and the transcript |
+| `show palette` | Opens the palette of macros you can say now |
+| `open settings` | Opens the settings window; option `tab` |
+| `open history` | Shows History in the panel; option `search` |
+
+- `tab` is only for `open settings`: `general`, `listening`, `apps`, `words`, `appearance`, `shortcuts` or `macros`.
+  Without it the window opens on the tab it was on.
+- `search` is only for `open history`. It is filled like any text (`"{words}"` searches for what you said after
+  the phrase) and is private: it never appears in a log or an error.
+- There is no quit, and no action changes settings: a macro never ends Kiku.
+- The name and the tab may be templates, such as `{ kiku = "{words}" }` after `say = "kiku {words}"`. They are
+  checked when the step runs, and a name that isn't an action or tab shows a notice listing the valid ones.
+  Plain names are checked when the file is read, and a macro with a wrong one is skipped.
+
+```toml
+[[macro]]
+name = "find in history"
+say = "find {words} in history"
+steps = [ { kiku = "open history", search = "{words}" } ]
+```
+
+## Dictation
+
+By default you hold the dictation key (Ctrl+Win) and speak; dictation starts after 250 ms, so a chord
+such as Ctrl+Win+V never dictates. These settings are in Settings > General, and in `settings.txt`
+(the defaults: `hold`, a delay of 0, and the stop phrase `that's all Kiku`):
+
+- `dictation.key = hold` or `toggle`. In `toggle` a bare press starts dictation and the next bare press ends it.
+  A chord (the key plus another) never starts or ends it, except the one that stops captioning, which ends it.
+- `dictation.release_delay = 0` to `2000` (milliseconds; Settings offers Off to 1000). Dictation goes on that
+  long after you let go (or after any stop), so the last words are caught. Pressing again in that time carries on
+  as if it never ended.
+- `dictation.stop = that's all Kiku`: stop phrases, separated by commas; empty has none. A dictated line that
+  ends with one (case and punctuation aside, whole words) ends dictation at once, with no release delay.
+  Only the words before it are pasted, and the phrase is taken off first, so it is never pasted or shown to a macro.
+  The longest phrase that matches wins. A phrase said in the middle of a line does nothing.
+
+Dictation a step starts (`start dictation`, `toggle dictation`, or a toggle press) stays on until a bare
+press of the key, `stop dictation`, a stop phrase or captioning stopping. A hold that ends doesn't end it. The panel shows
+a Dictating badge, and says how to stop it, while it is on.
+
+If a stop phrase has an unusual word (a name, "Kiku"), the model may mishear it. Add that word to `words.txt`
+as `@ Kiku` yourself; Kiku doesn't add it for you.
+
+```toml
+[[macro]]
+name = "dictation key"
+hotkey = "Ctrl+Alt+D"
+steps = [ { kiku = "toggle dictation" } ]
+
+[[macro]]
+name = "start typing"
+say = "start typing"
+listen = true
+steps = [ { kiku = "start dictation" } ]
+```
 
 ## Ask Claude and the palette
 

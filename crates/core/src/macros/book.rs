@@ -25,6 +25,7 @@ struct Loaded {
     variables_file: FileWatch,
     /// What Settings say, given to the macros each time they are built.
     phrases: BuiltinPhrases,
+    stop_phrases: Vec<String>,
     policy: CommandPolicy,
     /// The approvals that record a program's contents, from `approved-commands.txt`.
     approvals: Approvals,
@@ -36,6 +37,7 @@ impl Loaded {
     fn equip(&mut self) {
         let macros = Arc::make_mut(&mut self.macros);
         macros.set_phrases(self.phrases);
+        macros.set_stop_phrases(self.stop_phrases.clone());
         macros.set_commands(self.policy, self.approvals.clone());
     }
 }
@@ -62,6 +64,15 @@ impl MacroBook {
         let mut state = self.state.lock().unwrap();
         if state.phrases != phrases {
             state.phrases = phrases;
+            state.equip();
+        }
+    }
+
+    /// The phrases that end dictation (Settings).
+    pub fn set_stop_phrases(&self, phrases: Vec<String>) {
+        let mut state = self.state.lock().unwrap();
+        if state.stop_phrases != phrases {
+            state.stop_phrases = phrases;
             state.equip();
         }
     }
@@ -171,5 +182,14 @@ mod tests {
         MacroBook::at(folder.clone()).refresh(&words);
         assert_eq!(fs::read_to_string(&readme).unwrap(), "mine");
         fs::remove_dir_all(folder.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_macros_skill_carries_this_readme() {
+        // The skill is private (`.publicignore`), so only the private source can check it.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../skills/kiku-macros/references/macros.md");
+        if let Ok(copy) = fs::read_to_string(path) {
+            assert!(copy.replace("\r\n", "\n") == README.replace("\r\n", "\n"), "copy crates/core/src/macros/readme.md to {path}");
+        }
     }
 }

@@ -8,7 +8,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_ESCAPE};
 use kiku_core::{
     actions::{escape, unescape},
     keybinds::{Hotkey, Key, Keybinds},
-    macros::{approvals_path, contents_hash, Approvals, BuiltinPhrases, Command, CommandPolicy, Macro, Macros, StepSpec, Variables},
+    macros::{approvals_path, contents_hash, Approvals, BuiltinPhrases, Command, CommandPolicy, KikuAction, Macro, Macros, StepSpec, Variables},
     transcripts,
     words::Words,
 };
@@ -52,6 +52,10 @@ pub enum MacroAction {
     TogglePhrase(Phrase),
     /// Changes what the run step at this place does with its output.
     CycleOutput(usize),
+    /// Opens or closes the action picker of the kiku step at this place.
+    KikuPicker(usize),
+    /// Picks the action of the kiku step at `step`.
+    PickKiku { step: usize, action: KikuAction },
 }
 
 /// A built-in phrase Settings can turn off.
@@ -142,10 +146,12 @@ pub enum StepKind {
     Run,
     AskClaude,
     Mode,
+    /// One of Kiku's own actions.
+    Kiku,
 }
 
 impl StepKind {
-    pub const ALL: [StepKind; 13] = [
+    pub const ALL: [StepKind; 14] = [
         StepKind::Paste,
         StepKind::PasteFile,
         StepKind::Attach,
@@ -159,6 +165,7 @@ impl StepKind {
         StepKind::Run,
         StepKind::AskClaude,
         StepKind::Mode,
+        StepKind::Kiku,
     ];
 
     pub fn label(self) -> &'static str {
@@ -176,6 +183,7 @@ impl StepKind {
             StepKind::Run => "Run a program",
             StepKind::AskClaude => "Ask Claude",
             StepKind::Mode => "Change mode",
+            StepKind::Kiku => "Kiku action",
         }
     }
 
@@ -195,6 +203,7 @@ impl StepKind {
             StepKind::Run => "Program, e.g. search.ps1",
             StepKind::AskClaude => "What to ask, e.g. Summarise {transcript:Discord:10m|names}",
             StepKind::Mode => "Mode name, e.g. commands",
+            StepKind::Kiku => "", // depends on the action: see `EditedStep::placeholder`
         }
     }
 }
@@ -216,6 +225,11 @@ pub struct EditedStep {
     pub text: Field,
     /// A run step's arguments, always ending in a blank one to type the next into.
     pub args: Vec<Field>,
+    /// A kiku step's action as the file writes it: a name, or a template the editor leaves alone. Its `text`
+    /// is open settings' `tab` or open history's `search`.
+    action: String,
+    /// The `tab` and `search` of a templated action, whose box is not shown, kept as the file has them.
+    kept_options: (Option<String>, Option<String>),
     /// A pasted file's `raw`, which the editor keeps as the file has it.
     raw: bool,
     /// A run step's output and timeout; the timeout stays as the file has it.
@@ -226,8 +240,17 @@ pub struct EditedStep {
 impl EditedStep {
     fn new(kind: StepKind, text: &str, raw: bool) -> EditedStep {
         let shown = if kind.escaped() { escape(text) } else { text.to_owned() };
-        let mut step = EditedStep { kind, text: text_field(&shown), args: Vec::new(), raw, output: OUTPUTS[0].to_owned(), timeout_ms: DEFAULT_TIMEOUT_MS };
+        let mut step = EditedStep { kind, text: text_field(&shown), args: Vec::new(), action: String::new(), kept_options: (None, None), raw, output: OUTPUTS[0].to_owned(), timeout_ms: DEFAULT_TIMEOUT_MS };
         step.keep_a_blank_argument();
+        step
+    }
+
+    /// A new step of `kind`; a kiku step starts on the first action.
+    fn blank(kind: StepKind) -> EditedStep {
+        let mut step = EditedStep::new(kind, "", false);
+        if kind == StepKind::Kiku {
+            step.action = KikuAction::ALL[0].name().to_owned();
+        }
         step
     }
 
@@ -235,6 +258,32 @@ impl EditedStep {
         if self.kind == StepKind::Run {
             keep_a_blank(&mut self.args);
         }
+    }
+
+    /// The kiku step's action as the picker's button shows it: its label, or a template as written.
+    pub fn action_label(&self) -> &str {
+        KikuAction::parse(&self.action).map_or(self.action.as_str(), |action| action.label())
+    }
+
+    /// What the step's box asks for while it is empty; none when it has no box (a kiku step whose action
+    /// takes no text).
+    pub fn placeholder(&self) -> Option<&'static str> {
+        if self.kind != StepKind::Kiku {
+            return Some(self.kind.placeholder());
+        }
+        match KikuAction::parse(&self.action) {
+            Ok(KikuAction::OpenSettings) => Some("Tab, e.g. words (empty just opens settings)"),
+            Ok(KikuAction::OpenHistory) => Some("Words to search for (empty opens History)"),
+            _ => None,
+        }
+    }
+
+    fn pick(&mut self, action: KikuAction) {
+        if self.action != action.name() {
+            self.text.clear();
+        }
+        self.action = action.name().to_owned();
+        self.kept_options = (None, None);
     }
 
     /// What a run step does with its output, as the file writes it.
@@ -267,6 +316,13 @@ impl EditedStep {
             }
             StepSpec::AskClaude(text) => EditedStep::new(StepKind::AskClaude, text, false),
             StepSpec::Mode(name) => EditedStep::new(StepKind::Mode, name, false),
+            StepSpec::Kiku { action, tab, search } => {
+                let mut step = EditedStep { action: action.clone(), ..EditedStep::new(StepKind::Kiku, tab.as_ref().or(search.as_ref()).map_or("", String::as_str), false) };
+                if KikuAction::parse(action).is_err() {
+                    step.kept_options = (tab.clone(), search.clone());
+                }
+                step
+            }
         }
     }
 
@@ -293,7 +349,20 @@ impl EditedStep {
             }
             StepKind::AskClaude => StepSpec::AskClaude(text),
             StepKind::Mode => StepSpec::Mode(text.trim().to_owned()),
+            StepKind::Kiku => self.kiku_spec(),
         })
+    }
+}
+
+impl EditedStep {
+    fn kiku_spec(&self) -> StepSpec {
+        let typed = Some(self.text.text.trim().to_owned()).filter(|text| !text.is_empty());
+        let (tab, search) = match KikuAction::parse(&self.action) {
+            Ok(KikuAction::OpenSettings) => (typed, None),
+            Ok(KikuAction::OpenHistory) => (None, typed),
+            _ => self.kept_options.clone(),
+        };
+        StepSpec::Kiku { action: self.action.clone(), tab, search }
     }
 }
 
@@ -389,6 +458,8 @@ pub struct MacroTab {
     editor: Option<Editor>,
     focus: Option<MacroBox>,
     menu: bool,
+    /// The kiku step whose action picker is open.
+    picker: Option<usize>,
     /// What is waiting for a shortcut.
     recording: Option<Recording>,
     /// Kiku's own keys, which a macro's shortcut can't be.
@@ -513,6 +584,10 @@ impl MacroTab {
         self.menu
     }
 
+    pub fn picker(&self) -> Option<usize> {
+        self.picker
+    }
+
     pub fn recording(&self) -> Option<Recording> {
         self.recording
     }
@@ -537,6 +612,7 @@ impl MacroTab {
     /// What a click on `action` does.
     pub fn click(&mut self, action: MacroAction) {
         let menu_was_open = std::mem::take(&mut self.menu);
+        let picker_was = self.picker.take();
         let armed = self.armed.take();
         self.problem = None;
         self.shortcut_refused = false;
@@ -573,6 +649,16 @@ impl MacroTab {
                     step.cycle_output();
                 }
             }),
+            MacroAction::KikuPicker(at) => self.picker = Some(at).filter(|at| picker_was != Some(*at)),
+            MacroAction::PickKiku { step, action } => {
+                // The step's box may go with the old action, so typing mustn't go to it unseen.
+                self.focus = None;
+                self.edit_with(|editor| {
+                    if let Some(step) = editor.steps.get_mut(step) {
+                        step.pick(action);
+                    }
+                });
+            }
         }
     }
 
@@ -644,8 +730,8 @@ impl MacroTab {
 
     fn add_step(&mut self, kind: StepKind) {
         if let Some(editor) = &mut self.editor {
-            editor.steps.push(EditedStep::new(kind, "", false));
-            self.focus = Some(MacroBox::Step(editor.steps.len() - 1));
+            editor.steps.push(EditedStep::blank(kind));
+            self.focus = (kind != StepKind::Kiku).then_some(MacroBox::Step(editor.steps.len() - 1));
         }
     }
 
