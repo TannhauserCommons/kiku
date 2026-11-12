@@ -74,7 +74,7 @@ fn state_folder(name: &str) -> PathBuf {
 }
 
 fn request(model: &str, hotwords: Vec<Hotword>) -> ModelRequest {
-    ModelRequest { model: model.into(), device: Device::Cpu, hotwords }
+    ModelRequest { model: model.into(), device: Device::Cpu, voices: false, hotwords }
 }
 
 /// Connects and returns the error and how long it took.

@@ -113,7 +113,7 @@ fn check_command(args: &[String]) -> Result<(), String> {
     let code = HostCode::parse(&code).map_err(|error| format!("that isn't a host code: {error}"))?;
     println!("checking {} for {model} on the {}", code.address(), if device == Device::Cuda { "GPU" } else { "CPU" });
 
-    let request = ModelRequest { model, device, hotwords: Vec::new() };
+    let request = ModelRequest { model, device, voices: false, hotwords: Vec::new() };
     let started = Instant::now();
     let engine = remote::connect(&code, &request).map_err(|error| format!("the host didn't load it: {error}"))?;
     println!("connected and loaded in {:.1} s", started.elapsed().as_secs_f32());

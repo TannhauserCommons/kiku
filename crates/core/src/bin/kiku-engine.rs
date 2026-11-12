@@ -44,10 +44,10 @@ fn attach_parent_console() {
             return;
         }
         for id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-            if missing(id) {
-                if let Ok(console) = OpenOptions::new().write(true).open("CONOUT$") {
-                    SetStdHandle(id, console.into_raw_handle());
-                }
+            if missing(id)
+                && let Ok(console) = OpenOptions::new().write(true).open("CONOUT$")
+            {
+                SetStdHandle(id, console.into_raw_handle());
             }
         }
     }

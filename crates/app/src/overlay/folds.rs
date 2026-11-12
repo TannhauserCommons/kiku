@@ -89,11 +89,11 @@ mod tests {
 
     fn captions(now: Instant) -> (Captions, usize, usize) {
         let mut captions = Captions::default();
-        let line = Line { id: 1, text: "hello".into(), complete: true };
+        let line = Line { id: 1, text: "hello".into(), complete: true, voice: None };
         let (discord, opera) = (captions.add_app("Discord", None), captions.add_app("Opera", None));
         captions.update_app(discord, 1, std::slice::from_ref(&line), now);
         captions.update_app(opera, 2, &[line], now);
-        captions.update_mic(3, &[Line { id: 1, text: "hi".into(), complete: true }], Some("Discord"));
+        captions.update_mic(3, &[Line { id: 1, text: "hi".into(), complete: true, voice: None }], Some("Discord"));
         (captions, discord, opera)
     }
 
@@ -108,7 +108,7 @@ mod tests {
         assert!(!folds.folded(YOU_SECTION, &captions.sections[YOU_SECTION], TWO_MINUTES, later), "you fold only by hand");
         assert_eq!(folds.next_auto_fold(&captions, TWO_MINUTES, now), Some(now + Duration::from_secs(120)));
 
-        captions.update_app(discord, 1, &[Line { id: 2, text: "back".into(), complete: true }], later);
+        captions.update_app(discord, 1, &[Line { id: 2, text: "back".into(), complete: true, voice: None }], later);
         assert!(!folds.folded(discord, &captions.sections[discord], TWO_MINUTES, later));
     }
 

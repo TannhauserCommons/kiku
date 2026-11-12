@@ -120,7 +120,7 @@ mod tests {
     use crate::{captions::YOU_SECTION, engine::Line};
 
     fn line(id: u64, text: &str) -> Line {
-        Line { id, text: text.into(), complete: true }
+        Line { id, text: text.into(), complete: true, voice: None }
     }
 
     fn texts(lines: &[(usize, &Caption)]) -> Vec<String> {
@@ -145,7 +145,7 @@ mod tests {
     fn only_lines_new_or_revised_after_the_mark_show() {
         let (mut captions, now) = (Captions::default(), Instant::now());
         let app = captions.add_app("App", None);
-        captions.update_app(app, 1, &[line(1, "Old."), Line { id: 2, text: "in prog".into(), complete: false }], now);
+        captions.update_app(app, 1, &[line(1, "Old."), Line { id: 2, text: "in prog".into(), complete: false, voice: None }], now);
         let mark = Mark::now(&captions);
         assert!(newest(&captions, &mark, 4).is_empty());
         captions.update_app(app, 1, &[line(2, "in progress.")], now);

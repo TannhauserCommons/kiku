@@ -40,7 +40,7 @@ impl MoonshineEngine {
 }
 
 impl Engine for MoonshineEngine {
-    fn open_stream(&self) -> Result<Box<dyn EngineStream + '_>> {
+    fn open_stream_with(&self, _voices: bool) -> Result<Box<dyn EngineStream + '_>> {
         let stream = check(unsafe { moonshine_create_stream(self.handle, 0) })?;
         check(unsafe { moonshine_start_stream(self.handle, stream) })?;
         Ok(Box::new(MoonshineStream { engine: self, handle: stream, recent: VecDeque::new(), pushed: 0, carried: None }))
@@ -222,7 +222,7 @@ fn to_line(raw: &RawLine) -> Line {
     } else {
         unsafe { CStr::from_ptr(raw.text) }.to_string_lossy().trim().to_owned()
     };
-    Line { id: raw.id, text, complete: raw.is_complete != 0 }
+    Line { id: raw.id, text, complete: raw.is_complete != 0, voice: None }
 }
 
 /// Moonshine otherwise lets ONNX Runtime start a busy-waiting worker per core.

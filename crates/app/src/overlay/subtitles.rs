@@ -168,13 +168,15 @@ impl Subtitles {
             .map(|&(section, caption)| SubtitleLine {
                 text: &caption.text,
                 speaker: if section == YOU_SECTION { Speaker::You } else { Speaker::App(captions.sections[section].exe_path.as_deref()) },
+                label: caption.label(),
+                voice: caption.voice,
             })
             .collect();
         if self.hint {
-            lines.push(SubtitleLine { text: hint, speaker: Speaker::Kiku });
+            lines.push(SubtitleLine::new(hint, Speaker::Kiku));
         }
         if let Some(badge) = dictating {
-            lines.push(SubtitleLine { text: badge, speaker: Speaker::Kiku });
+            lines.push(SubtitleLine::new(badge, Speaker::Kiku));
         }
         if lines.is_empty() {
             self.show(false);

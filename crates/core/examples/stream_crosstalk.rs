@@ -9,7 +9,7 @@ const CHUNK: usize = SAMPLE_RATE as usize / 10;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let spec = ModelSpec { backend: Backend::MoonshineTinyStreaming, dir: args[1].clone().into(), device: Device::Cpu, vad: None, hotwords: Vec::new() };
+    let spec = ModelSpec { backend: Backend::MoonshineTinyStreaming, dir: args[1].clone().into(), device: Device::Cpu, vad: None, voices: None, hotwords: Vec::new() };
     let (a, b) = (read_wav(&args[2]), read_wav(&args[3]));
 
     let shared = load(&spec).unwrap();
@@ -32,5 +32,5 @@ fn lines_of_second(engine_a: &dyn Engine, engine_b: &dyn Engine, a: &[f32], b: &
 
 fn read_wav(path: &str) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap();
-    bytes[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect()
+    bytes[44..].as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b) as f32 / 32768.0).collect()
 }

@@ -55,6 +55,8 @@ pub struct Palette {
     pub selected: D2D1_COLOR_F,
     /// Behind your lines in an app's section, when they are highlighted.
     pub yours: D2D1_COLOR_F,
+    /// One colour per speaker, for the names before their lines.
+    pub speakers: [D2D1_COLOR_F; SPEAKERS],
     /// Covers what a prompt sits over: darkens on dark themes, frosts on light ones.
     pub shade: D2D1_COLOR_F,
     pub shadow: D2D1_COLOR_F,
@@ -82,9 +84,49 @@ impl Palette {
             text_faint: fade(self.text_faint, text),
             accent: fade(self.accent, text),
             yours: fade(self.yours, text),
+            speakers: self.speakers.map(|colour| fade(colour, text)),
             ..self.clone()
         }
     }
+}
+
+/// How many speakers get a colour of their own; more share them again.
+pub const SPEAKERS: usize = 6;
+
+/// Amber, violet, coral, green, pink, blue, then spares for a theme whose accent sits near one of them.
+const ON_DARK: [u32; 10] = [0xf5c451, 0xc3a6f5, 0xff9e7a, 0x9be37a, 0xf48fb1, 0x8ab4ff, 0xe6e07a, 0xd89cf0, 0x7fe0d0, 0xffb86b];
+/// The same hues, deep enough to read on light surfaces.
+const ON_LIGHT: [u32; 10] = [0x9a6200, 0x6a2bb0, 0xb3261e, 0x1b7a35, 0xa8195a, 0x1f5fbf, 0x7a6a00, 0x8a1fa8, 0x007a7a, 0xb34700];
+/// How far, in RGB with channels from 0 to 1, a speaker's colour keeps from the accent that is "You".
+const ACCENT_DISTANCE: f32 = 0.23;
+
+/// The speakers' colours on a dark or a light surface: the first six hues that keep clear of `accent`.
+pub const fn speaker_colours(on_dark: bool, accent: D2D1_COLOR_F) -> [D2D1_COLOR_F; SPEAKERS] {
+    let rgb = if on_dark { ON_DARK } else { ON_LIGHT };
+    let mut colours = [CLEAR; SPEAKERS];
+    let (mut taken, mut candidate) = (0, 0);
+    while taken < SPEAKERS && candidate < rgb.len() {
+        let colour = hex(rgb[candidate], 1.0);
+        if distance(colour, accent) >= ACCENT_DISTANCE {
+            colours[taken] = colour;
+            taken += 1;
+        }
+        candidate += 1;
+    }
+    colours
+}
+
+const fn distance(a: D2D1_COLOR_F, b: D2D1_COLOR_F) -> f32 {
+    let (r, g, b) = (a.r - b.r, a.g - b.g, a.b - b.b);
+    // Newton's steps, since `sqrt` isn't const: a few from 1 are plenty for a comparison.
+    let squared = r * r + g * g + b * b;
+    let mut root = 1.0;
+    let mut step = 0;
+    while step < 12 {
+        root = (root + squared / root) / 2.0;
+        step += 1;
+    }
+    if squared == 0.0 { 0.0 } else { root }
 }
 
 const fn fade(colour: D2D1_COLOR_F, by: f32) -> D2D1_COLOR_F {
@@ -265,6 +307,7 @@ const fn dark(base: Base) -> Palette {
         divider: white(0.07),
         selected: hex(base.accent, 0.24),
         yours: hex(base.accent, 0.14),
+        speakers: speaker_colours(true, hex(base.accent, 1.0)),
         shade: hex(base.deep, 0.6),
         shadow: black(0.25),
         grip: white(0.22),
@@ -302,6 +345,7 @@ const fn light(base: Base) -> Palette {
         divider: hex(ink, 0.09),
         selected: hex(base.accent, 0.18),
         yours: hex(base.accent, 0.12),
+        speakers: speaker_colours(false, hex(base.accent, 1.0)),
         shade: hex(base.top, 0.72),
         shadow: hex(ink, 0.10),
         grip: hex(ink, 0.25),
@@ -445,4 +489,22 @@ pub const fn white(a: f32) -> D2D1_COLOR_F {
 
 pub const fn black(a: f32) -> D2D1_COLOR_F {
     hex(0x000000, a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kiku_core::theme::Themes;
+
+    #[test]
+    fn no_speaker_has_the_colour_of_the_accent_that_is_you() {
+        let mut custom_accent = Themes::from(Theme::Meadow);
+        custom_accent.edit(|colours| colours.accent = 0x1b7a35);
+        let mut palettes: Vec<Palette> = Theme::ALL.iter().map(|&theme| preset(theme).clone()).collect();
+        palettes.push(custom(custom_accent.custom().unwrap()));
+        for palette in palettes {
+            assert!(palette.speakers.iter().all(|&speaker| distance(speaker, palette.accent) >= ACCENT_DISTANCE));
+            assert!(palette.speakers.iter().all(|speaker| speaker.a == 1.0), "six colours were found");
+        }
+    }
 }

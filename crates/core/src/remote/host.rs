@@ -28,7 +28,7 @@ use crate::{
     catalog,
     engine::{Device, Engine, EngineStream, ModelSpec, Result},
     engine_host::{
-        decode_hotwords, encode_lines, payload_lines, read_frame_up_to, write_frame, HostedEngine, CLOSE, ERROR, FLUSH, HOTWORDS, LINES, LOAD, OK, OPEN, POLL, PUSH,
+        decode_hotwords, encode_lines, opens_with_voices, payload_lines, read_frame_up_to, write_frame, HostedEngine, CLOSE, ERROR, FLUSH, HOTWORDS, LINES, LOAD, OK, OPEN, POLL, PUSH,
     },
     paths,
 };
@@ -312,7 +312,7 @@ fn work(engine: &HostedEngine, requests: mpsc::Receiver<Frame>, replies: mpsc::S
             let Some(id) = payload.get(..8).map(|b| u64::from_le_bytes(b.try_into().unwrap())) else { return };
             let reply = match kind {
                 OPEN if streams.len() >= MAX_STREAMS => Some(Err(format!("a connection may have {MAX_STREAMS} streams open").into())),
-                OPEN => Some(engine.open_stream().map(|opened| {
+                OPEN => Some(engine.open_stream_with(opens_with_voices(&payload)).map(|opened| {
                     streams.insert(id, opened);
                     Vec::new()
                 })),
@@ -369,7 +369,12 @@ fn start(request: &ModelRequest) -> Result<HostedEngine> {
     if !variant.installed() {
         return Err(not_here(&request.model).into());
     }
-    HostedEngine::start(&ModelSpec { hotwords: request.hotwords.clone(), ..model.spec(variant) })
+    // Voices are optional, as on the client: without the speaker model the host still captions.
+    let voices = request.voices.then(catalog::speaker_model).flatten();
+    if request.voices && voices.is_none() {
+        eprintln!("voices asked for, but this host doesn't have the speaker model (or it's damaged): captions without voices");
+    }
+    HostedEngine::start(&ModelSpec { voices, hotwords: request.hotwords.clone(), ..model.spec(variant) })
 }
 
 /// Says which models this host has, for a client that asked for one it doesn't.

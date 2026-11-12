@@ -16,7 +16,7 @@ fn main() {
     let mic = DeviceEnumerator::new().unwrap().get_default_device(&Direction::Capture).unwrap();
     println!("mic: {} | mix format: {:?}", mic.get_friendlyname().unwrap(), mic.get_iaudioclient().unwrap().get_mixformat().unwrap());
 
-    let engine = engine::load(&ModelSpec { backend: Backend::MoonshineTinyStreaming, dir: dir.into(), device: Device::Cpu, vad: None, hotwords: Vec::new() }).unwrap();
+    let engine = engine::load(&ModelSpec { backend: Backend::MoonshineTinyStreaming, dir: dir.into(), device: Device::Cpu, vad: None, voices: None, hotwords: Vec::new() }).unwrap();
     let mut stream = engine.open_stream().unwrap();
     let (sink, chunks) = channel();
     capture::spawn(0, Source::Microphone, sink);

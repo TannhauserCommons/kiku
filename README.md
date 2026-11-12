@@ -14,6 +14,9 @@ If you choose to, the speech model can run on another computer of yours instead.
 
 - **A caption section per app** (Discord, a browser, a game, ...) plus one for your microphone, in a small
   always-on-top panel; quiet apps fold away by themselves.
+- **Who said it:** once an app has more than one voice, its lines are named "Speaker 1", "Speaker 2", ...,
+  each in a colour of its own (on by default; a small speaker model downloads the first time). Your mic stays
+  "You" unless you turn it on for the mic too, when a second voice at your desk shows as "Mic 2".
 - **Captions mode:** the newest lines as subtitles over the screen, in the font, size and colours you pick.
 - **Dictation:** hold Ctrl+Win to type what you say into any app, or press it to start and again to stop;
   optionally keep listening a moment after you let go; end it by saying "that's all Kiku" (your phrases). Paste or undo
@@ -87,6 +90,9 @@ models you pick (from Hugging Face, NVIDIA, Microsoft's ONNX Runtime releases an
 releases) and, if *Check for updates* is on, once a day to read the latest version from this repository's
 releases. Nothing else is sent, unless you choose **Another computer** under **Where models run**: then the
 audio being captioned goes, encrypted, to the computer whose code you pasted, and only there.
+
+Telling speakers apart works from voice prints made from the audio as it is captioned. They stay in memory
+for that app's session only: never saved, logged or sent, and gone when Kiku stops listening to the app.
 
 Text Kiku pastes or copies (dictation, macros) is kept out of Windows clipboard history and the cloud
 clipboard; a selection copied by the app in front for a macro (`{selection}`, `copy = true`) is not.

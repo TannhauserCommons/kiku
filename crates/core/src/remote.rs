@@ -130,9 +130,13 @@ pub(crate) fn fingerprint_of(certificate: &[u8]) -> String {
 pub struct ModelRequest {
     pub model: String,
     pub device: Device,
+    /// Whether lines come back with their speakers (the host needs its own copy of the speaker model).
+    pub voices: bool,
     pub hotwords: Vec<Hotword>,
 }
 
+/// The line of a load request that asks for speakers.
+const VOICES: &str = "voices";
 /// How long a load may take on the host: its helper's own 90 s limit, and the network.
 const LOAD_REPLY_TIMEOUT: Duration = Duration::from_secs(100);
 /// The longest frame the host reads (audio comes in chunks of a fraction of a second).
@@ -150,11 +154,13 @@ pub fn connect(code: &HostCode, request: &ModelRequest) -> Result<Box<dyn Engine
     Ok(Box::new(client::RemoteEngine::start(connection.stream)?))
 }
 
-/// A load request: the model's id, the device and the hotwords, a line each.
+/// A load request: the model's id, the device, the hotwords and, last, `voices` when wanted, a line each.
+/// A hotword's line has a space in it, so a host from before voices skips the line and sends no speakers.
 fn encode_request(request: &ModelRequest) -> Vec<u8> {
     let device = if request.device == Device::Cuda { "cuda" } else { "cpu" };
     let hotwords: String = request.hotwords.iter().map(|word| format!("\n{}", encode_hotword(word))).collect();
-    format!("{}\n{device}{hotwords}", request.model).into_bytes()
+    let voices = if request.voices { "\nvoices" } else { "" };
+    format!("{}\n{device}{hotwords}{voices}", request.model).into_bytes()
 }
 
 /// The host's side of [`encode_request`].
@@ -162,7 +168,8 @@ pub(crate) fn decode_request(payload: &[u8]) -> Result<ModelRequest> {
     let mut parts = payload_lines(payload).into_iter();
     let model = parts.next().ok_or("no model asked for")?;
     let device = if parts.next().as_deref() == Some("cuda") { Device::Cuda } else { Device::Cpu };
-    Ok(ModelRequest { model, device, hotwords: decode_hotwords(parts) })
+    let rest: Vec<String> = parts.collect();
+    Ok(ModelRequest { model, device, voices: rest.last().is_some_and(|line| line == VOICES), hotwords: decode_hotwords(rest) })
 }
 
 /// Audio on the wire: 16-bit little-endian samples.
@@ -327,9 +334,10 @@ mod tests {
 
     #[test]
     fn requests_and_audio_survive_the_network() {
-        let request = ModelRequest { model: "parakeet-unified".into(), device: Device::Cuda, hotwords: vec![Hotword { text: "Lull".into(), boost: 2.5 }] };
+        let request = ModelRequest { model: "parakeet-unified".into(), device: Device::Cuda, voices: true, hotwords: vec![Hotword { text: "Lull".into(), boost: 2.5 }] };
         let read = decode_request(&encode_request(&request)).unwrap();
-        assert_eq!((read.model, read.device, read.hotwords), (request.model, request.device, request.hotwords));
+        assert_eq!((&read.model, read.device, read.voices, &read.hotwords), (&request.model, request.device, true, &request.hotwords));
+        assert!(!decode_request(&encode_request(&ModelRequest { voices: false, ..request })).unwrap().voices);
         // 16-bit audio comes back as it went; louder samples are clipped, not wrapped.
         let heard: Vec<f32> = [i16::MIN, -1, 0, 1, 12345, i16::MAX].iter().map(|&v| v as f32 / 32768.0).collect();
         let bytes: Vec<u8> = encode_pcm(&heard).collect();

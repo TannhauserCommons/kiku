@@ -31,6 +31,9 @@ const PROBE_CLIP: &[u8] = include_bytes!("../assets/probe.wav");
 /// Windows' exit code for a process whose DLLs couldn't be found.
 const DLL_NOT_FOUND: u32 = 0xC000_0135;
 
+/// The start of the load request's line naming the speaker model.
+const VOICES_LINE: &str = "voices ";
+
 // Requests.
 pub(crate) const LOAD: u8 = 1;
 pub(crate) const OPEN: u8 = 2;
@@ -106,9 +109,9 @@ impl HostedEngine {
 }
 
 impl Engine for HostedEngine {
-    fn open_stream(&self) -> Result<Box<dyn EngineStream + '_>> {
+    fn open_stream_with(&self, voices: bool) -> Result<Box<dyn EngineStream + '_>> {
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
-        self.request(OPEN, &id.to_le_bytes())?;
+        self.request(OPEN, &encode_open(id, voices))?;
         Ok(Box::new(HostedStream { engine: self, id }))
     }
 
@@ -180,7 +183,7 @@ pub fn serve() {
                 engine = Some(Box::leak(loaded));
                 Ok(Vec::new())
             })),
-            (OPEN, Some(engine)) => Some(engine.open_stream().map(|stream| {
+            (OPEN, Some(engine)) => Some(engine.open_stream_with(opens_with_voices(&payload)).map(|stream| {
                 streams.insert(id, stream);
                 Vec::new()
             })),
@@ -284,7 +287,7 @@ pub fn serve_probe(args: &[String]) -> std::process::ExitCode {
     let heard = (|| -> Result<String> {
         let backend = args.first().and_then(|name| Backend::from_name(name)).ok_or("unknown backend")?;
         let dir = args.get(1).ok_or("no model folder")?.into();
-        let spec = ModelSpec { backend, dir, device: Device::Cpu, vad: args.get(2).map(Into::into), hotwords: Vec::new() };
+        let spec = ModelSpec { backend, dir, device: Device::Cpu, vad: args.get(2).map(Into::into), voices: None, hotwords: Vec::new() };
         hear(load_here(&spec)?.as_ref(), &probe_clip())
     })();
     match heard {
@@ -349,12 +352,15 @@ pub(crate) fn read_frame_up_to(reader: &mut impl Read, limit: usize) -> io::Resu
     Ok((header[0], payload))
 }
 
-/// `backend`, `device`, the speech detector (or nothing), the folder and the hotwords, a line each.
+/// `backend`, `device`, the speech detector (or nothing), the folder, the hotwords and, last and only with voices
+/// on, `voices <speaker model>`, a line each. A reader from before voices skips that line as it skips a hotword
+/// it can't read, and without voices the bytes are what they were.
 fn encode_spec(spec: &ModelSpec) -> Vec<u8> {
     let device = if spec.device == Device::Cuda { "cuda" } else { "cpu" };
     let vad = spec.vad.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
     let hotwords: String = spec.hotwords.iter().map(|word| format!("\n{}", encode_hotword(word))).collect();
-    format!("{}\n{device}\n{vad}\n{}{hotwords}", spec.backend.name(), spec.dir.display()).into_bytes()
+    let voices = spec.voices.as_ref().map(|path| format!("\n{VOICES_LINE}{}", path.display())).unwrap_or_default();
+    format!("{}\n{device}\n{vad}\n{}{hotwords}{voices}", spec.backend.name(), spec.dir.display()).into_bytes()
 }
 
 fn decode_spec(payload: &[u8]) -> Result<ModelSpec> {
@@ -363,7 +369,22 @@ fn decode_spec(payload: &[u8]) -> Result<ModelSpec> {
     let device = if parts.next().as_deref() == Some("cuda") { Device::Cuda } else { Device::Cpu };
     let vad = parts.next().filter(|path| !path.is_empty()).map(Into::into);
     let dir = parts.next().ok_or("no model folder")?.into();
-    Ok(ModelSpec { backend, device, vad, dir, hotwords: decode_hotwords(parts) })
+    let rest: Vec<String> = parts.collect();
+    let voices = rest.iter().find_map(|line| line.strip_prefix(VOICES_LINE)).map(Into::into);
+    Ok(ModelSpec { backend, device, vad, voices, dir, hotwords: decode_hotwords(rest) })
+}
+
+/// An OPEN request: the stream's id and, only for a stream that tells voices apart, a byte of 1 after it. A reader
+/// from before voices stops after the id, and without voices the bytes are what they were.
+pub(crate) fn encode_open(id: u64, voices: bool) -> Vec<u8> {
+    let mut payload = id.to_le_bytes().to_vec();
+    payload.extend(voices.then_some(1));
+    payload
+}
+
+/// Whether an OPEN request asks for a stream that tells voices apart.
+pub(crate) fn opens_with_voices(payload: &[u8]) -> bool {
+    payload.get(8) == Some(&1)
 }
 
 /// A hotword as one line: its boost, a space and its text.
@@ -382,7 +403,9 @@ pub(crate) fn payload_lines(payload: &[u8]) -> Vec<String> {
     if text.is_empty() { Vec::new() } else { text.split('\n').map(str::to_owned).collect() }
 }
 
-/// A count, then each line's id, finished flag, text length and text.
+/// A count, then each line's id, finished flag, text length and text; and, when any line has a speaker,
+/// each line's after them (0 for none, else the voice plus one). A reader that stops after the lines
+/// never sees the voices, so a host or a client without them still works.
 pub(crate) fn encode_lines(lines: &[Line]) -> Vec<u8> {
     let mut bytes = (lines.len() as u32).to_le_bytes().to_vec();
     for line in lines {
@@ -391,26 +414,34 @@ pub(crate) fn encode_lines(lines: &[Line]) -> Vec<u8> {
         bytes.extend((line.text.len() as u32).to_le_bytes());
         bytes.extend(line.text.as_bytes());
     }
+    if lines.iter().any(|line| line.voice.is_some()) {
+        bytes.extend(lines.iter().flat_map(|line| line.voice.map_or(0, |voice| voice + 1).to_le_bytes()));
+    }
     bytes
 }
 
 pub(crate) fn decode_lines(bytes: &[u8]) -> Result<Vec<Line>> {
-    let mut reader = bytes;
-    let mut take = |n: usize| -> Result<&[u8]> {
+    fn take<'a>(reader: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
         let (head, rest) = reader.split_at_checked(n).ok_or("garbled reply from the model's helper")?;
-        reader = rest;
+        *reader = rest;
         Ok(head)
-    };
-    let count = u32::from_le_bytes(take(4)?.try_into()?);
-    (0..count)
-        .map(|_| {
-            let id = u64::from_le_bytes(take(8)?.try_into()?);
-            let complete = take(1)?[0] != 0;
-            let length = u32::from_le_bytes(take(4)?.try_into()?) as usize;
-            let text = String::from_utf8_lossy(take(length)?).into_owned();
-            Ok(Line { id, text, complete })
-        })
-        .collect()
+    }
+    let mut reader = bytes;
+    let count = u32::from_le_bytes(take(&mut reader, 4)?.try_into()?);
+    let mut lines = Vec::new();
+    for _ in 0..count {
+        let id = u64::from_le_bytes(take(&mut reader, 8)?.try_into()?);
+        let complete = take(&mut reader, 1)?[0] != 0;
+        let length = u32::from_le_bytes(take(&mut reader, 4)?.try_into()?) as usize;
+        let text = String::from_utf8_lossy(take(&mut reader, length)?).into_owned();
+        lines.push(Line { id, text, complete, voice: None });
+    }
+    if !reader.is_empty() {
+        for line in &mut lines {
+            line.voice = u32::from_le_bytes(take(&mut reader, 4)?.try_into()?).checked_sub(1);
+        }
+    }
+    Ok(lines)
 }
 
 #[cfg(test)]
@@ -419,18 +450,50 @@ mod tests {
 
     #[test]
     fn lines_and_specs_survive_the_pipe() {
-        let lines = vec![Line { id: 7, text: "Bonjour, ça va ?".into(), complete: true }, Line { id: 8, text: String::new(), complete: false }];
+        let lines = vec![Line { id: 7, text: "Bonjour, ça va ?".into(), complete: true, voice: None }, Line { id: 8, text: String::new(), complete: false, voice: None }];
         assert_eq!(decode_lines(&encode_lines(&lines)).unwrap(), lines);
-        let mut spec = ModelSpec { backend: Backend::Phrases(crate::engine::PhraseModel::NemoTransducer), dir: r"C:\models\sherpa\x-fp16".into(), device: Device::Cuda, vad: Some(r"C:\vad.onnx".into()), hotwords: Vec::new() };
+        let said = vec![Line { voice: Some(0), ..lines[0].clone() }, Line { voice: None, ..lines[1].clone() }, Line { voice: Some(3), ..lines[0].clone() }];
+        assert_eq!(decode_lines(&encode_lines(&said)).unwrap(), said);
+        let unsaid: Vec<Line> = said.iter().map(|line| Line { voice: None, ..line.clone() }).collect();
+        assert_eq!(encode_lines(&said).len(), encode_lines(&unsaid).len() + 4 * said.len(), "a voice per line after the lines, and none without speakers");
+        let mut spec = ModelSpec { backend: Backend::Phrases(crate::engine::PhraseModel::NemoTransducer), dir: r"C:\models\sherpa\x-fp16".into(), device: Device::Cuda, vad: Some(r"C:\vad.onnx".into()), voices: None, hotwords: Vec::new() };
         let word = |text: &str, boost| Hotword { text: text.into(), boost };
         for hotwords in [vec![], vec![word("Kiku", 1.5), word("Tannhauser Commons", 2.25)]] {
             spec.hotwords = hotwords;
+            spec.voices = spec.voices.is_none().then(|| r"C:\speakers.onnx".into());
             let read = decode_spec(&encode_spec(&spec)).unwrap();
-            assert_eq!((read.backend, read.device, &read.dir, &read.vad, &read.hotwords), (spec.backend, spec.device, &spec.dir, &spec.vad, &spec.hotwords));
+            assert_eq!((read.backend, read.device, &read.dir, &read.vad, &read.voices, &read.hotwords), (spec.backend, spec.device, &spec.dir, &spec.vad, &spec.voices, &spec.hotwords));
         }
+        assert_eq!(encode_open(5, false), 5u64.to_le_bytes(), "a stream without voices opens as it always did");
+        assert!(opens_with_voices(&encode_open(5, true)) && !opens_with_voices(&encode_open(5, false)));
         let mut framed = Vec::new();
         write_frame(&mut framed, POLL, b"abc").unwrap();
         assert_eq!(read_frame(&mut framed.as_slice()).unwrap(), (POLL, b"abc".to_vec()));
+    }
+
+    /// With voices on, lines come through the helper's pipe with their speaker (the test clip has one voice), and
+    /// a stream opened without voices on the same engine gives the same words and no speaker.
+    /// Needs Parakeet Unified and the speaker model installed (`KIKU_MODELS_DIR` can point at them) and the
+    /// helper built (`cargo build -p kiku-core --bin kiku-engine`).
+    #[test]
+    #[ignore]
+    fn voices_cross_the_pipe() {
+        let model = crate::catalog::by_id_or_default(crate::catalog::DEFAULT_ID);
+        let variant = model.variants.iter().find(|variant| variant.installed()).expect("Parakeet Unified is installed");
+        let voices = crate::catalog::speaker_model().expect("the speaker model is installed");
+        let engine = crate::engine::load(&ModelSpec { voices: Some(voices), ..model.spec(variant) }).unwrap();
+        let said = |voices| {
+            let mut stream = engine.open_stream_with(voices).unwrap();
+            for chunk in probe_clip().chunks(SAMPLE_RATE as usize / 10) {
+                stream.push(chunk).unwrap();
+            }
+            stream.flush().unwrap()
+        };
+        let (with, without) = (said(true), said(false));
+        assert!(!with.is_empty() && with.iter().all(|line| line.voice == Some(0)), "{with:?}");
+        assert!(without.iter().all(|line| line.voice.is_none()), "{without:?}");
+        let words = |lines: &[Line]| lines.iter().map(|line| line.text.clone()).collect::<Vec<_>>().join(" ");
+        assert_eq!(words(&with), words(&without));
     }
 
     /// A word's strength changed on a loaded model, as Settings' sliders do, applies from the next phrase:

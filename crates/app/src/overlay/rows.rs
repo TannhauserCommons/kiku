@@ -166,7 +166,7 @@ mod tests {
     fn section_rows_follow_new_and_revised_lines() {
         let (mut captions, now) = (Captions::default(), Instant::now());
         let app = captions.add_app("App", None);
-        let line = |id, complete| Line { id, text: format!("line {id}"), complete };
+        let line = |id, complete| Line { id, text: format!("line {id}"), complete, voice: None };
         captions.update_app(app, 1, &[line(1, true), line(2, false), line(3, true)], now);
         let mut section = SectionRows::default();
         section.sync(&captions.sections[app], |_| 10.0);

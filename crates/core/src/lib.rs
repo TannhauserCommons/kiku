@@ -20,10 +20,12 @@ pub mod paths;
 pub mod recording;
 pub mod remote;
 pub mod settings;
-pub(crate) mod sherpa;
+// Public for the voices benchmark (`examples/voices_bench.rs`), not as a stable API.
+pub mod sherpa;
 pub mod status;
 pub mod subtitles;
 pub mod theme;
 pub mod transcripts;
 pub mod update;
+pub mod voices;
 pub mod words;

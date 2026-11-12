@@ -24,7 +24,7 @@ use windows::{
                 DWriteCreateFactory, IDWriteFactory, IDWriteInlineObject, IDWriteTextFormat, IDWriteTextLayout, IDWriteTextLayout1,
                 DWRITE_FACTORY_TYPE_SHARED, DWRITE_TEXT_ALIGNMENT_CENTER,
                 DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
-                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_TRIMMING,
                 DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
             },
@@ -68,7 +68,7 @@ use super::{
 };
 use kiku_core::{
     dictation::DictationKey,
-    captions::{Caption, Captions, Section, YOU, YOU_SECTION},
+    captions::{Caption, Captions, Section, MIC, YOU, YOU_SECTION},
     catalog::{self, Choice, Model, GPU_PACK},
     controls::{Blocked, Input, ModelState, THRESHOLD_MAX_DB, THRESHOLD_MIN_DB},
     download::{self, Downloads, Progress, State, Target as Download},
@@ -169,6 +169,11 @@ pub struct Panel<'a> {
     pub save_mic_only: bool,
     pub keep_days: u32,
     pub check_updates: bool,
+    /// Whether apps' voices (and the mic's) are told apart.
+    pub voices_apps: bool,
+    pub voices_mic: bool,
+    /// The speaker model is downloaded.
+    pub speaker_model: bool,
     /// Minutes an app is quiet before it folds by itself; 0 never.
     pub auto_fold: u32,
     /// Apps not captured, which the panel leaves out.
@@ -308,6 +313,8 @@ struct LayoutKey {
     width: u32,
     single_line: bool,
     text: String,
+    /// The brush that colours the label's name, if there is one.
+    label_brush: usize,
 }
 
 /// Text layouts used by the last frame and this one, so text that hasn't changed isn't laid out again.
@@ -366,7 +373,9 @@ pub struct Renderer {
     /// One brush, recolored per draw call.
     brush: ID2D1SolidColorBrush,
     /// Colors the "You:" prefix inside a caption.
+    /// "You" in your lines' names: the accent. The speakers' names use `voice_brushes`.
     speaker_brush: ID2D1SolidColorBrush,
+    voice_brushes: Vec<ID2D1SolidColorBrush>,
     fonts: Fonts,
     /// The colours of the frame being drawn, worked out when the themes change.
     palette: Rc<Palette>,
@@ -408,6 +417,7 @@ impl Renderer {
         let palette = Rc::new(design::preset(themes.chosen()).clone());
         let brush = unsafe { target.CreateSolidColorBrush(&palette.text, None)? };
         let speaker_brush = unsafe { target.CreateSolidColorBrush(&palette.accent, None)? };
+        let voice_brushes = palette.speakers.iter().map(|colour| unsafe { target.CreateSolidColorBrush(colour, None) }).collect::<windows::core::Result<_>>()?;
         let format = |family, size, weight| text_format(&dwrite, family, size, weight, DWRITE_FONT_STYLE_NORMAL);
         let (ui, display) = ui_families(&dwrite)?;
         let fonts = Fonts {
@@ -427,6 +437,7 @@ impl Renderer {
             target,
             brush,
             speaker_brush,
+            voice_brushes,
             fonts,
             themed: palette.clone(),
             see_through: false,
@@ -467,7 +478,25 @@ impl Renderer {
             (100, 100) => self.themed.clone(),
             _ => Rc::new(self.themed.see_through(window as f32 / 100.0, text as f32 / 100.0)),
         };
-        unsafe { self.speaker_brush.SetColor(&self.palette.accent) };
+    }
+
+    /// Names are drawn in these colours: "You" in `accent`, the speakers in `speakers`. A scene is replayed after
+    /// the frame is laid out, so this is called after the frame's own palette is undone, with that palette's colours.
+    fn set_label_colours(&self, accent: D2D1_COLOR_F, speakers: [D2D1_COLOR_F; SPEAKERS]) {
+        unsafe { self.speaker_brush.SetColor(&accent) };
+        for (brush, colour) in self.voice_brushes.iter().zip(&speakers) {
+            unsafe { brush.SetColor(colour) };
+        }
+    }
+
+    /// The brush of a line's name: the accent for "You", else the speaker's own colour. The mic's voices take
+    /// colours from the other end, so "Mic 2" and an app's "Speaker 2" never share one.
+    fn label_brush(&self, label: &str, voice: Option<u32>) -> &ID2D1SolidColorBrush {
+        match voice {
+            Some(voice) if label.starts_with(MIC) => &self.voice_brushes[SPEAKERS - 1 - voice as usize % SPEAKERS],
+            Some(voice) if label != YOU => &self.voice_brushes[voice as usize % SPEAKERS],
+            _ => &self.speaker_brush,
+        }
     }
 
     /// The Custom theme's palette, worked out again only when its colours change.
@@ -498,8 +527,10 @@ impl Renderer {
         }
         let frame = self.render_on(surface, size, HANDLE_STRIP, panel.dpi, &panel.themes, |renderer| {
             renderer.see_through(see_through.0, see_through.1);
+            let shown = renderer.palette.clone();
             let drawn = renderer.draw_panel(panel, &mut regions);
             renderer.see_through(100, 100);
+            renderer.set_label_colours(shown.accent, shown.speakers);
             drawn
         })?;
         Ok((frame, regions))
@@ -1006,7 +1037,7 @@ impl Renderer {
     /// section shows until none on screen is an estimate. Returns how much each section holds and shows.
     fn measure_sections(&mut self, panel: &Panel, sections: &[(usize, &Section)], text_width: f32, available: f32) -> Result<Vec<Extent>> {
         let font_size = unsafe { self.fonts.caption.GetFontSize() };
-        let shown_len = |caption: &Caption| caption.text.len() + caption.speaker.map_or(0, |speaker| speaker.len() + 2);
+        let shown_len = |caption: &Caption| caption.display_len();
         let estimate = |caption: &Caption| estimated_height(shown_len(caption), font_size, text_width) + ROW_GAP;
         for &(index, section) in sections {
             if self.section_rows.len() <= index {
@@ -1194,10 +1225,10 @@ impl Renderer {
                     target.0 = clipped(target.0, area);
                 }
             }
-            if caption.speaker.is_some() {
-                // Color just the "You:" prefix, so speaker and finished/unfinished stay separate signals.
-                let prefix = DWRITE_TEXT_RANGE { startPosition: 0, length: (YOU.len() + 1) as u32 };
-                unsafe { layout.SetDrawingEffect(&self.speaker_brush, prefix)? };
+            if let Some(label) = caption.label() {
+                // Color just the name and its colon, so speaker and finished/unfinished stay separate signals.
+                let prefix = DWRITE_TEXT_RANGE { startPosition: 0, length: caption.label_len() as u32 };
+                unsafe { layout.SetDrawingEffect(self.label_brush(label, caption.voice), prefix)? };
             }
             self.draw_layout(&layout, area.left, y, caption_color(caption, &self.palette))?;
         }
@@ -1524,9 +1555,29 @@ impl Renderer {
         self.draw_hint(&hint, content, y)
     }
 
+    /// Whether apps' speakers, and your mic's, are told apart, with the speaker model's download while it isn't here.
+    /// Returns the y below.
+    fn draw_speaker_settings(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
+        let y = self.draw_heading("Speakers", content, y)?;
+        let model = catalog::component(catalog::SPEAKERS);
+        let target = Download::Component(model);
+        let y = self.draw_card(content, y, |renderer, inner, mut y| {
+            y = renderer.draw_toggle_row("Tell speakers apart in apps", panel.voices_apps, Action::SetVoices(false, !panel.voices_apps), inner, y, panel, regions)?;
+            y = renderer.draw_toggle_row("Tell speakers apart at your mic", panel.voices_mic, Action::SetVoices(true, !panel.voices_mic), inner, y, panel, regions)?;
+            let progress = panel.downloads.progress(target);
+            if (panel.voices_apps || panel.voices_mic) && (progress.is_some() || !panel.speaker_model) {
+                let detail = progress.map(|p| progress_text(&p)).unwrap_or_else(|| format!("{}, needed to tell speakers apart", megabytes(model.size())));
+                y = renderer.draw_two_line_row("Speaker model", &detail, &download_buttons(target, false, panel), inner, y, panel, regions)?;
+            }
+            Ok(y)
+        })?;
+        self.draw_hint("Lines are named \"Speaker 1\", \"Speaker 2\" once an app has more than one voice. Your mic stays \"You\" unless you turn it on.", content, y)
+    }
+
     /// How the panel folds apps, then blocking: what the block button does, and the blocked apps. Returns the y below.
     fn draw_app_settings(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
-        let mut y = self.draw_heading("Folding", content, y)?;
+        let mut y = self.draw_speaker_settings(panel, content, y, regions)?;
+        y = self.draw_heading("Folding", content, y + SECTION_GAP)?;
         // "Never" last, after the minutes.
         let minutes: Vec<u32> = AUTO_FOLD_MINUTES.iter().copied().filter(|&m| m != 0).chain([0]).collect();
         let labels: Vec<String> = minutes.iter().map(|&m| if m == 0 { "Never".into() } else { format!("{m} min") }).collect();
@@ -2291,11 +2342,28 @@ impl Renderer {
     /// Lays out `text`, or reuses the layout of the same text, format and width from the last frame.
     fn cached_layout(&self, format: &IDWriteTextFormat, text: &str, max_width: f32, single_line: bool) -> Result<IDWriteTextLayout> {
         let max_width = max_width.max(1.0);
-        let key = LayoutKey { format: format.as_raw() as usize, width: max_width.to_bits(), single_line, text: text.to_owned() };
+        let key = LayoutKey { format: format.as_raw() as usize, width: max_width.to_bits(), single_line, text: text.to_owned(), label_brush: 0 };
         if let Some(layout) = self.layouts.borrow_mut().get(&key) {
             return Ok(layout);
         }
         let layout = self.new_layout(format, text, max_width, single_line)?;
+        self.layouts.borrow_mut().current.insert(key, layout.clone());
+        Ok(layout)
+    }
+
+    /// Like [`Self::layout`], with the first `prefix` bold and drawn with `brush`; a layout of its own, so the
+    /// same text can also be drawn plain (a halo) from the other.
+    fn named_layout(&self, format: &IDWriteTextFormat, text: &str, max_width: f32, prefix: DWRITE_TEXT_RANGE, brush: &ID2D1SolidColorBrush) -> Result<IDWriteTextLayout> {
+        let max_width = max_width.max(1.0);
+        let key = LayoutKey { format: format.as_raw() as usize, width: max_width.to_bits(), single_line: false, text: text.to_owned(), label_brush: brush.as_raw() as usize };
+        if let Some(layout) = self.layouts.borrow_mut().get(&key) {
+            return Ok(layout);
+        }
+        let layout = self.new_layout(format, text, max_width, false)?;
+        unsafe {
+            layout.SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, prefix)?;
+            layout.SetDrawingEffect(brush, prefix)?;
+        }
         self.layouts.borrow_mut().current.insert(key, layout.clone());
         Ok(layout)
     }
@@ -2717,6 +2785,8 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::NewHostCode => "Make a new code; the old one stops working".into(),
         Action::DictationOnly(false) => "Caption apps and your mic, and dictate while the key is held".into(),
         Action::DictationOnly(true) => "Only dictate: no captions, and the mic heard only while the key is held".into(),
+        Action::SetVoices(false, on) => if on { "Name each voice in apps: Speaker 1, Speaker 2" } else { "Don't tell voices apart in apps" }.into(),
+        Action::SetVoices(true, on) => if on { "Name each voice at your mic: You, Mic 2" } else { "Your mic is always \"You\"" }.into(),
         Action::CheckUpdatesNow => "Look for a newer Kiku now".into(),
         Action::CheckUpdates(true) => "Look once a day whether a newer Kiku is out".into(),
         Action::CheckUpdates(false) => "Never look for a newer Kiku".into(),

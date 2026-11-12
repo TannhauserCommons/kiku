@@ -159,6 +159,11 @@ pub fn runnable(choice: Choice) -> bool {
     [choice, choice.on_cpu()].iter().any(|choice| Target::Model(choice.model, choice.variant()).complete())
 }
 
+/// The speaker model's download, unless it is here and whole.
+pub fn speaker_model_to_fetch() -> Option<Target> {
+    catalog::speaker_model().is_none().then(|| Target::Component(catalog::component(catalog::SPEAKERS)))
+}
+
 /// What runs when the model picked can't: Parakeet Unified on the CPU, else any model installed.
 pub fn fallback() -> Option<Choice> {
     let default = catalog::by_id_or_default(catalog::DEFAULT_ID);
@@ -196,6 +201,14 @@ impl Downloads {
                 }
             }
         });
+    }
+
+    /// Queues the speaker model unless it is here and whole. No model needs it to count as installed: captions
+    /// run without speakers until it arrives, so this is for whoever turned speakers on.
+    pub fn fetch_speaker_model(&self) {
+        if let Some(target) = speaker_model_to_fetch() {
+            self.download(target);
+        }
     }
 
     pub fn pause(&self, target: Target) {

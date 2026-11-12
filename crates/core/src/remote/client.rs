@@ -19,7 +19,7 @@ use rustls::{ClientConnection, StreamOwned};
 use super::frames::{Frame, FrameReader, HOTWORDS_ID, LOST_AFTER, PING, PING_AFTER, TICK, WRITE_TIMEOUT};
 use crate::{
     engine::{Engine, EngineStream, Hotword, Line, Result},
-    engine_host::{decode_lines, encode_hotword, write_frame, CLOSE, ERROR, FLUSH, HOTWORDS, OPEN, POLL, PUSH},
+    engine_host::{decode_lines, encode_hotword, encode_open, write_frame, CLOSE, ERROR, FLUSH, HOTWORDS, OPEN, POLL, PUSH},
 };
 
 /// Audio and requests waiting to be written; a host this far behind is as good as lost.
@@ -201,12 +201,12 @@ fn run_io(mut stream: Tls, queue: &mpsc::Receiver<Frame>, shared: &Shared) -> io
 }
 
 impl Engine for RemoteEngine {
-    fn open_stream(&self) -> Result<Box<dyn EngineStream + '_>> {
+    fn open_stream_with(&self, voices: bool) -> Result<Box<dyn EngineStream + '_>> {
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
         self.shared.lock().insert(id, StreamState::default());
         let stream = RemoteStream { engine: self, id };
         // A failure drops `stream`, which forgets the id.
-        self.request(id, OPEN, id.to_le_bytes().to_vec())?;
+        self.request(id, OPEN, encode_open(id, voices))?;
         Ok(Box::new(stream))
     }
 
@@ -288,7 +288,7 @@ mod tests {
     fn poll_hands_out_lines_before_a_pending_error() {
         let (outgoing, _queue) = mpsc::channel();
         let engine = RemoteEngine { shared: Arc::default(), outgoing, next_stream: AtomicU64::new(1), hotwords: Mutex::new(()) };
-        let line = Line { id: 1, text: "hello".into(), complete: true };
+        let line = Line { id: 1, text: "hello".into(), complete: true, voice: None };
         let state = StreamState { lines: vec![line], error: Some("boom".into()), waiting: VecDeque::from([POLL]), ..Default::default() };
         engine.shared.lock().insert(0, state);
         let mut stream = RemoteStream { engine: &engine, id: 0 };

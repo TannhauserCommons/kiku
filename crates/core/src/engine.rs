@@ -25,8 +25,14 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// A loaded speech-to-text model that can serve several live audio streams.
 pub trait Engine: Send + Sync {
-    /// Opens an independent stream, e.g. one per captured app.
-    fn open_stream(&self) -> Result<Box<dyn EngineStream + '_>>;
+    /// Opens an independent stream, e.g. one per captured app, telling voices apart if the model can.
+    fn open_stream(&self) -> Result<Box<dyn EngineStream + '_>> {
+        self.open_stream_with(true)
+    }
+
+    /// As [`open_stream`](Self::open_stream), but `voices` says whether the stream tells voices apart, which
+    /// needs a model loaded with the speaker model ([`ModelSpec::voices`]); one without them costs nothing extra.
+    fn open_stream_with(&self, voices: bool) -> Result<Box<dyn EngineStream + '_>>;
 
     /// The separate process running this engine, if any, so its CPU and GPU use can be counted.
     fn helper_process(&self) -> Option<u32> {
@@ -65,6 +71,8 @@ pub struct Line {
     pub id: u64,
     pub text: String,
     pub complete: bool,
+    /// The speaker who said it, a label per stream (0, 1, ...), when voices are told apart.
+    pub voice: Option<u32>,
 }
 
 /// Which backend a model directory is for.
@@ -179,6 +187,8 @@ pub struct ModelSpec {
     pub device: Device,
     /// The speech detector, for models that transcribe whole phrases.
     pub vad: Option<PathBuf>,
+    /// The speaker model, when voices are on: phrase models then give each line its speaker. Others ignore it.
+    pub voices: Option<PathBuf>,
     /// Words to listen for, e.g. names the model would otherwise mishear. NeMo transducers decode
     /// with beam search when there are any; other models ignore them.
     pub hotwords: Vec<Hotword>,
@@ -197,7 +207,7 @@ pub struct Hotword {
 ///
 /// ```no_run
 /// use kiku_core::engine::{load, Backend, Device, ModelSpec};
-/// let spec = ModelSpec { backend: Backend::MoonshineTinyStreaming, dir: "models/en/tiny-streaming-en".into(), device: Device::Cpu, vad: None, hotwords: Vec::new() };
+/// let spec = ModelSpec { backend: Backend::MoonshineTinyStreaming, dir: "models/en/tiny-streaming-en".into(), device: Device::Cpu, vad: None, voices: None, hotwords: Vec::new() };
 /// let engine = load(&spec)?;
 /// let mut stream = engine.open_stream()?;
 /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())

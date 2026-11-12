@@ -233,6 +233,8 @@ pub enum Action {
     CheckUpdates(bool),
     /// Checks for a newer version now.
     CheckUpdatesNow,
+    /// Tell voices apart at the mic (true) or in apps (false), or stop.
+    SetVoices(bool, bool),
     /// Only dictation (true), or captions and dictation.
     DictationOnly(bool),
     ShowLive,

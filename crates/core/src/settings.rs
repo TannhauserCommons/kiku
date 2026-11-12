@@ -69,6 +69,10 @@ pub struct Settings {
     pub locked_opacity: Opacity,
     /// No app is captioned, and the mic is heard only while dictating.
     pub dictation_only: bool,
+    /// Tell voices apart in apps' audio: their lines get a speaker (`voices.apps`, default on).
+    pub voices_apps: bool,
+    /// Tell voices apart at your mic, which is "You" otherwise (`voices.mic`, default off).
+    pub voices_mic: bool,
     /// Where word rules and transforms apply.
     pub words: WordSettings,
     /// Where the model runs: this PC, or the host in `engine_host`.
@@ -172,6 +176,8 @@ impl Default for Settings {
             opacity: Opacity::default(),
             locked_opacity: Opacity::default(),
             dictation_only: false,
+            voices_apps: true,
+            voices_mic: false,
             words: WordSettings::default(),
             engine_where: EngineWhere::ThisPc,
             engine_host: String::new(),
@@ -224,6 +230,8 @@ impl Settings {
                 "pinned" if !value.is_empty() => settings.pinned.push(value.to_owned()),
                 "check_updates" => settings.check_updates = value != "off",
                 "dictation_only" => settings.dictation_only = value == "on",
+                "voices.apps" => settings.voices_apps = value != "off",
+                "voices.mic" => settings.voices_mic = value == "on",
                 "engine.where" => settings.engine_where = if value == "host" { EngineWhere::Host } else { EngineWhere::ThisPc },
                 "engine.host" => settings.engine_host = value.to_owned(),
                 "host.on" => settings.host_on = value == "true",
@@ -256,7 +264,7 @@ impl Settings {
         let blocked: String = self.blocked.iter().map(|name| format!("blocked = {name}\n")).collect();
         let pinned: String = self.pinned.iter().map(|name| format!("pinned = {name}\n")).collect();
         format!(
-            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\nengine.where = {}\nengine.host = {}\nhost.on = {}\nmacros.wake = {}\nmacros.run = {}\nmacros.run_anywhere = {}\nmacros.phrases = {}\n{}{blocked}{pinned}{}{}{}{}",
+            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\nvoices.apps = {}\nvoices.mic = {}\nengine.where = {}\nengine.host = {}\nhost.on = {}\nmacros.wake = {}\nmacros.run = {}\nmacros.run_anywhere = {}\nmacros.phrases = {}\n{}{blocked}{pinned}{}{}{}{}",
             self.mic_threshold_db,
             self.computer_threshold_db,
             self.model,
@@ -273,6 +281,8 @@ impl Settings {
             self.locked_opacity.window,
             self.locked_opacity.text,
             if self.dictation_only { "on" } else { "off" },
+            if self.voices_apps { "on" } else { "off" },
+            if self.voices_mic { "on" } else { "off" },
             if self.engine_where == EngineWhere::Host { "host" } else { "this-pc" },
             self.engine_host,
             self.host_on,
@@ -341,6 +351,8 @@ mod tests {
             opacity: Opacity { window: 60, text: 90 },
             locked_opacity: Opacity { window: 20, text: 70 },
             dictation_only: true,
+            voices_apps: false,
+            voices_mic: true,
             words: WordSettings { rules: crate::words::Scope::Captions, transforms: crate::words::Scope::Both, hotwords: false, strength: 1.0 },
             engine_where: EngineWhere::Host,
             engine_host: "kiku://studio:7300/#ab.cd".into(),
@@ -354,6 +366,9 @@ mod tests {
         assert_eq!(Settings::parse("mic_threshold_db = loud\nunknown = 1"), Settings::default());
         assert_eq!(Settings::parse("mic_threshold_db = NaN\ncomputer_threshold_db = 50").computer_threshold_db, THRESHOLD_MAX_DB);
         assert_eq!(Settings::parse("mic_threshold_db = NaN").mic_threshold_db, Settings::default().mic_threshold_db);
+        let defaults = Settings::default();
+        assert!(defaults.voices_apps && !defaults.voices_mic, "apps are told apart by default, the mic stays You");
+        assert_eq!(Settings::parse("voices = on"), defaults, "0.5's unreleased line is ignored");
         let older = Settings::parse("window_opacity = 40\ntext_opacity = 80");
         assert_eq!(older.locked_opacity, older.opacity, "locked follows unlocked until set");
     }

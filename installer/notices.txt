@@ -44,6 +44,10 @@ Parakeet Unified EN 0.6B speech model
   exports by the k2-fsa sherpa-onnx project, downloaded from Hugging Face. The fp16 version, published
   with Kiku's releases, is that export with its weights stored as 16-bit numbers.
 
+TitaNet-small speaker model (voices)
+  By NVIDIA (NeMo toolkit), under the Apache License 2.0 (its full text is reproduced with the Rust
+  crates below that use it). ONNX export by the k2-fsa sherpa-onnx project, downloaded from GitHub.
+
 Moonshine streaming speech models
   Copyright (c) 2025 Useful Sensors, Inc. (dba Moonshine AI). MIT License (text below). Downloaded
   from Hugging Face.

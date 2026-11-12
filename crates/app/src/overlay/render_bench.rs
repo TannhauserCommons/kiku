@@ -65,7 +65,7 @@ fn long_captions() -> Captions {
 fn line(id: u64, seed: usize) -> Line {
     let count = 4 + seed * 7919 % 36;
     let text = (0..count).map(|i| WORDS[(seed + i * 31) % WORDS.len()]).collect::<Vec<_>>().join(" ");
-    Line { id, text, complete: true }
+    Line { id, text, complete: true, voice: None }
 }
 
 /// CPU cycles this thread has run, which unlike its CPU time isn't counted in 15.6 ms ticks.
@@ -151,6 +151,9 @@ pub(super) fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Ke
         save_mic_only: false,
         keep_days: 30,
         check_updates: true,
+        voices_apps: true,
+        voices_mic: false,
+        speaker_model: true,
         auto_fold: 2,
         blocked: &[],
         block_answer: BlockAnswer::Ask,
@@ -198,7 +201,7 @@ fn render_cost() {
     measure("live: nothing changed", 200, |_| draw(panel(&captions, &view, &keybinds, 560.0)));
     measure("live: footer figures changed", 200, |i| draw(Panel { usage: usage(i), ..panel(&captions, &view, &keybinds, 560.0) }));
     measure("live: last line revised", 200, |i| {
-        captions.update_mic(2, &[Line { id: 9_999, text: format!("still talking {i}"), complete: false }], Some("Discord"));
+        captions.update_mic(2, &[Line { id: 9_999, text: format!("still talking {i}"), complete: false, voice: None }], Some("Discord"));
         draw(panel(&captions, &view, &keybinds, 560.0));
     });
     measure("live: a new line (oldest dropped)", 200, |i| {
@@ -250,7 +253,8 @@ fn render_cost() {
 
     let (look, mut surface) = (SubtitleSettings::default().look(&Themes::default()), Surface::default());
     let mut draw = |text: &str| {
-        let lines = [SubtitleLine { text: &line(1, 1).text, speaker: Speaker::App(None) }, SubtitleLine { text, speaker: Speaker::You }];
+        let first = line(1, 1);
+        let lines = [SubtitleLine::new(&first.text, Speaker::App(None)), SubtitleLine::new(text, Speaker::You)];
         let scene = subtitles(&renderer, &lines, &look, 92, 144.0);
         renderer.render_subtitles(&mut surface, &scene).unwrap().0.present(window, POINT::default(), u8::MAX).unwrap();
     };
@@ -315,7 +319,7 @@ fn drawing_only_what_changed_matches_drawing_everything() {
                 1 => view.hovered_line = Some(LineRef { section: 1, stream: 1, id: 9_999 }),
                 2 => {
                     let text = "a revised last line, long enough to wrap onto a second row of the panel".into();
-                    captions.update_mic(2, &[Line { id: 9_999, text, complete: false }], Some("Discord"));
+                    captions.update_mic(2, &[Line { id: 9_999, text, complete: false, voice: None }], Some("Discord"));
                 }
                 3 => captions.update_app(1, 1, &[line(10_000, 3)], Instant::now()),
                 4 => view.hovered_line = None,
@@ -436,6 +440,18 @@ fn the_apps_tab_lists_blocked_apps_to_unblock() {
 }
 
 #[test]
+fn the_apps_tab_has_a_switch_for_speakers_in_apps_and_at_the_mic() {
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+    let (captions, keybinds, mut view) = (Captions::default(), Keybinds::default(), View::new());
+    let (mut renderer, mut surface) = (Renderer::new().unwrap(), Surface::default());
+    view.tab = Tab::Apps;
+    let settings = settings_window(Panel { voices_mic: true, ..panel(&captions, &view, &keybinds, 560.0) });
+    let (_, regions) = renderer.render_settings(&mut surface, &settings).unwrap();
+    let clicks: Vec<Target> = regions.targets.iter().map(|(_, target)| *target).filter(|t| matches!(t, Target::Click(Action::SetVoices(..)))).collect();
+    assert_eq!(clicks, [Target::Click(Action::SetVoices(false, false)), Target::Click(Action::SetVoices(true, false))]);
+}
+
+#[test]
 fn settings_drawing_only_what_changed_matches_drawing_everything() {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
     let (captions, keybinds) = (Captions::default(), Keybinds::default());
@@ -483,8 +499,9 @@ fn every_settings_tab_can_be_reached_from_the_window() {
 fn subtitles_drawing_only_what_changed_matches_drawing_everything() {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
     let wraps = "a line from an app long enough to wrap across more than two rows of captions, so the top of it scrolls away and only its last rows show";
-    let line = |text, speaker| SubtitleLine { text, speaker };
-    let steps: [(Vec<SubtitleLine>, Theme, u8); 7] = [
+    let line = SubtitleLine::new;
+    let named = |text, label, voice| SubtitleLine { label: Some(label), voice: Some(voice), ..SubtitleLine::new(text, Speaker::App(None)) };
+    let steps: [(Vec<SubtitleLine>, Theme, u8); 10] = [
         (vec![line("Captions mode  ·  Ctrl+Win+T for the transcript", Speaker::Kiku)], Theme::Night, 92),
         (vec![line("so the", Speaker::You)], Theme::Night, 92),
         (vec![line("so the meeting moved", Speaker::You)], Theme::Night, 92),
@@ -492,6 +509,9 @@ fn subtitles_drawing_only_what_changed_matches_drawing_everything() {
         (vec![line("so the meeting moved to Thursday.", Speaker::You), line("Sounds good.", Speaker::App(None))], Theme::Graphite, 92),
         (vec![line("Sounds good.", Speaker::App(None)), line(wraps, Speaker::App(None))], Theme::Graphite, 92),
         (vec![line("Sounds good.", Speaker::App(None)), line(wraps, Speaker::App(None))], Theme::Graphite, 30),
+        (vec![named("Sounds good.", "Speaker 1", 0), named("Not for me.", "Speaker 2", 1)], Theme::Graphite, 92),
+        (vec![named("Sounds good.", "Speaker 1", 0), named("Not for me, sorry.", "Speaker 2", 1)], Theme::Graphite, 92),
+        (vec![named("Sounds good.", "Speaker 1", 0), named("Not for me, sorry.", "Speaker 2", 1), named("Hm.", "Mic 2", 1)], Theme::Night, 92),
     ];
     for dpi in [96.0, 120.0, 144.0, 168.0] {
         let (mut partly, mut surface) = (Renderer::new().unwrap(), Surface::default());
@@ -782,8 +802,8 @@ fn snapshots() {
 
     let discord = discord_exe();
     let lines = [
-        SubtitleLine { text: "Okay so the build passed, but the installer still needs signing.", speaker: Speaker::App(discord.as_deref()) },
-        SubtitleLine { text: "I can do that after lunch.", speaker: Speaker::You },
+        SubtitleLine::new("Okay so the build passed, but the installer still needs signing.", Speaker::App(discord.as_deref())),
+        SubtitleLine::new("I can do that after lunch.", Speaker::You),
     ];
     let captions_shots = shown.iter().map(|(name, themes)| (name.clone(), *themes, 92)).chain([("day-see-through".to_owned(), Themes::from(Theme::Day), 35)]);
     for (name, themes, opacity) in captions_shots {
@@ -795,7 +815,8 @@ fn snapshots() {
     }
     for theme in [Theme::Night, Theme::Day] {
         let themes = Themes::from(theme);
-        let badge = [SubtitleLine { text: lines[0].text, speaker: lines[0].speaker }, SubtitleLine { text: &format!("Dictating  ·  {DICTATING_HINT}"), speaker: Speaker::Kiku }];
+        let dictating = format!("Dictating  ·  {DICTATING_HINT}");
+        let badge = [SubtitleLine::new(lines[0].text, lines[0].speaker), SubtitleLine::new(&dictating, Speaker::Kiku)];
         let look = SubtitleSettings::default().look(&themes);
         let scene = SubtitleScene { themes, ..subtitles(&renderer, &badge, &look, 92, 144.0) };
         write_png(&folder.join(format!("captions-dictating-badge-{}.png", name(theme))), renderer.render_subtitles(&mut Surface::default(), &scene).unwrap().0);
@@ -804,6 +825,55 @@ fn snapshots() {
         let mut surface = Surface::default();
         let frame = renderer.render_drag_tab(&mut surface, hovered, &SubtitleSettings::default().look(&themes), &themes, 144.0).unwrap();
         write_png(&folder.join(format!("drag-tab-{name}.png")), frame);
+    }
+    // Speakers told apart: three in a Discord call, you and a second voice at your mic; the Apps tab's switches.
+    let spoken = speaker_captions();
+    let speakers_view = {
+        let mut view = View::new();
+        view.hovered_header = Some(1);
+        view
+    };
+    let names = [("night", Themes::default()), ("day", Themes::from(Theme::Day)), ("custom-light", custom_light)];
+    let (heard, mut apps_tab) = (&spoken, View::new());
+    apps_tab.tab = Tab::Apps;
+    // A `Downloads` reads its queue from the models folder only as it starts, so the folder is lent for that.
+    let models = std::env::temp_dir().join("kiku-speaker-snapshots");
+    let _ = fs::remove_dir_all(&models);
+    fs::create_dir_all(&models).unwrap();
+    let before = std::env::var_os("KIKU_MODELS_DIR");
+    // SAFETY: this ignored test runs alone, and the variable is put back before it goes on.
+    unsafe { std::env::set_var("KIKU_MODELS_DIR", &models) };
+    let missing = Downloads::start(|| {});
+    fs::write(models.join("downloads.json"), format!("[\"{}\"]", catalog::SPEAKERS)).unwrap();
+    let downloading = Downloads::start(|| {});
+    unsafe {
+        match before {
+            Some(folder) => std::env::set_var("KIKU_MODELS_DIR", folder),
+            None => std::env::remove_var("KIKU_MODELS_DIR"),
+        }
+    }
+    // A renderer of its own: it remembers each section's row heights, which belong to one transcript.
+    let mut speaker_renderer = Renderer::new().unwrap();
+    for (theme, themes) in &names {
+        let mut surface = Surface::default();
+        let shown = Panel { usage, themes: *themes, height: 640.0, ..panel(heard, &speakers_view, &keybinds, 560.0) };
+        write_png(&folder.join(format!("panel-speakers-{theme}.png")), speaker_renderer.render(&mut surface, &shown).unwrap().0);
+        for (state, downloads) in [("missing", &missing), ("downloading", &downloading)] {
+            let shown = Panel { themes: *themes, voices_mic: true, speaker_model: false, downloads, ..panel(heard, &apps_tab, &keybinds, 560.0) };
+            save_settings_window(&mut renderer, &folder.join(format!("settings-apps-speakers-{state}-{theme}.png")), shown);
+        }
+    }
+    let speaking = [
+        SubtitleLine { label: Some("Speaker 1"), voice: Some(0), ..SubtitleLine::new("Okay so the build passed, but the installer still needs signing.", Speaker::App(discord.as_deref())) },
+        SubtitleLine { label: Some("Speaker 2"), voice: Some(1), ..SubtitleLine::new("I think the certificate is still on the old laptop.", Speaker::App(discord.as_deref())) },
+        SubtitleLine { label: Some("Speaker 3"), voice: Some(2), ..SubtitleLine::new("Check the shared drive first.", Speaker::App(discord.as_deref())) },
+        SubtitleLine { label: Some("Mic 2"), voice: Some(1), ..SubtitleLine::new("Someone else at my desk says hi.", Speaker::You) },
+    ];
+    for (theme, themes) in &names {
+        let look = SubtitleSettings::default().look(themes);
+        let height = renderer.subtitle_height(&look, 4).unwrap();
+        let scene = SubtitleScene { themes: *themes, rows: 4, height, ..subtitles(&renderer, &speaking, &look, 92, 144.0) };
+        write_png(&folder.join(format!("captions-speakers-{theme}.png")), renderer.render_subtitles(&mut Surface::default(), &scene).unwrap().0);
     }
     write_png(&folder.join("icons.png"), icon_sheet(&mut renderer, &mut Surface::default()));
 }
@@ -904,7 +974,7 @@ fn snapshot_captions() -> Captions {
     let (mut captions, now) = (Captions::default(), Instant::now());
     let discord = captions.add_app("Discord", discord_exe());
     let edge = captions.add_app("Edge", Some(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe".into()));
-    let said = |id, text: &str, complete| Line { id, text: text.into(), complete };
+    let said = |id, text: &str, complete| Line { id, text: text.into(), complete, voice: None };
     for (id, text) in ["Hey, can everyone hear me okay?", "Cool. So the build passed last night, but the installer still needs signing.", "Who has the certificate?"].iter().enumerate() {
         captions.update_app(discord, 1, &[said(id as u64, text, true)], now);
     }
@@ -913,6 +983,23 @@ fn snapshot_captions() -> Captions {
     captions.pin("Discord", true);
     for (id, text) in ["Yeah, loud and clear.", "I can do the signing after lunch."].iter().enumerate() {
         captions.update_mic(2, &[said(id as u64, text, true)], Some("Discord"));
+    }
+    captions
+}
+
+/// A Discord call of three voices, a video, and you with a second voice at your mic.
+fn speaker_captions() -> Captions {
+    let (mut captions, now) = (Captions::default(), Instant::now());
+    let discord = captions.add_app("Discord", discord_exe());
+    let edge = captions.add_app("Edge", Some(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe".into()));
+    let said = |id, voice, text: &str| Line { id, text: text.into(), complete: true, voice: Some(voice) };
+    let call = [(0, "Okay so the build passed, but the installer still needs signing."), (1, "I think the certificate is still on the old laptop."), (2, "Check the shared drive first."), (1, "Found it, it was in the drive.")];
+    for (id, (voice, text)) in call.iter().enumerate() {
+        captions.update_app(discord, 1, &[said(id as u64, *voice, text)], now);
+    }
+    captions.update_app(edge, 1, &[said(0, 0, "In this video we'll look at how glass was made in the eighteenth century.")], now);
+    for (id, (voice, text)) in [(0, "Great, then I can sign it after lunch."), (1, "Someone else at my desk says hi."), (0, "Sorry about that.")].iter().enumerate() {
+        captions.update_mic(2, &[said(id as u64, *voice, text)], Some("Discord"));
     }
     captions
 }

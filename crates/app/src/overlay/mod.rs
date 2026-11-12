@@ -305,11 +305,15 @@ pub fn run(
     window.view.has_tray = window.tray.is_some();
     if setup.first_run {
         window.start_setup();
-    } else if download::fallback().is_none() && !download::runnable(window.controls.model().wanted()) {
-        // Nothing to caption with: straight to where models are downloaded.
-        window.settings.show_tab(Tab::Listening);
-        window.settings.open(hwnd);
-        window.watch_meters();
+    } else {
+        // The first run's setup does it at its model step.
+        window.fetch_speaker_model();
+        if download::fallback().is_none() && !download::runnable(window.controls.model().wanted()) {
+            // Nothing to caption with: straight to where models are downloaded.
+            window.settings.show_tab(Tab::Listening);
+            window.settings.open(hwnd);
+            window.watch_meters();
+        }
     }
     let in_subtitles = window.subtitles.settings.on;
     if in_subtitles {
@@ -728,9 +732,11 @@ impl Window {
                     let text = selection.text(&captions, &self.view.regions.sections);
                     let first = selection.spans(&captions, &self.view.regions.sections).first().map(|&(line, ..)| line);
                     drop(captions);
-                    let app = first.and_then(|line| Some(self.words_app(line.section, &self.caption(line)?)));
-                    // A selection starting on one of your lines can take its "You:" too.
-                    let text = text.trim().strip_prefix(&format!("{YOU}:")).unwrap_or(&text).to_owned();
+                    let caption = first.and_then(|line| self.caption(line));
+                    let app = first.zip(caption.as_ref()).map(|(line, caption)| self.words_app(line.section, caption));
+                    // A selection starting on a named line takes its name too.
+                    let name = caption.as_ref().and_then(Caption::label).map_or(String::new(), |label| format!("{label}:"));
+                    let text = text.trim().strip_prefix(&name).unwrap_or(&text).trim_start().to_owned();
                     self.open_correction(&text, app.unwrap_or_else(|| YOU.into()));
                 }
             }
@@ -893,6 +899,12 @@ impl Window {
                 self.save_settings();
             }
             Action::CheckUpdatesNow => self.check_for_update(),
+            Action::SetVoices(mic, on) => {
+                let switch = if mic { &self.controls.voices_mic } else { &self.controls.voices_apps };
+                switch.store(on, Ordering::Relaxed);
+                self.save_settings();
+                self.fetch_speaker_model();
+            }
             Action::DictationOnly(on) => {
                 self.controls.dictation_only.store(on, Ordering::Relaxed);
                 self.save_settings();
@@ -1447,6 +1459,8 @@ impl Window {
             opacity: self.opacity,
             locked_opacity: self.locked_opacity,
             dictation_only: self.controls.dictation_only.load(Ordering::Relaxed),
+            voices_apps: self.controls.voices_for(false),
+            voices_mic: self.controls.voices_for(true),
             words: self.controls.words.settings(),
             engine_where: self.controls.engine_where(),
             engine_host: self.controls.engine_host(),
@@ -1550,6 +1564,7 @@ impl Window {
             if !target.complete() {
                 self.downloads.download(target);
             }
+            self.fetch_speaker_model();
         }
         match step.next() {
             Some(next) => {
@@ -1557,6 +1572,13 @@ impl Window {
                 self.settings.view.scrolls.clear();
             }
             None => self.finish_setup(),
+        }
+    }
+
+    /// Downloads the speaker model if a speakers switch is on and it isn't here.
+    fn fetch_speaker_model(&self) {
+        if self.controls.voices_wanted() {
+            self.downloads.fetch_speaker_model();
         }
     }
 
@@ -1641,7 +1663,8 @@ impl Window {
     /// Pressing on caption text starts a selection; pressing anywhere else clears it.
     fn start_selecting(&mut self, lparam: LPARAM) {
         let (x, y) = self.to_dips(point_from(lparam));
-        self.view.selection = self.text_point(x, y, false).map(|point| Selection { anchor: point, focus: point });
+        let relabels = self.captions.lock().unwrap().relabels();
+        self.view.selection = self.text_point(x, y, false).map(|point| Selection { anchor: point, focus: point, relabels });
         self.selecting = self.view.selection.is_some();
         if self.selecting {
             unsafe { SetCapture(self.hwnd) };
@@ -2440,6 +2463,7 @@ impl Window {
         let words = self.controls.words.words();
         let macros = self.controls.macros.macros();
         let captions = self.captions.lock().unwrap();
+        self.view.selection = self.view.selection.filter(|selection| selection.relabels == captions.relabels());
         self.schedule_next_change(&captions);
         let height = match self.view.collapsed {
             true => (TITLE_HEIGHT * scale).round() as i32,
@@ -2464,6 +2488,9 @@ impl Window {
             save_mic_only: self.controls.save_mic_only.load(Ordering::Relaxed),
             keep_days: self.controls.keep_days.load(Ordering::Relaxed),
             check_updates: self.controls.check_updates.load(Ordering::Relaxed),
+            voices_apps: self.controls.voices_for(false),
+            voices_mic: self.controls.voices_for(true),
+            speaker_model: catalog::component(catalog::SPEAKERS).installed(),
             dictation_only: self.controls.dictation_only.load(Ordering::Relaxed),
             engine_where: self.controls.engine_where(),
             host_on: self.controls.host_on(),

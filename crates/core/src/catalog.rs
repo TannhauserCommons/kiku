@@ -2,7 +2,7 @@
 //! where their files live.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -24,6 +24,8 @@ const BUNDLED: &str = include_str!("../catalog.json");
 pub const DEFAULT_ID: &str = "parakeet-unified";
 /// The speech detector that models transcribing whole phrases need.
 pub const VAD: &str = "silero-vad";
+/// The speaker model that tells voices apart, when voices are on.
+pub const SPEAKERS: &str = "titanet-small";
 /// NVIDIA's CUDA libraries, for running models on the GPU.
 pub const GPU_PACK: &str = "gpu-pack";
 /// How long where a model's files are is remembered: settings redraw 15 times a second while their
@@ -156,6 +158,8 @@ struct Catalog {
 
 /// Total memory of the GPU models would run on, in MB; 0 when unknown.
 static GPU_MEMORY_MB: AtomicU32 = AtomicU32::new(0);
+/// Components found damaged: the stamp of their files when checked, and what was wrong.
+static DAMAGED: Mutex<BTreeMap<String, (String, String)>> = Mutex::new(BTreeMap::new());
 /// Where each variant's or component's files were last found, and when.
 static LOCATIONS: Mutex<Option<HashMap<String, Found>>> = Mutex::new(None);
 type Found = (Instant, Option<PathBuf>);
@@ -215,6 +219,12 @@ pub fn by_id_or_default(id: &str) -> &'static Model {
 
 pub fn component(id: &str) -> &'static Component {
     component_by_id(id).expect("components are bundled")
+}
+
+/// The speaker model's file, if it is downloaded and whole.
+pub fn speaker_model() -> Option<PathBuf> {
+    let speakers = component(SPEAKERS);
+    speakers.verify().ok().map(|()| speakers.file_path(0))
 }
 
 pub fn component_by_id(id: &str) -> Option<&'static Component> {
@@ -309,7 +319,7 @@ impl Model {
     /// Where to load `variant` from, with its speech detector if it needs one.
     pub fn spec(&self, variant: &Variant) -> ModelSpec {
         let vad = self.requires.iter().any(|r| r == VAD).then(|| component(VAD).file_path(0));
-        ModelSpec { backend: self.backend, dir: variant.path(), device: variant.device, vad, hotwords: Vec::new() }
+        ModelSpec { backend: self.backend, dir: variant.path(), device: variant.device, vad, voices: None, hotwords: Vec::new() }
     }
 }
 
@@ -394,10 +404,17 @@ impl Component {
         if fs::read_to_string(&marker).is_ok_and(|saved| saved == stamp) {
             return Ok(());
         }
+        // A damaged file is hashed once, not at every look, until it changes.
+        if let Some((_, problem)) = DAMAGED.lock().unwrap().get(&self.id).filter(|(damaged, _)| *damaged == stamp) {
+            return Err(problem.clone());
+        }
         for file in &self.files {
+            // A file that can't be read now (locked while written or scanned) isn't damaged, so it isn't remembered.
             let hash = crate::download::sha256(&dir.join(&file.path)).map_err(|e| format!("couldn't read {}: {e}", file.path))?;
             if hash != file.sha256 {
-                return Err(format!("{} in the {} is damaged: download it again", file.path, self.name));
+                let problem = format!("{} in the {} is damaged: download it again", file.path, self.name);
+                DAMAGED.lock().unwrap().insert(self.id.clone(), (stamp, problem.clone()));
+                return Err(problem);
             }
         }
         let _ = fs::create_dir_all(paths::models_dir()).and_then(|_| fs::write(&marker, stamp));
@@ -459,6 +476,11 @@ mod tests {
         let parakeet = Choice { model: by_id_or_default("parakeet-tdt-v2"), device: Device::Cuda };
         assert_eq!(parakeet.device(), Device::Cuda);
         assert!(parakeet.variant().dir.ends_with("sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16"));
+    }
+
+    #[test]
+    fn no_model_needs_the_speaker_model_to_count_as_installed() {
+        assert!(models().iter().all(|model| !model.requires.iter().any(|id| id == SPEAKERS)));
     }
 
     #[test]

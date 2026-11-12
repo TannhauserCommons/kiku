@@ -13,7 +13,7 @@ pub const DEFAULT_KEEP_DAYS: u32 = 30;
 
 use crate::{
     catalog::Choice,
-    engine::{Hotword, SAMPLE_RATE},
+    engine::{Hotword, Line, SAMPLE_RATE},
     update::Release,
     macros::{MacroBook, Mode},
     words::WordBook,
@@ -75,6 +75,9 @@ pub struct Controls {
     pub check_updates: AtomicBool,
     /// Dictation only: no app is captured, and the mic is heard only while the captions key is held.
     pub dictation_only: AtomicBool,
+    /// Tell voices apart in apps' audio, and at the mic. Either one loads models with the speaker model.
+    pub voices_apps: AtomicBool,
+    pub voices_mic: AtomicBool,
     /// A newer version the update check found, waiting for the panel to offer it.
     update: Mutex<Option<Release>>,
     /// What a check asked for by hand found: whether there is a newer version, or why it failed.
@@ -162,6 +165,8 @@ impl Controls {
             notice: Mutex::new(None),
             check_updates: AtomicBool::new(true),
             dictation_only: AtomicBool::new(false),
+            voices_apps: AtomicBool::new(true),
+            voices_mic: AtomicBool::new(false),
             update: Mutex::new(None),
             checked: Mutex::new(None),
             words: WordBook::default(),
@@ -254,6 +259,26 @@ impl Controls {
         if hotwords.0 != words {
             *hotwords = (words, true);
         }
+    }
+
+    /// Whether the mic's stream, or an app's, tells voices apart. A line keeps its voice only if its source's is on.
+    pub fn voices_for(&self, mic: bool) -> bool {
+        let switch = if mic { &self.voices_mic } else { &self.voices_apps };
+        switch.load(Ordering::Relaxed)
+    }
+
+    /// `lines` from the mic's stream, or an app's, with a voice only where that source's switch is on: an
+    /// older host labels every stream, and a switch turned off leaves lines in flight.
+    pub fn keep_voices(&self, mic: bool, mut lines: Vec<Line>) -> Vec<Line> {
+        if !self.voices_for(mic) {
+            lines.iter_mut().for_each(|line| line.voice = None);
+        }
+        lines
+    }
+
+    /// Whether a model loads with the speaker model: some stream tells voices apart.
+    pub fn voices_wanted(&self) -> bool {
+        self.voices_for(true) || self.voices_for(false)
     }
 
     /// The words to load a model with.
@@ -523,6 +548,21 @@ mod tests {
         controls.set_hotwords(kiku(2.5));
         assert_eq!(controls.take_changed_hotwords(), Some(kiku(2.5)), "a new boost is a change");
         assert_eq!(controls.hotwords(), kiku(2.5));
+    }
+
+    #[test]
+    fn a_line_keeps_its_voice_only_if_its_sources_switch_is_on() {
+        let choice = Choice { model: crate::catalog::by_id_or_default(crate::catalog::DEFAULT_ID), device: crate::engine::Device::Cpu };
+        let controls = Controls::new(THRESHOLD_MIN_DB, THRESHOLD_MIN_DB, choice);
+        let lines = || vec![Line { id: 1, text: "hi".into(), complete: true, voice: Some(1) }];
+        let voices = |controls: &Controls, mic| controls.keep_voices(mic, lines())[0].voice;
+        assert_eq!((voices(&controls, false), voices(&controls, true)), (Some(1), None), "apps on, mic off by default");
+        controls.voices_mic.store(true, Ordering::Relaxed);
+        controls.voices_apps.store(false, Ordering::Relaxed);
+        assert_eq!((voices(&controls, false), voices(&controls, true)), (None, Some(1)));
+        assert!(controls.voices_wanted());
+        controls.voices_mic.store(false, Ordering::Relaxed);
+        assert!(!controls.voices_wanted());
     }
 
     #[test]

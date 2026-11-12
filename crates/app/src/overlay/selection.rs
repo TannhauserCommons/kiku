@@ -16,6 +16,8 @@ pub struct TextPoint {
 pub struct Selection {
     pub anchor: TextPoint,
     pub focus: TextPoint,
+    /// `Captions::relabels` when it was made: later labels moved the text it points into.
+    pub relabels: u32,
 }
 
 /// A point in reading order: the section as drawn, the caption within it, the offset.
@@ -83,17 +85,17 @@ mod tests {
     fn selection_runs_in_reading_order_across_sections() {
         let (mut captions, now) = (Captions::default(), Instant::now());
         let discord = captions.add_app("Discord", None);
-        let line = |id, text: &str| Line { id, text: text.into(), complete: true };
+        let line = |id, text: &str| Line { id, text: text.into(), complete: true, voice: None };
         captions.update_app(discord, 1, &[line(0, "Are you joining?"), line(1, "We start soon.")], now);
         captions.update_mic(2, &[line(0, "On my way.")], Some("Discord"));
         let point = |section, stream, id, offset| TextPoint { line: LineRef { section, stream, id }, offset };
 
         // From "you joining?" in Discord to "On my" in the You section, which is drawn after it.
-        let selection = Selection { anchor: point(discord, 1, 0, 4), focus: point(YOU_SECTION, 2, 0, 5) };
+        let selection = Selection { anchor: point(discord, 1, 0, 4), focus: point(YOU_SECTION, 2, 0, 5), relabels: 0 };
         let expected = "you joining?\nWe start soon.\nYou: On my way.\nOn my";
         let order = [discord, YOU_SECTION];
         assert_eq!(selection.text(&captions, &order), expected);
-        let reversed = Selection { anchor: selection.focus, focus: selection.anchor };
+        let reversed = Selection { anchor: selection.focus, focus: selection.anchor, relabels: 0 };
         assert_eq!(reversed.text(&captions, &order), expected, "dragging upwards selects the same text");
         assert_eq!(selection.text(&captions, &[YOU_SECTION]), "", "a folded section ends the selection");
     }

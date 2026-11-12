@@ -25,7 +25,7 @@ use kiku::{
 use kiku_core::{
     captions::{Captions, StreamId, YOU, YOU_SECTION},
     controls::{Controls, Gate, Input, THRESHOLD_MIN_DB},
-    engine::{self, Device, Engine, EngineStream, Hotword, Line, ModelSpec, Result, POLL_INTERVAL},
+    engine::{self, Device, Engine, EngineStream, Line, ModelSpec, Result, POLL_INTERVAL},
     hardware::Hardware,
     log,
     misses::{self, Recent},
@@ -89,6 +89,8 @@ fn main() -> Result<()> {
     controls.save_mic_only.store(settings.save_mic_only, Ordering::Relaxed);
     controls.check_updates.store(settings.check_updates, Ordering::Relaxed);
     controls.dictation_only.store(settings.dictation_only, Ordering::Relaxed);
+    controls.voices_apps.store(settings.voices_apps, Ordering::Relaxed);
+    controls.voices_mic.store(settings.voices_mic, Ordering::Relaxed);
     controls.set_engine_where(settings.engine_where);
     controls.set_engine_host(&settings.engine_host);
     controls.take_engine_changed();
@@ -114,6 +116,8 @@ fn main() -> Result<()> {
         awaiting_gpu: Cell::new(false),
         last_notice: RefCell::default(),
         host: RefCell::default(),
+        loaded_voices: Cell::new(false),
+        speakers_failed: Cell::new(None),
     };
     let discovery = Discovery::new(audio, events, wake_discovery.clone(), controls.clone());
     let setup = overlay::Setup { settings, hardware, first_run };
@@ -330,6 +334,11 @@ struct Decoder {
     last_notice: RefCell<Option<String>>,
     /// Running on this PC though the host is wanted: when to try the host again, and an attempt under way.
     host: RefCell<HostRetry>,
+    /// Whether the running model was loaded with the speaker model (or asked of the host to be).
+    loaded_voices: Cell<bool>,
+    /// After a load for speakers failed: the switches it was for. It isn't tried again until they change, so a
+    /// load that keeps failing never cuts live speech over and over (the old model keeps running meanwhile).
+    speakers_failed: Cell<Option<bool>>,
 }
 
 /// Trying the host again while the model runs on this PC.
@@ -344,6 +353,8 @@ struct HostRetry {
 struct HostAttempt {
     code: String,
     choice: Choice,
+    /// Whether it asked for speakers.
+    voices: bool,
     answer: Receiver<Result<Box<dyn Engine>>>,
 }
 
@@ -352,6 +363,7 @@ impl Default for HostRetry {
         Self { next_try: Instant::now(), attempt: None, reload: false }
     }
 }
+
 
 /// How long after the host fails the model runs on this PC before the host is tried again.
 const HOST_RETRY: Duration = Duration::from_secs(60);
@@ -377,15 +389,18 @@ struct Stream<'e> {
     engine: Box<dyn EngineStream + 'e>,
     /// Audio went in since the last poll; a stream given nothing has nothing new to say.
     fed: bool,
+    /// Whether it was opened telling voices apart.
+    voices: bool,
 }
 
 impl Sources {
     /// A new stream for source `index`; `None`, logged, if the engine can't open one, so that
     /// source goes uncaptioned while the others carry on.
-    fn open<'e>(&mut self, engine: &'e dyn Engine, index: usize) -> Option<Stream<'e>> {
+    fn open<'e>(&mut self, engine: &'e dyn Engine, index: usize, controls: &Controls) -> Option<Stream<'e>> {
         self.opened += 1;
-        let stream = engine.open_stream().inspect_err(|error| log::write(format!("source {index}: couldn't open a stream: {error}")));
-        Some(Stream { id: self.opened, engine: stream.ok()?, fed: false })
+        let voices = controls.voices_for(self.sections[index].is_none());
+        let stream = engine.open_stream_with(voices).inspect_err(|error| log::write(format!("source {index}: couldn't open a stream: {error}")));
+        Some(Stream { id: self.opened, engine: stream.ok()?, fed: false, voices })
     }
 }
 
@@ -482,7 +497,7 @@ impl Decoder {
         overlay: overlay::Handle,
     ) -> Stop {
         let alive = sources.alive.clone();
-        let mut streams: Vec<_> = alive.iter().enumerate().map(|(index, &alive)| alive.then(|| sources.open(engine, index)).flatten()).collect();
+        let mut streams: Vec<_> = alive.iter().enumerate().map(|(index, &alive)| alive.then(|| sources.open(engine, index, &self.controls)).flatten()).collect();
         let mut next_poll = Instant::now() + POLL_INTERVAL;
         let mut last_lag_log: Option<Instant> = None;
         let mut was_dictating = false;
@@ -553,7 +568,7 @@ impl Decoder {
                 self.controls.set_hotwords(self.controls.words.hotwords());
                 let active = self.controls.model().active;
                 let reload = self.controls.take_changed_hotwords().is_some_and(|words| !engine.set_hotwords(&active.hotwords(words)));
-                let reload = self.controls.take_engine_changed() || reload || std::mem::take(&mut self.host.borrow_mut().reload);
+                let reload = self.controls.take_engine_changed() || reload || std::mem::take(&mut self.host.borrow_mut().reload) || self.speakers_stale();
                 let mut from_host = self.host_answered();
                 // A pick still downloading waits, and captions go on meanwhile.
                 if self.controls.model().pending.is_some_and(|choice| self.can_load(choice)) || self.gpu_move_due() || reload || from_host.is_some() {
@@ -564,6 +579,7 @@ impl Decoder {
                     overlay.refresh();
                     return Stop::Switch(next);
                 }
+                self.follow_voice_switches(engine, sources, &mut streams, overlay);
                 next_poll = Instant::now() + POLL_INTERVAL;
             }
         }
@@ -579,12 +595,50 @@ impl Decoder {
         source_events: &Receiver<SourceEvent>,
     ) {
         for event in source_events.try_iter() {
-            match &event {
-                SourceEvent::Added(_) => streams.push(sources.open(engine, streams.len())),
-                SourceEvent::Ended(index) => streams[*index] = None,
-            }
+            let ended = if let SourceEvent::Ended(index) = &event { Some(*index) } else { None };
             self.track_source(sources, event);
+            match ended {
+                Some(index) => streams[index] = None,
+                None => streams.push(sources.open(engine, streams.len(), &self.controls)),
+            }
         }
+    }
+
+    /// Whether the running model's speaker model differs from what the switches ask: one to drop, or one to
+    /// add once it is downloaded (the host has its own).
+    fn speakers_stale(&self) -> bool {
+        let wanted = self.controls.voices_wanted();
+        if self.speakers_failed.get() == Some(wanted) {
+            return false;
+        }
+        match self.loaded_voices.get() {
+            true => !wanted,
+            false => wanted && (self.controls.model().remote.is_some() || catalog::speaker_model().is_some()),
+        }
+    }
+
+    /// Reopens the streams whose switch changed, finishing what they were saying first; their speakers start again.
+    fn follow_voice_switches<'e>(&self, engine: &'e dyn Engine, sources: &mut Sources, streams: &mut [Option<Stream<'e>>], overlay: overlay::Handle) {
+        let changed = |sources: &Sources, index: usize, stream: &Stream| stream.voices != self.controls.voices_for(sources.sections[index].is_none());
+        if !streams.iter().enumerate().any(|(index, stream)| stream.as_ref().is_some_and(|stream| changed(sources, index, stream))) {
+            return;
+        }
+        let now = Instant::now();
+        for index in 0..streams.len() {
+            if !streams[index].as_ref().is_some_and(|stream| changed(sources, index, stream)) {
+                continue;
+            }
+            // Only this stream finishes: the mic goes on dictating when only the apps' switch changed.
+            let mic = sources.sections[index].is_none();
+            let collect = if mic && self.controls.dictating.load(Ordering::Relaxed) { Collect::FlushMic } else { Collect::FlushAll };
+            self.collect_stream(engine, streams, sources, index, collect, now);
+            streams[index] = sources.open(engine, index, &self.controls);
+        }
+        if self.controls.has_heard() {
+            overlay.type_queued();
+        }
+        self.recorder.borrow_mut().write();
+        overlay.refresh();
     }
 
     /// Ends every line in progress now and saves it, before this engine's streams go away.
@@ -701,13 +755,19 @@ impl Decoder {
     /// can't run on the GPU now runs on the CPU, returned with why.
     fn load(&self, choice: Choice, host: bool) -> Result<(Box<dyn Engine>, Option<String>)> {
         self.controls.take_engine_changed();
+        let wanted = self.controls.voices_wanted();
+        let speakers = wanted.then(catalog::speaker_model).flatten();
         if let Some(loaded) = host.then(|| self.load_on_host(choice)).flatten() {
+            self.loaded_voices.set(wanted);
             self.awaiting_gpu.set(false);
             return Ok((loaded, None));
         }
         let awaiting_gpu = choice.device() == Device::Cuda && !Download::Model(choice.model, choice.variant()).complete();
         // A failed load leaves the model still running, and whether it waits for its GPU files, as they were.
-        let loaded = self.load_where_possible(choice)?;
+        let had_speakers = speakers.is_some();
+        let loaded = self.load_where_possible(choice, speakers).inspect_err(|_| self.speakers_failed.set(Some(wanted)))?;
+        self.loaded_voices.set(had_speakers);
+        self.speakers_failed.set(None);
         self.awaiting_gpu.set(awaiting_gpu);
         self.controls.set_running_on(None);
         Ok(loaded)
@@ -723,7 +783,7 @@ impl Decoder {
             self.tell_host_unreached("the host's code isn't one", choice);
             return None;
         };
-        match load_on_host_logged(&code, &host_request(choice, self.controls.hotwords())) {
+        match load_on_host_logged(&code, &host_request(choice, &self.controls)) {
             Ok(engine) => {
                 self.controls.set_running_on(Some(code.address().to_owned()));
                 Some(engine)
@@ -753,9 +813,9 @@ impl Decoder {
             retry.attempt = None;
             return None;
         };
-        let code_text = code.to_string();
+        let (code_text, voices) = (code.to_string(), self.controls.voices_wanted());
         if let Some(attempt) = retry.attempt.take() {
-            let matches = attempt.code == code_text && attempt.choice == state.active;
+            let matches = attempt.code == code_text && attempt.choice == state.active && attempt.voices == voices;
             match attempt.answer.try_recv() {
                 Err(TryRecvError::Empty) if matches => {
                     retry.attempt = Some(attempt);
@@ -773,12 +833,12 @@ impl Decoder {
         if Instant::now() < retry.next_try {
             return None;
         }
-        let request = host_request(state.active, self.controls.hotwords());
+        let request = host_request(state.active, &self.controls);
         let (send, answer) = channel();
         std::thread::spawn(move || {
             let _ = send.send(load_on_host_logged(&code, &request));
         });
-        retry.attempt = Some(HostAttempt { code: code_text, choice: state.active, answer });
+        retry.attempt = Some(HostAttempt { code: code_text, choice: state.active, voices, answer });
         None
     }
 
@@ -787,6 +847,7 @@ impl Decoder {
         let active = self.controls.model().active;
         self.controls.set_running_on(self.host_wanted().map(|code| code.address().to_owned()));
         self.controls.finish_switch(active, Ok(None));
+        self.loaded_voices.set(self.controls.voices_wanted());
         if !engine.set_hotwords(&active.hotwords(self.controls.hotwords())) {
             self.host.borrow_mut().reload = true;
         }
@@ -794,19 +855,19 @@ impl Decoder {
         engine
     }
 
-    fn load_where_possible(&self, choice: Choice) -> Result<(Box<dyn Engine>, Option<String>)> {
+    fn load_where_possible(&self, choice: Choice, speakers: Option<PathBuf>) -> Result<(Box<dyn Engine>, Option<String>)> {
         if choice.device() != Device::Cuda {
-            return load_logged(choice, self.controls.hotwords()).map(|engine| (engine, None));
+            return load_logged(choice, &self.controls, speakers).map(|engine| (engine, None));
         }
         let (why, what_to_do) = match self.gpu_unready(choice) {
             Some(unready) => unready,
-            None => match load_logged(choice, self.controls.hotwords()) {
+            None => match load_logged(choice, &self.controls, speakers.clone()) {
                 Ok(engine) => return Ok((engine, None)),
                 Err(error) => (format!("the GPU test failed: {error}"), "Settings → Listening can switch it to the CPU."),
             },
         };
         self.tell(format!("{} couldn't use the GPU ({why}), so it's running on the CPU. {what_to_do}", choice.model.name));
-        load_logged(choice.on_cpu(), self.controls.hotwords()).map(|engine| (engine, Some(why)))
+        load_logged(choice.on_cpu(), &self.controls, speakers).map(|engine| (engine, Some(why)))
     }
 
     /// Logs `notice` and has the panel show it (with a tray balloon if hidden), unless it was the last one.
@@ -891,7 +952,7 @@ impl Decoder {
             stream.engine.push(&chunk.samples)
         });
         if let Some(Err(error)) = pushed {
-            reopen(engine, sources, slot, chunk.source, &error);
+            reopen(engine, sources, slot, chunk.source, &self.controls, &error);
         }
     }
 
@@ -942,48 +1003,49 @@ impl Decoder {
     }
 
     /// Applies every stream's new lines; returns whether any captions changed.
-    #[allow(clippy::needless_range_loop)] // `reopen` takes the stream's slot while the loop holds the index
     fn collect_all<'e>(&self, engine: &'e dyn Engine, streams: &mut [Option<Stream<'e>>], sources: &mut Sources, collect: Collect) -> bool {
         let now = Instant::now();
-        let mut changed = false;
-        for index in 0..streams.len() {
-            let Some(stream) = &mut streams[index] else { continue };
-            let mic = sources.sections[index].is_none();
-            let lines = match collect {
-                Collect::FlushMic if mic => stream.engine.flush(),
-                Collect::FlushAll => stream.engine.flush(),
-                _ if !stream.fed => continue,
-                _ => stream.engine.poll(),
-            };
-            stream.fed = false;
-            let lines = match lines {
-                Ok(lines) => lines,
-                Err(error) => {
-                    reopen(engine, sources, &mut streams[index], index, &error);
-                    continue;
-                }
-            };
-            let Some(stream) = &streams[index] else { continue };
-            let section = sources.sections[index];
-            if lines.is_empty() {
-                continue;
+        (0..streams.len()).fold(false, |changed, index| self.collect_stream(engine, streams, sources, index, collect, now) | changed)
+    }
+
+    /// Applies stream `index`'s new lines; returns whether any captions changed.
+    fn collect_stream<'e>(&self, engine: &'e dyn Engine, streams: &mut [Option<Stream<'e>>], sources: &mut Sources, index: usize, collect: Collect, now: Instant) -> bool {
+        let Some(stream) = &mut streams[index] else { return false };
+        let mic = sources.sections[index].is_none();
+        let lines = match collect {
+            Collect::FlushMic if mic => stream.engine.flush(),
+            Collect::FlushAll => stream.engine.flush(),
+            _ if !stream.fed => return false,
+            _ => stream.engine.poll(),
+        };
+        stream.fed = false;
+        let lines = match lines {
+            Ok(lines) => lines,
+            Err(error) => {
+                reopen(engine, sources, &mut streams[index], index, &self.controls, &error);
+                return false;
             }
-            // Rules apply to each revision of a line in progress again; dictation types the words as heard.
-            let shown = self.as_captions(&lines, &sources.labels[index]);
-            let in_front = section.is_none().then(overlay::focused_app).flatten();
-            let mut captions = self.captions.lock().unwrap();
-            match section {
-                Some(section) => captions.update_app(section, stream.id, &shown, now),
-                None => captions.update_mic(stream.id, &shown, in_front.as_deref()),
-            }
-            self.recorder.borrow_mut().note(&self.controls, &captions, stream.id, section, &shown);
-            if mic {
-                let dictated = matches!(collect, Collect::Dictating | Collect::FlushMic);
-                lines.iter().filter(|l| l.complete && !l.text.is_empty()).for_each(|l| self.controls.queue_mic_line(l.text.clone(), dictated));
-            }
-            changed = true;
+        };
+        let Some(stream) = &streams[index] else { return false };
+        let section = sources.sections[index];
+        let lines = self.controls.keep_voices(mic, lines);
+        if lines.is_empty() {
+            return false;
         }
-        changed
+        // Rules apply to each revision of a line in progress again; dictation types the words as heard.
+        let shown = self.as_captions(&lines, &sources.labels[index]);
+        let in_front = section.is_none().then(overlay::focused_app).flatten();
+        let mut captions = self.captions.lock().unwrap();
+        match section {
+            Some(section) => captions.update_app(section, stream.id, &shown, now),
+            None => captions.update_mic(stream.id, &shown, in_front.as_deref()),
+        }
+        self.recorder.borrow_mut().note(&self.controls, &captions, stream.id, section, &shown);
+        if mic {
+            let dictated = matches!(collect, Collect::Dictating | Collect::FlushMic);
+            lines.iter().filter(|l| l.complete && !l.text.is_empty()).for_each(|l| self.controls.queue_mic_line(l.text.clone(), dictated));
+        }
+        true
     }
 
     /// Lines as captions show them, after the word rules for the app labelled `label` ("You" for the mic).
@@ -993,13 +1055,13 @@ impl Decoder {
 }
 
 /// One stream failing must not stop the others: log it and give that source a fresh stream.
-fn reopen<'e>(engine: &'e dyn Engine, sources: &mut Sources, slot: &mut Option<Stream<'e>>, index: usize, error: &dyn std::fmt::Display) {
+fn reopen<'e>(engine: &'e dyn Engine, sources: &mut Sources, slot: &mut Option<Stream<'e>>, index: usize, controls: &Controls, error: &dyn std::fmt::Display) {
     log::write(format!("source {index}: stream failed ({error}); reopening"));
-    *slot = sources.open(engine, index);
+    *slot = sources.open(engine, index, controls);
 }
 
-fn host_request(choice: Choice, hotwords: Vec<Hotword>) -> ModelRequest {
-    ModelRequest { model: choice.model.id.clone(), device: choice.device, hotwords: choice.hotwords(hotwords) }
+fn host_request(choice: Choice, controls: &Controls) -> ModelRequest {
+    ModelRequest { model: choice.model.id.clone(), device: choice.device, voices: controls.voices_wanted(), hotwords: choice.hotwords(controls.hotwords()) }
 }
 
 /// Loads on the host and logs the outcome, naming the address and never the secret.
@@ -1013,9 +1075,12 @@ fn load_on_host_logged(code: &HostCode, request: &ModelRequest) -> Result<Box<dy
     loaded
 }
 
-fn load_logged(choice: Choice, hotwords: Vec<Hotword>) -> Result<Box<dyn Engine>> {
+fn load_logged(choice: Choice, controls: &Controls, voices: Option<PathBuf>) -> Result<Box<dyn Engine>> {
     let start = Instant::now();
-    let loaded = engine::load(&ModelSpec { hotwords: choice.hotwords(hotwords), ..choice.spec() });
+    if controls.voices_wanted() && voices.is_none() {
+        log::write("speakers are on, but the speaker model isn't downloaded or is damaged, so lines have no speakers until it is");
+    }
+    let loaded = engine::load(&ModelSpec { voices, hotwords: choice.hotwords(controls.hotwords()), ..choice.spec() });
     match &loaded {
         Ok(_) => log::write(format!("loaded {} on {:?} in {:.1} s", choice.model.name, choice.device(), start.elapsed().as_secs_f32())),
         Err(error) => log::write(format!("{} on {:?} failed to load: {error}", choice.model.name, choice.device())),

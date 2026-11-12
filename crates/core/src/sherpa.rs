@@ -14,13 +14,20 @@ use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineStream, Vad
 use crate::{
     engine::{Device, Engine, EngineStream, Hotword, Line, ModelSpec, PhraseModel, Result, SAMPLE_RATE},
     transcripts,
+    voices::{into_lines, split_text, Embedder, Labeller, Part, Token},
 };
 
 /// Inference threads on the CPU; the 600M model is too slow on one.
 const THREADS: i32 = 2;
 const VAD_WINDOW: usize = 512;
-/// A phrase longer than this is cut, so lines don't grow without end.
+/// The detector's phrase limit (it doesn't cut there: Kiku does, earlier) and the room kept for a phrase.
 const MAX_PHRASE_SECONDS: f32 = 15.0;
+/// Speech the detector hasn't ended after this long is cut by Kiku (see `cut_long_speech`): the detector's own limit above never cuts.
+const CUT_PHRASE_SAMPLES: i64 = 10 * SAMPLE_RATE as i64;
+/// How far back from that point the quietest moment to cut at is looked for.
+const CUT_SEARCH_SAMPLES: i64 = 4 * SAMPLE_RATE as i64;
+/// Granularity of the search for a quiet place to cut a long phrase.
+const QUIET_FRAME: usize = SAMPLE_RATE as usize / 10;
 /// Audio kept from before where the detector says a phrase starts: it reacts late to soft onsets.
 const LEAD_IN_SAMPLES: i64 = SAMPLE_RATE as i64 / 2;
 /// Audio kept after where the detector says a phrase ends: it calls a fading last word silence,
@@ -33,6 +40,8 @@ pub struct PhraseEngine {
     kind: PhraseModel,
     /// The words to listen for, while the recognizer decodes for them.
     hotwords: Option<Mutex<Vec<Hotword>>>,
+    /// Tells voices apart, when voices are on: phrases then come with their tokens and parts.
+    voices: Option<Embedder>,
 }
 
 impl PhraseEngine {
@@ -79,7 +88,8 @@ impl PhraseEngine {
         }
         let recognizer = OfflineRecognizer::create(&config).ok_or("the model failed to load")?;
         let vad = vad_config(spec.vad.as_deref().ok_or("no speech detector given")?)?;
-        Ok(Self { recognizer, vad, kind, hotwords: hotwords.map(Mutex::new) })
+        let voices = spec.voices.as_deref().and_then(Embedder::load_or_none);
+        Ok(Self { recognizer, vad, kind, hotwords: hotwords.map(Mutex::new), voices })
     }
 
     /// A stream for one phrase, listening for the hotwords if there are any.
@@ -91,16 +101,42 @@ impl PhraseEngine {
     }
 }
 
-impl Engine for PhraseEngine {
-    fn open_stream(&self) -> Result<Box<dyn EngineStream + '_>> {
-        Ok(Box::new(PhraseStream {
+impl PhraseEngine {
+    /// A stream that hands out phrases with their times; [`Engine::open_stream`] makes lines of the same.
+    pub fn open_phrases(&self) -> Result<PhraseStream<'_>> {
+        self.open_phrases_splitting(true)
+    }
+
+    /// As [`open_phrases`](Self::open_phrases) for a stream that tells voices apart (or not), if the engine can.
+    fn open_phrases_with(&self, voices: bool) -> Result<PhraseStream<'_>> {
+        self.open(voices, true)
+    }
+
+    /// As [`open_phrases`](Self::open_phrases); with voices on, `split` cuts phrases where the speaker changes,
+    /// else each is labelled whole.
+    pub fn open_phrases_splitting(&self, split: bool) -> Result<PhraseStream<'_>> {
+        self.open(true, split)
+    }
+
+    fn open(&self, voices: bool, split: bool) -> Result<PhraseStream<'_>> {
+        Ok(PhraseStream {
             engine: self,
             vad: VoiceActivityDetector::create(&self.vad, MAX_PHRASE_SECONDS * 2.0).ok_or("speech detector failed to load")?,
             pending: Vec::new(),
             heard: History::default(),
             phrase_end: 0,
+            vad_base: 0,
+            speech_since: None,
+            ranges: Vec::new(),
             line: 0,
-        }))
+            labeller: self.voices.as_ref().filter(|_| voices).map(|embedder| Labeller::new(embedder, split)),
+        })
+    }
+}
+
+impl Engine for PhraseEngine {
+    fn open_stream_with(&self, voices: bool) -> Result<Box<dyn EngineStream + '_>> {
+        Ok(Box::new(self.open_phrases_with(voices)?))
     }
 
     fn set_hotwords(&self, words: &[Hotword]) -> bool {
@@ -115,8 +151,22 @@ impl Engine for PhraseEngine {
     }
 }
 
+/// A transcribed phrase and where the speech detector found it, seconds from the stream's start (without the
+/// lead-in and trail the model hears around it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Phrase {
+    pub text: String,
+    pub start: f32,
+    pub end: f32,
+    /// The model's tokens of `text` with their times, seconds from `start` (negative in the lead-in); empty
+    /// when the model gives no times or they don't spell the text.
+    pub tokens: Vec<Token>,
+    /// The phrase cut where the speaker changes, each part with its voice; empty when voices are off.
+    pub parts: Vec<Part>,
+}
+
 /// Phrases cut by the speech detector, each transcribed once complete.
-struct PhraseStream<'a> {
+pub struct PhraseStream<'a> {
     engine: &'a PhraseEngine,
     vad: VoiceActivityDetector,
     /// Audio not yet a whole detector window.
@@ -125,54 +175,146 @@ struct PhraseStream<'a> {
     heard: History,
     /// Where the last phrase ended, so lead-in never repeats it.
     phrase_end: i64,
+    /// Samples the detector had heard when it was last reset: its positions count from there.
+    vad_base: i64,
+    /// Since when the detector has heard speech without a break.
+    speech_since: Option<i64>,
+    /// Speech found and not yet transcribed, as sample positions: where it starts and ends, and the end of the audio the model gets.
+    ranges: Vec<(i64, i64, i64)>,
     line: u64,
+    /// Gives phrases their speakers, when voices are on.
+    labeller: Option<Labeller<'a>>,
 }
 
 impl EngineStream for PhraseStream<'_> {
     fn push(&mut self, audio: &[f32]) -> Result<()> {
         self.pending.extend_from_slice(audio);
         let whole = self.pending.len() / VAD_WINDOW * VAD_WINDOW;
-        for window in self.pending[..whole].as_chunks::<VAD_WINDOW>().0 {
+        let windows: Vec<f32> = self.pending.drain(..whole).collect();
+        for window in windows.as_chunks::<VAD_WINDOW>().0 {
             self.vad.accept_waveform(window);
             self.heard.push(window);
+            self.cut_long_speech();
         }
-        self.pending.drain(..whole);
         Ok(())
     }
 
     fn poll(&mut self) -> Result<Vec<Line>> {
         let mut lines = Vec::new();
-        while let Some(segment) = self.vad.front() {
-            self.vad.pop();
-            let start = (segment.start() - LEAD_IN_SAMPLES).max(self.phrase_end);
-            let end = (segment.start() + segment.n() as i64 + TRAIL_SAMPLES).min(self.heard.end());
-            self.phrase_end = end;
-            let text = self.transcribe(self.heard.range(start, end));
-            if !text.is_empty() {
-                lines.push(Line { id: self.line, text, complete: true });
+        for phrase in self.phrases() {
+            if self.labeller.is_some() {
+                lines.extend(into_lines(phrase.parts, &mut self.line));
+            } else {
                 self.line += 1;
+                lines.push(Line { id: self.line - 1, text: phrase.text, complete: true, voice: None });
             }
         }
         Ok(lines)
     }
 
     fn flush(&mut self) -> Result<Vec<Line>> {
-        self.vad.flush();
+        self.finish();
         self.poll()
     }
 }
 
 impl PhraseStream<'_> {
-    fn transcribe(&self, samples: &[f32]) -> String {
+    /// The phrases the detector has finished since the last call, transcribed.
+    pub fn phrases(&mut self) -> Vec<Phrase> {
+        let seconds = |at: i64| at as f32 / SAMPLE_RATE as f32;
+        let mut phrases = Vec::new();
+        self.take_detected();
+        for (speech_start, speech_end, audio_end) in std::mem::take(&mut self.ranges) {
+            let start = (speech_start - LEAD_IN_SAMPLES).max(self.phrase_end);
+            let end = audio_end.min(self.heard.end());
+            if end <= start {
+                continue;
+            }
+            self.phrase_end = end;
+            let (text, tokens) = self.transcribe(self.heard.range(start, end), seconds(speech_start - start));
+            if !text.is_empty() {
+                let mut phrase = Phrase { text, start: seconds(speech_start), end: seconds(speech_end), tokens, parts: Vec::new() };
+                if let Some(labeller) = &mut self.labeller {
+                    phrase.parts = labeller.parts(&phrase, self.heard.range(speech_start, speech_end));
+                }
+                phrases.push(phrase);
+            }
+        }
+        phrases
+    }
+
+    /// Moves the speech the detector has finished into `ranges`.
+    fn take_detected(&mut self) {
+        while let Some(segment) = self.vad.front() {
+            self.vad.pop();
+            let (start, end) = (self.vad_base + segment.start(), self.vad_base + segment.start() + segment.n() as i64);
+            self.ranges.push((start, end, end + TRAIL_SAMPLES));
+        }
+    }
+
+    /// Cuts speech that has run for [`CUT_PHRASE_SAMPLES`] at the quietest moment of its last few seconds. The detector's own
+    /// limit only raises its threshold to wait for a dip, which people talking over each other never give, and the model hears
+    /// nothing in a phrase that long. The detector starts again from the cut, so the rest is the next phrase.
+    fn cut_long_speech(&mut self) {
+        if !self.vad.detected() {
+            self.speech_since = None;
+            return;
+        }
+        let now = self.heard.end();
+        let since = *self.speech_since.get_or_insert(now);
+        if now - since < CUT_PHRASE_SAMPLES {
+            return;
+        }
+        let from = since.max(now - CUT_SEARCH_SAMPLES);
+        let cut = from + quietest_point(self.heard.range(from, now)) as i64;
+        self.take_detected();
+        self.ranges.push((since, cut, cut));
+        self.vad.reset();
+        self.vad_base = cut;
+        for window in self.heard.range(cut, now).chunks(VAD_WINDOW) {
+            self.vad.accept_waveform(window);
+        }
+        self.speech_since = Some(cut);
+    }
+
+    /// Ends the speech in progress, so `phrases` returns its phrase.
+    pub fn finish(&mut self) {
+        self.vad.flush();
+    }
+
+    /// The text of `samples` and, when voices are on, its tokens, timed from `lead_in` seconds into the samples.
+    fn transcribe(&self, samples: &[f32], lead_in: f32) -> (String, Vec<Token>) {
         let stream = self.engine.create_stream();
         stream.accept_waveform(SAMPLE_RATE as i32, samples);
         self.engine.recognizer.decode(&stream);
-        let text = stream.get_result().map(|r| r.text.trim().to_owned()).unwrap_or_default();
-        match &self.engine.hotwords {
+        let Some(result) = stream.get_result() else { return Default::default() };
+        let text = result.text.trim().to_owned();
+        let text = match &self.engine.hotwords {
             Some(hotwords) => without_repeats(&text, &hotwords.lock().unwrap()),
             None => text,
+        };
+        if self.labeller.is_none() {
+            return (text, Vec::new());
         }
+        let tokens: Vec<Token> = match result.timestamps {
+            Some(times) if times.len() == result.tokens.len() => {
+                result.tokens.into_iter().zip(times).map(|(text, time)| Token { text, start: time - lead_in }).collect()
+            }
+            _ => Vec::new(),
+        };
+        // Splitting rebuilds the text from the tokens, so they must say what the text says.
+        let said = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let tokens = if split_text(&tokens, &[]) == [said] { tokens } else { Vec::new() };
+        (text, tokens)
     }
+}
+
+/// The middle of the quietest [`QUIET_FRAME`] of `samples`, as an index into them.
+fn quietest_point(samples: &[f32]) -> usize {
+    let energy = |from: usize| samples[from..from + QUIET_FRAME].iter().map(|x| x * x).sum::<f32>();
+    let last = samples.len().saturating_sub(QUIET_FRAME);
+    let at = (0..=last).step_by(QUIET_FRAME / 2).min_by(|&a, &b| energy(a).total_cmp(&energy(b)));
+    at.unwrap_or(0) + QUIET_FRAME / 2
 }
 
 /// The last stretch of a stream's audio, addressed by sample position since the stream began.
@@ -323,6 +465,14 @@ fn vad_config(model: &Path) -> Result<VadModelConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_phrase_is_cut_where_it_is_quietest() {
+        let loud = |seconds: f32| vec![0.5; (seconds * SAMPLE_RATE as f32) as usize];
+        let samples = [loud(3.0), vec![0.0; QUIET_FRAME], loud(2.0)].concat();
+        let cut = quietest_point(&samples);
+        assert!((cut as f32 / SAMPLE_RATE as f32 - 3.05).abs() < 0.06, "{cut}");
+    }
 
     #[test]
     fn model_files_are_found_by_part() {

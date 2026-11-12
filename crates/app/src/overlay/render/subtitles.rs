@@ -72,12 +72,22 @@ const TILE_GAP: f32 = 8.0;
 pub struct SubtitleLine<'a> {
     pub text: &'a str,
     pub speaker: Speaker<'a>,
+    /// The name shown before the text; for your mic, "You" when the transcript has none.
+    pub label: Option<&'a str>,
+    /// Which voice of its source said it, which gives a name its colour.
+    pub voice: Option<u32>,
+}
+
+impl<'a> SubtitleLine<'a> {
+    pub fn new(text: &'a str, speaker: Speaker<'a>) -> Self {
+        Self { text, speaker, label: None, voice: None }
+    }
 }
 
 /// Who a line is from, which is shown in front of it.
 #[derive(Clone, Copy)]
 pub enum Speaker<'a> {
-    /// Your mic: "You: …".
+    /// Your mic: "You: …", unless its lines are named by voice.
     You,
     /// An app, by its executable's icon.
     App(Option<&'a Path>),
@@ -175,6 +185,7 @@ impl Renderer {
     /// shown may show only its last rows. Returns the area the pills cover.
     fn draw_subtitles(&mut self, scene: &SubtitleScene) -> Result<D2D_RECT_F> {
         let style = self.style(scene.look, scene.opacity)?;
+        self.set_label_colours(self.palette.accent, design::speaker_colours(luminance(style.text) > 0.5, self.palette.accent));
         let (mut bottom, mut rows_left) = (scene.height - MARGIN, scene.rows);
         let mut block: Option<D2D_RECT_F> = None;
         for line in scene.lines.iter().rev() {
@@ -202,11 +213,12 @@ impl Renderer {
     ) -> Result<(D2D_RECT_F, usize)> {
         let (size, pad_x, pad_y) = (style.size, PAD_X * style.size, PAD_Y * style.size);
         let lead = if matches!(line.speaker, Speaker::App(_)) { (ICON + ICON_GAP) * size } else { 0.0 };
-        let you = matches!(line.speaker, Speaker::You);
-        let text = if you { format!("{YOU}: {}", line.text) } else { line.text.to_owned() };
-        let layout = self.layout(&style.format, &text, max_width - 2.0 * pad_x - lead)?;
-        if you {
-            let prefix = DWRITE_TEXT_RANGE { startPosition: 0, length: YOU.len() as u32 + 1 };
+        let label = line.label.or(matches!(line.speaker, Speaker::You).then_some(YOU));
+        let text = label.map_or_else(|| line.text.to_owned(), |label| format!("{label}: {}", line.text));
+        let width = max_width - 2.0 * pad_x - lead;
+        let layout = self.layout(&style.format, &text, width)?;
+        let prefix = label.map(|label| DWRITE_TEXT_RANGE { startPosition: 0, length: label.encode_utf16().count() as u32 + 1 });
+        if let Some(prefix) = prefix {
             unsafe { layout.SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, prefix)? };
         }
         let rows = line_heights(&layout)?;
@@ -230,6 +242,13 @@ impl Renderer {
                 self.draw_layout(&layout, x + dx, y - hidden + dy, halo)?;
             }
         }
+        // The halo's copies share the cached layout, so a name's colour goes on a layout of its own.
+        let layout = match (label, prefix, line.voice) {
+            (Some(label), Some(prefix), Some(_)) if label != YOU => {
+                self.named_layout(&style.format, &text, width, prefix, self.label_brush(label, line.voice))?
+            }
+            _ => layout,
+        };
         self.draw_layout(&layout, x, y - hidden, style.text)?;
         if hidden > 0.0 {
             self.pop_clip();
@@ -445,7 +464,7 @@ impl Renderer {
         let style = self.style(look, opacity)?;
         let tile = rect(content.left, y, content.right, y + style.pill + 2.0 * design::GAP);
         self.glass(tile, RADIUS_CARD, Glass { top: hex(0x5b6b7d, 1.0), bottom: hex(0x2c3540, 1.0), ..self.palette.card })?;
-        let preview = SubtitleLine { text: "This is how captions look.", speaker: Speaker::You };
+        let preview = SubtitleLine::new("This is how captions look.", Speaker::You);
         self.draw_subtitle(&preview, &style, (content.left + content.right) / 2.0, tile.bottom - design::GAP, width(&content) - 2.0 * design::GAP, 1)?;
         Ok(tile.bottom)
     }
