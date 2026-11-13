@@ -12,6 +12,7 @@ use crate::{
     engine_host::HostedEngine,
     moonshine::MoonshineEngine,
     sherpa::PhraseEngine,
+    voices::{HeardVoice, Known},
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -33,6 +34,13 @@ pub trait Engine: Send + Sync {
     /// As [`open_stream`](Self::open_stream), but `voices` says whether the stream tells voices apart, which
     /// needs a model loaded with the speaker model ([`ModelSpec::voices`]); one without them costs nothing extra.
     fn open_stream_with(&self, voices: bool) -> Result<Box<dyn EngineStream + '_>>;
+
+    /// As [`open_stream_with`](Self::open_stream_with) with voices on, for a stream that begins by knowing the voices
+    /// `known` (labelled 0, 1, ... in that order, then new speakers). Engines that can't (Moonshine; a model on another
+    /// computer, which never receives a print) open an ordinary stream, which numbers its speakers by itself.
+    fn open_stream_knowing(&self, _known: &[Known]) -> Result<Box<dyn EngineStream + '_>> {
+        self.open_stream_with(true)
+    }
 
     /// The separate process running this engine, if any, so its CPU and GPU use can be counted.
     fn helper_process(&self) -> Option<u32> {
@@ -62,6 +70,12 @@ pub trait EngineStream: Send {
     /// Ends whatever is being said now without waiting for a pause, e.g. when dictation stops,
     /// and returns the lines that changed. The stream stays usable.
     fn flush(&mut self) -> Result<Vec<Line>>;
+
+    /// The speakers this stream has heard, with their prints and the audio each print absorbed since the stream began;
+    /// `None` when the stream doesn't track voices (it isn't telling them apart, or the engine can't hand out prints).
+    fn voice_prints(&mut self) -> Result<Option<Vec<HeardVoice>>> {
+        Ok(None)
+    }
 }
 
 /// A phrase of transcript. A line keeps its `id` while its text is revised,

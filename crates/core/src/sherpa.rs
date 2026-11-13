@@ -14,7 +14,7 @@ use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineStream, Vad
 use crate::{
     engine::{Device, Engine, EngineStream, Hotword, Line, ModelSpec, PhraseModel, Result, SAMPLE_RATE},
     transcripts,
-    voices::{into_lines, split_text, Embedder, Labeller, Part, Token},
+    voices::{into_lines, split_text, Embedder, HeardVoice, Known, Labeller, Part, Token},
 };
 
 /// Inference threads on the CPU; the 600M model is too slow on one.
@@ -109,16 +109,21 @@ impl PhraseEngine {
 
     /// As [`open_phrases`](Self::open_phrases) for a stream that tells voices apart (or not), if the engine can.
     fn open_phrases_with(&self, voices: bool) -> Result<PhraseStream<'_>> {
-        self.open(voices, true)
+        self.open(voices, true, &[])
     }
 
     /// As [`open_phrases`](Self::open_phrases); with voices on, `split` cuts phrases where the speaker changes,
     /// else each is labelled whole.
     pub fn open_phrases_splitting(&self, split: bool) -> Result<PhraseStream<'_>> {
-        self.open(true, split)
+        self.open(true, split, &[])
     }
 
-    fn open(&self, voices: bool, split: bool) -> Result<PhraseStream<'_>> {
+    /// A stream that tells voices apart and begins by knowing the voices `known` (labelled 0, 1, ... in that order).
+    pub fn open_phrases_knowing(&self, split: bool, known: &[Known]) -> Result<PhraseStream<'_>> {
+        self.open(true, split, known)
+    }
+
+    fn open(&self, voices: bool, split: bool, known: &[Known]) -> Result<PhraseStream<'_>> {
         Ok(PhraseStream {
             engine: self,
             vad: VoiceActivityDetector::create(&self.vad, MAX_PHRASE_SECONDS * 2.0).ok_or("speech detector failed to load")?,
@@ -129,7 +134,7 @@ impl PhraseEngine {
             speech_since: None,
             ranges: Vec::new(),
             line: 0,
-            labeller: self.voices.as_ref().filter(|_| voices).map(|embedder| Labeller::new(embedder, split)),
+            labeller: self.voices.as_ref().filter(|_| voices).map(|embedder| Labeller::new(embedder, split, known)),
         })
     }
 }
@@ -137,6 +142,10 @@ impl PhraseEngine {
 impl Engine for PhraseEngine {
     fn open_stream_with(&self, voices: bool) -> Result<Box<dyn EngineStream + '_>> {
         Ok(Box::new(self.open_phrases_with(voices)?))
+    }
+
+    fn open_stream_knowing(&self, known: &[Known]) -> Result<Box<dyn EngineStream + '_>> {
+        Ok(Box::new(self.open_phrases_knowing(true, known)?))
     }
 
     fn set_hotwords(&self, words: &[Hotword]) -> bool {
@@ -215,6 +224,10 @@ impl EngineStream for PhraseStream<'_> {
     fn flush(&mut self) -> Result<Vec<Line>> {
         self.finish();
         self.poll()
+    }
+
+    fn voice_prints(&mut self) -> Result<Option<Vec<HeardVoice>>> {
+        Ok(self.labeller.as_ref().map(Labeller::heard_voices))
     }
 }
 

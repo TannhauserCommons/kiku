@@ -21,6 +21,7 @@ use kiku::{
     hardware, hosting, overlay,
     processes::{exe_path, snapshot, Process},
     sessions::Sessions,
+    voice_store,
 };
 use kiku_core::{
     captions::{Captions, StreamId, YOU, YOU_SECTION},
@@ -35,6 +36,7 @@ use kiku_core::{
     download::{self, runnable, Target as Download},
     settings::{EngineWhere, Settings},
     status::StatusFile,
+    voices::{book::Place, session::{Following, Session}},
     update,
     words::Output,
 };
@@ -82,8 +84,12 @@ fn main() -> Result<()> {
     catalog::set_gpu_memory_mb(hardware.gpu.as_ref().map_or(0, |gpu| gpu.vram_mb));
     let first_run = !kiku_core::settings::exist();
     let settings = Settings::load();
-    let captions = Arc::new(Mutex::new(Captions { pinned: settings.pinned.clone(), ..Captions::default() }));
-    let controls = Arc::new(Controls::new(settings.mic_threshold_db, settings.computer_threshold_db, settings.choice()));
+    let mut transcript = Captions::default();
+    transcript.pinned.clone_from(&settings.pinned);
+    let captions = Arc::new(Mutex::new(transcript));
+    let mut controls = Controls::new(settings.mic_threshold_db, settings.computer_threshold_db, settings.choice());
+    controls.saved_voices = voice_store::saved_voices();
+    let controls = Arc::new(controls);
     controls.keep_days.store(settings.keep_days, Ordering::Relaxed);
     controls.auto_save.store(settings.auto_save, Ordering::Relaxed);
     controls.save_mic_only.store(settings.save_mic_only, Ordering::Relaxed);
@@ -91,6 +97,7 @@ fn main() -> Result<()> {
     controls.dictation_only.store(settings.dictation_only, Ordering::Relaxed);
     controls.voices_apps.store(settings.voices_apps, Ordering::Relaxed);
     controls.voices_mic.store(settings.voices_mic, Ordering::Relaxed);
+    controls.voices_across_apps.store(settings.voices_across_apps, Ordering::Relaxed);
     controls.set_engine_where(settings.engine_where);
     controls.set_engine_host(&settings.engine_host);
     controls.take_engine_changed();
@@ -117,6 +124,7 @@ fn main() -> Result<()> {
         last_notice: RefCell::default(),
         host: RefCell::default(),
         loaded_voices: Cell::new(false),
+        session: RefCell::default(),
         speakers_failed: Cell::new(None),
     };
     let discovery = Discovery::new(audio, events, wake_discovery.clone(), controls.clone());
@@ -339,6 +347,8 @@ struct Decoder {
     /// After a load for speakers failed: the switches it was for. It isn't tried again until they change, so a
     /// load that keeps failing never cuts live speech over and over (the old model keeps running meanwhile).
     speakers_failed: Cell<Option<bool>>,
+    /// The voices heard this run, numbered across streams, apps restarting and models reloading.
+    session: RefCell<Session>,
 }
 
 /// Trying the host again while the model runs on this PC.
@@ -389,20 +399,14 @@ struct Stream<'e> {
     engine: Box<dyn EngineStream + 'e>,
     /// Audio went in since the last poll; a stream given nothing has nothing new to say.
     fed: bool,
-    /// Whether it was opened telling voices apart.
-    voices: bool,
+    /// How it follows the run's voices, when it was opened telling voices apart.
+    follow: Option<Following>,
+    /// When its speakers' prints were last handed to the session.
+    handed_back: Instant,
 }
 
-impl Sources {
-    /// A new stream for source `index`; `None`, logged, if the engine can't open one, so that
-    /// source goes uncaptioned while the others carry on.
-    fn open<'e>(&mut self, engine: &'e dyn Engine, index: usize, controls: &Controls) -> Option<Stream<'e>> {
-        self.opened += 1;
-        let voices = controls.voices_for(self.sections[index].is_none());
-        let stream = engine.open_stream_with(voices).inspect_err(|error| log::write(format!("source {index}: couldn't open a stream: {error}")));
-        Some(Stream { id: self.opened, engine: stream.ok()?, fed: false, voices })
-    }
-}
+/// How often a running stream hands its speakers' prints to the session.
+const HAND_BACK_EVERY: Duration = Duration::from_secs(180);
 
 /// How [`Decoder::collect_all`] gathers lines.
 #[derive(Clone, Copy, PartialEq)]
@@ -497,7 +501,22 @@ impl Decoder {
         overlay: overlay::Handle,
     ) -> Stop {
         let alive = sources.alive.clone();
-        let mut streams: Vec<_> = alive.iter().enumerate().map(|(index, &alive)| alive.then(|| sources.open(engine, index, &self.controls)).flatten()).collect();
+        let mut streams: Vec<_> = alive.iter().enumerate().map(|(index, &alive)| alive.then(|| self.open_stream(engine, sources, index)).flatten()).collect();
+        let stop = self.decode_streams(engine, sources, &mut streams, chunks, source_events, overlay);
+        streams.into_iter().for_each(|stream| self.retire(stream));
+        stop
+    }
+
+    /// Decodes with `streams` until something ends this engine's turn.
+    fn decode_streams<'e>(
+        &self,
+        engine: &'e dyn Engine,
+        sources: &mut Sources,
+        streams: &mut Vec<Option<Stream<'e>>>,
+        chunks: &Receiver<Chunk>,
+        source_events: &Receiver<SourceEvent>,
+        overlay: overlay::Handle,
+    ) -> Stop {
         let mut next_poll = Instant::now() + POLL_INTERVAL;
         let mut last_lag_log: Option<Instant> = None;
         let mut was_dictating = false;
@@ -510,9 +529,9 @@ impl Decoder {
                     last_lag_log = Some(Instant::now());
                 }
             }
-            self.take_source_events(engine, sources, &mut streams, source_events);
+            self.take_source_events(engine, sources, streams, source_events);
             match received {
-                Ok(chunk) => self.feed(engine, sources, &mut streams, chunk),
+                Ok(chunk) => self.feed(engine, sources, streams, chunk),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Stop::Finished,
             }
@@ -521,10 +540,10 @@ impl Decoder {
             let stopped = self.controls.stopped.load(Ordering::Relaxed);
             if quitting || stopped {
                 while let Ok(chunk) = chunks.try_recv() {
-                    self.take_source_events(engine, sources, &mut streams, source_events);
-                    self.feed(engine, sources, &mut streams, chunk);
+                    self.take_source_events(engine, sources, streams, source_events);
+                    self.feed(engine, sources, streams, chunk);
                 }
-                self.finish_speech(engine, &mut streams, sources, overlay);
+                self.finish_speech(engine, streams, sources, overlay);
                 return if quitting { Stop::Finished } else { Stop::Stopped };
             }
             if self.controls.save_miss.swap(false, Ordering::Relaxed) {
@@ -533,7 +552,7 @@ impl Decoder {
             let dictating = self.controls.dictating.load(Ordering::Relaxed);
             if was_dictating && !dictating {
                 // Let go of the key: what you were saying is finished now, not after a pause.
-                self.collect_all(engine, &mut streams, sources, Collect::FlushMic);
+                self.collect_all(engine, streams, sources, Collect::FlushMic);
                 overlay.refresh();
                 overlay.type_queued();
             }
@@ -548,7 +567,7 @@ impl Decoder {
                     return Stop::Lost;
                 }
                 let collect = if dictating { Collect::Dictating } else { Collect::Poll };
-                if self.collect_all(engine, &mut streams, sources, collect) {
+                if self.collect_all(engine, streams, sources, collect) {
                     overlay.refresh();
                     if dictating || self.controls.has_heard() {
                         overlay.type_queued();
@@ -560,6 +579,9 @@ impl Decoder {
                     recorder.write();
                 }
                 self.recorder.borrow_mut().tick(&self.controls);
+                if self.keep_voices_current(sources, streams) {
+                    overlay.refresh();
+                }
                 self.report_status(sources);
                 if self.controls.words.refresh() {
                     overlay.refresh();
@@ -572,17 +594,104 @@ impl Decoder {
                 let mut from_host = self.host_answered();
                 // A pick still downloading waits, and captions go on meanwhile.
                 if self.controls.model().pending.is_some_and(|choice| self.can_load(choice)) || self.gpu_move_due() || reload || from_host.is_some() {
-                    self.finish_speech(engine, &mut streams, sources, overlay);
+                    self.finish_speech(engine, streams, sources, overlay);
                 }
                 let reloaded = || reload.then(|| self.reload()).flatten();
                 if let Some(next) = self.load_requested_model().or_else(|| self.move_to_gpu()).or_else(reloaded).or_else(|| from_host.take().map(|engine| self.adopt_host(engine))) {
                     overlay.refresh();
                     return Stop::Switch(next);
                 }
-                self.follow_voice_switches(engine, sources, &mut streams, overlay);
+                self.follow_voice_switches(engine, sources, streams, overlay);
                 next_poll = Instant::now() + POLL_INTERVAL;
             }
         }
+    }
+
+    /// The label of source `index`'s app; `None` for the mic.
+    fn app_of<'s>(&self, sources: &'s Sources, index: usize) -> Option<&'s str> {
+        sources.sections[index].map(|_| sources.labels[index].as_str())
+    }
+
+    /// A new stream for source `index`, knowing the voices of its place; `None`, logged, if the engine can't open
+    /// one, so that source goes uncaptioned while the others carry on.
+    fn open_stream<'e>(&self, engine: &'e dyn Engine, sources: &mut Sources, index: usize) -> Option<Stream<'e>> {
+        sources.opened += 1;
+        let app = self.app_of(sources, index);
+        let opened = if self.controls.voices_for(app.is_none()) {
+            let place = self.controls.voice_place(app);
+            let (follow, known) = self.session.borrow().follow(place, app, &self.controls.saved_voices.snapshot());
+            engine.open_stream_knowing(&known).map(|stream| (stream, Some(follow)))
+        } else {
+            engine.open_stream_with(false).map(|stream| (stream, None))
+        };
+        let (engine, follow) = opened.inspect_err(|error| log::write(format!("source {index}: couldn't open a stream: {error}"))).ok()?;
+        if let Some(follow) = &follow {
+            self.captions.lock().unwrap().set_stream_place(sources.opened, follow.place().clone());
+        }
+        Some(Stream { id: sources.opened, engine, fed: false, follow, handed_back: Instant::now() })
+    }
+
+    /// Whether a stream no longer matches what its source's switches ask: voices on or off, or recognised in another place.
+    fn stream_stale(&self, sources: &Sources, index: usize, stream: &Stream) -> bool {
+        let app = self.app_of(sources, index);
+        match &stream.follow {
+            Some(follow) => !self.controls.voices_for(app.is_none()) || *follow.place() != self.controls.voice_place(app),
+            None => self.controls.voices_for(app.is_none()),
+        }
+    }
+
+    /// One stream failing must not stop the others: log it and give that source a fresh stream.
+    fn reopen<'e>(&self, engine: &'e dyn Engine, sources: &mut Sources, slot: &mut Option<Stream<'e>>, index: usize, error: &dyn std::fmt::Display) {
+        log::write(format!("source {index}: stream failed ({error}); reopening"));
+        *slot = self.open_stream(engine, sources, index);
+    }
+
+    /// Ends a stream, first handing its speakers' prints to the session.
+    fn retire(&self, stream: Option<Stream>) {
+        if let Some(mut stream) = stream {
+            self.hand_back(&mut stream);
+        }
+    }
+
+    /// Hands the stream's speakers to the session, which folds them into the voices they are and the saved ones.
+    fn hand_back(&self, stream: &mut Stream) {
+        stream.handed_back = Instant::now();
+        let Some(follow) = &mut stream.follow else { return };
+        if let Ok(Some(heard)) = stream.engine.voice_prints() {
+            let saved = &self.controls.saved_voices;
+            self.session.borrow_mut().hand_back(follow, &heard, &saved.snapshot(), saved);
+        }
+    }
+
+    /// Once in a while hands every running stream's speakers over, and names the voices the panel asked to; whether the transcript changed.
+    fn keep_voices_current(&self, sources: &Sources, streams: &mut [Option<Stream>]) -> bool {
+        let requests = self.controls.saved_voices.take_name_requests();
+        for stream in streams.iter_mut().flatten() {
+            if !requests.is_empty() || stream.handed_back.elapsed() >= HAND_BACK_EVERY {
+                self.hand_back(stream);
+            }
+        }
+        let saved = &self.controls.saved_voices;
+        for request in requests {
+            self.session.borrow_mut().name(&request.place, request.voice, &request.name, request.app.as_deref(), saved);
+        }
+        self.show_names(sources)
+    }
+
+    /// Gives the transcript the names of the saved voices heard in each place, as they are now; whether any line was relabelled.
+    fn show_names(&self, sources: &Sources) -> bool {
+        let book = self.controls.saved_voices.snapshot();
+        let session = self.session.borrow();
+        let mut captions = self.captions.lock().unwrap();
+        let before = captions.relabels();
+        captions.set_mic_names(session.names(&Place::Mic, &book));
+        for (index, section) in sources.sections.iter().enumerate() {
+            if let Some(section) = section {
+                let place = self.controls.voice_place(self.app_of(sources, index));
+                captions.set_names(*section, &place, session.names(&place, &book));
+            }
+        }
+        captions.relabels() != before
     }
 
     /// Opens and closes streams for sources discovery added or lost. Sources are added before their
@@ -598,8 +707,8 @@ impl Decoder {
             let ended = if let SourceEvent::Ended(index) = &event { Some(*index) } else { None };
             self.track_source(sources, event);
             match ended {
-                Some(index) => streams[index] = None,
-                None => streams.push(sources.open(engine, streams.len(), &self.controls)),
+                Some(index) => self.retire(streams[index].take()),
+                None => streams.push(self.open_stream(engine, sources, streams.len())),
             }
         }
     }
@@ -619,7 +728,7 @@ impl Decoder {
 
     /// Reopens the streams whose switch changed, finishing what they were saying first; their speakers start again.
     fn follow_voice_switches<'e>(&self, engine: &'e dyn Engine, sources: &mut Sources, streams: &mut [Option<Stream<'e>>], overlay: overlay::Handle) {
-        let changed = |sources: &Sources, index: usize, stream: &Stream| stream.voices != self.controls.voices_for(sources.sections[index].is_none());
+        let changed = |sources: &Sources, index: usize, stream: &Stream| self.stream_stale(sources, index, stream);
         if !streams.iter().enumerate().any(|(index, stream)| stream.as_ref().is_some_and(|stream| changed(sources, index, stream))) {
             return;
         }
@@ -632,7 +741,8 @@ impl Decoder {
             let mic = sources.sections[index].is_none();
             let collect = if mic && self.controls.dictating.load(Ordering::Relaxed) { Collect::FlushMic } else { Collect::FlushAll };
             self.collect_stream(engine, streams, sources, index, collect, now);
-            streams[index] = sources.open(engine, index, &self.controls);
+            let old = std::mem::replace(&mut streams[index], self.open_stream(engine, sources, index));
+            self.retire(old);
         }
         if self.controls.has_heard() {
             overlay.type_queued();
@@ -952,7 +1062,7 @@ impl Decoder {
             stream.engine.push(&chunk.samples)
         });
         if let Some(Err(error)) = pushed {
-            reopen(engine, sources, slot, chunk.source, &self.controls, &error);
+            self.reopen(engine, sources, slot, chunk.source, &error);
         }
     }
 
@@ -1022,13 +1132,18 @@ impl Decoder {
         let lines = match lines {
             Ok(lines) => lines,
             Err(error) => {
-                reopen(engine, sources, &mut streams[index], index, &self.controls, &error);
+                self.reopen(engine, sources, &mut streams[index], index, &error);
                 return false;
             }
         };
-        let Some(stream) = &streams[index] else { return false };
+        let Some(stream) = &mut streams[index] else { return false };
         let section = sources.sections[index];
-        let lines = self.controls.keep_voices(mic, lines);
+        let mut lines = self.controls.keep_voices(mic, lines);
+        if let Some(follow) = &mut stream.follow {
+            // A helper that cannot answer leaves the lines without a voice; a stream that tracks none keeps its own labels.
+            let engine = &mut stream.engine;
+            self.session.borrow_mut().number_lines(follow, &mut lines, &self.controls.saved_voices, || engine.voice_prints().unwrap_or(Some(Vec::new())));
+        }
         if lines.is_empty() {
             return false;
         }
@@ -1052,12 +1167,6 @@ impl Decoder {
     fn as_captions(&self, lines: &[Line], label: &str) -> Vec<Line> {
         lines.iter().map(|line| Line { text: self.controls.words.apply(&line.text, label, Output::Captions), ..line.clone() }).collect()
     }
-}
-
-/// One stream failing must not stop the others: log it and give that source a fresh stream.
-fn reopen<'e>(engine: &'e dyn Engine, sources: &mut Sources, slot: &mut Option<Stream<'e>>, index: usize, controls: &Controls, error: &dyn std::fmt::Display) {
-    log::write(format!("source {index}: stream failed ({error}); reopening"));
-    *slot = sources.open(engine, index, controls);
 }
 
 fn host_request(choice: Choice, controls: &Controls) -> ModelRequest {

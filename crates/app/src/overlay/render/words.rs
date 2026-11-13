@@ -27,7 +27,8 @@ impl Renderer {
     /// Returns the y below the last row.
     pub(super) fn draw_word_settings(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
         let settings = panel.word_settings;
-        let y = self.draw_correction(panel, content, y, regions)?;
+        let y = self.draw_new_word(panel, content, y, regions)?;
+        let y = self.draw_correction(panel, content, y + SECTION_GAP, regions)?;
         // The card the hotword, suggestion and correction settings join.
         let mut y = self.draw_heading("Where they apply", content, y + SECTION_GAP)?;
         y = self.draw_card(content, y, |renderer, inner, mut y| {
@@ -75,12 +76,26 @@ impl Renderer {
         self.draw_word_entries(panel, content, y + SECTION_GAP, regions)
     }
 
+    /// A word to listen for, typed with how strongly, and added on its own. Returns the y below.
+    fn draw_new_word(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
+        let view = panel.view;
+        let mut y = self.draw_heading("Listen for a word", content, y)?;
+        let button = self.draw_text_button("Add hotword", None, Action::AddWord, Emphasis::Secondary, content.right, y + CONTROL / 2.0, panel, regions)?;
+        let area = rect(content.left, y, button - 8.0, y + CONTROL);
+        y = self.draw_text_box(&view.new_word, "e.g. Lull", area, word_box_role(WordBox::Hotword, panel), panel, regions)?.bottom;
+        let strength = view.new_strength.unwrap_or(panel.word_settings.strength);
+        y = self.draw_card(content, y + 8.0, |renderer, inner, y| {
+            renderer.draw_slider_row("Strength", &strength_text(strength), strength_fraction(strength), Slider::NewWordStrength, inner, y, regions)
+        })?;
+        self.draw_hint("Names and terms the model should listen out for.", content, y)
+    }
+
     /// What was heard and what it should be, side by side, then making it a rule (everywhere, or only where
     /// its line came from) or a hotword, each added on its own and explained. Returns the y below.
     fn draw_correction(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
         const GAP: f32 = 8.0;
         let (view, correction) = (panel.view, &panel.view.correction);
-        let mut y = self.draw_heading("Correct a word", content, y)?;
+        let mut y = self.draw_heading("Fix a mistake", content, y)?;
         let half = (width(&content) - GAP) / 2.0;
         let boxes = [(WordBox::Heard, "Heard", "e.g. dictionary", content.left), (WordBox::Fix, "Should be", "e.g. fictionary", content.left + half + GAP)];
         let mut bottom = y;
@@ -93,21 +108,19 @@ impl Renderer {
         }
         y = bottom + 12.0;
         let (heard, fix) = (quoted(&correction.heard.text, "what was heard"), quoted(&correction.fix.text, "what it should be"));
-        let (rule, hotword) = (format!("{heard} becomes {fix} once the model writes it"), format!("The model listens out for {fix}"));
+        let (rule, hotword) = (format!("{heard} becomes {fix} once the model writes it"), "The model listens out for it as it works out what was said".to_owned());
         y = self.draw_card(content, y, |renderer, inner, mut y| {
-            y = renderer.draw_two_line_row("Make it a rule", &rule, &[("Add rule", None, Action::AddRule, Emphasis::Secondary)], inner, y, panel, regions)?;
+            y = renderer.draw_two_line_row("Add a rule", &rule, &[("Add rule", None, Action::AddRule, Emphasis::Secondary)], inner, y, panel, regions)?;
             if let Some(app) = &correction.app {
                 let only = if app == YOU { "Only your lines".to_owned() } else { format!("Only in {app}") };
                 let choices = [("Everywhere", !correction.only_app, Action::CorrectOnlyApp(false)), (only.as_str(), correction.only_app, Action::CorrectOnlyApp(true))];
                 y = renderer.draw_choice_row("The rule applies", &choices, inner, y, panel, regions)?;
             }
-            renderer.draw_two_line_row("Make it a hotword", &hotword, &[("Add hotword", None, Action::AddHotword, Emphasis::Secondary)], inner, y, panel, regions)
+            renderer.draw_two_line_row(&format!("Also listen for {fix}"), &hotword, &[("Add hotword", None, Action::AddHotword, Emphasis::Secondary)], inner, y, panel, regions)
         })?;
-        let hint = "A rule fixes the text: whenever the model writes the words heard, Kiku swaps in what they should be, before the line \
-                    shows, is saved or is typed. It works with every model, for that exact mistake. A hotword fixes the hearing: the model \
-                    listens out for the word while it works out what was said, so it can get it right the first time, in any sentence and \
-                    every app; if it is still misheard, make it stronger in its entry below. Only Parakeet Unified listens for hotwords. \
-                    Add either one, or both.";
+        let hint = "A rule swaps the words heard for what they should be after the model writes them, for that exact mistake, with every \
+                    model. A hotword makes the model listen out for the word, so it can get it right in any sentence; only Parakeet \
+                    Unified listens for hotwords. Add either one, or both.";
         self.draw_hint(hint, content, y)
     }
 

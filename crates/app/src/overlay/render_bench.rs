@@ -41,7 +41,8 @@ use kiku_core::{
     catalog::{self, Choice},
     download::Downloads,
     hardware::{Gpu, Hardware},
-    settings::{BlockAnswer, EngineWhere, Opacity, YourLines},
+    settings::{BlockAnswer, EngineWhere, LabelStyle, Labels, Opacity, YourLines},
+    voices::book::{Place, VoiceInfo, VoiceScope},
     subtitles::SubtitleSettings,
     theme::{Theme, Themes},
     update::Release,
@@ -158,6 +159,9 @@ pub(super) fn panel<'a>(captions: &'a Captions, view: &'a View, keybinds: &'a Ke
         blocked: &[],
         block_answer: BlockAnswer::Ask,
         your_lines: YourLines::default(),
+        labels: Labels::default(),
+        recognise_across_apps: false,
+        saved_voices: Vec::new(),
         themes: Themes::default(),
         dictation_only: false,
         engine_where: EngineWhere::ThisPc,
@@ -284,7 +288,7 @@ pub(super) fn settings_window(panel: Panel) -> Panel {
 /// Captions mode two-thirds of a 1920-pixel screen wide at 144 DPI, showing `lines` in Night.
 fn subtitles<'a>(renderer: &Renderer, lines: &'a [SubtitleLine<'a>], look: &'a kiku_core::subtitles::Look, opacity: u8, dpi: f32) -> SubtitleScene<'a> {
     let height = renderer.subtitle_height(look, 2).unwrap();
-    SubtitleScene { lines, look, opacity, themes: Themes::default(), rows: 2, width: 853.0, height, dpi }
+    SubtitleScene { lines, labels: Labels::default(), look, opacity, themes: Themes::default(), rows: 2, width: 853.0, height, dpi }
 }
 
 /// The bitmap selected into `dc`, as top-down BGRA pixels.
@@ -452,6 +456,100 @@ fn the_apps_tab_has_a_switch_for_speakers_in_apps_and_at_the_mic() {
 }
 
 #[test]
+fn every_label_style_drawn_only_where_changed_matches_drawing_everything() {
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+    let keybinds = Keybinds::default();
+    for style in LabelStyle::ALL {
+        let (mut captions, now) = (speaker_captions(), Instant::now());
+        // An icon is loaded as it is first wanted, which frames drawn at different moments would show differently.
+        captions.sections.iter_mut().for_each(|section| section.exe_path = None);
+        let (mut view, mut partly, mut surface) = (View::new(), Renderer::new().unwrap(), Surface::default());
+        for step in 0..6 {
+            match step {
+                1 => captions.update_app(1, 1, &[Line { id: 9, text: "A third voice joins and says enough to wrap onto a second row of text in the panel.".into(), complete: true, voice: Some(3) }], now),
+                2 => captions.set_names(1, &Place::App("Discord".into()), [(1, "Maya".to_owned())].into()),
+                3 => view.hovered_line = captions.sections[1].captions.get(1).map(|caption| LineRef::of(1, caption)),
+                4 => {
+                    view.naming = captions.sections[1].captions.get(2).map(|caption| LineRef::of(1, caption));
+                    view.finder.typing = Some(TextBox::Name);
+                    view.name.set("Ma");
+                }
+                5 => captions.update_app(1, 1, &[Line { id: 9, text: "A third voice joins and says enough to wrap onto a second row of text in the panel, revised.".into(), complete: true, voice: Some(3) }], now),
+                _ => {}
+            }
+            let panel = Panel { labels: Labels { you: style, speakers: style }, height: 1000.0, ..panel(&captions, &view, &keybinds, 560.0) };
+            let (frame, _) = partly.render(&mut surface, &panel).unwrap();
+            let partial = pixels(frame.dc, frame.width, frame.height);
+            let (mut wholly, mut fresh) = (Renderer::new().unwrap(), Surface::default());
+            let (frame, _) = wholly.render(&mut fresh, &panel).unwrap();
+            let whole = pixels(frame.dc, frame.width, frame.height);
+            let first = partial.iter().zip(&whole).position(|(a, b)| !same_pixels(&[*a], &[*b]));
+            assert!(first.is_none(), "step {step} in {style:?} left different pixels, first at {:?} of width {}", first.map(|at| (at as i32 % frame.width, at as i32 / frame.width)), frame.width);
+        }
+    }
+}
+
+#[test]
+fn a_trimmed_section_whose_first_line_joins_a_turn_draws_like_a_fresh_one() {
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+    let keybinds = Keybinds::default();
+    for style in [LabelStyle::Blocks, LabelStyle::Turns, LabelStyle::Badges] {
+        let (mut captions, now) = (Captions::default(), Instant::now());
+        let app = captions.add_app("Discord", None);
+        let said = |id: u64, voice| Line { id, text: format!("line {id} of a long call"), complete: true, voice: Some(voice) };
+        let lines: Vec<Line> = (0..10_000).map(|id| said(id, u32::from(id >= 9_990))).collect();
+        captions.update_app(app, 1, &lines, now);
+        let (mut view, mut partly, mut surface) = (View::new(), Renderer::new().unwrap(), Surface::default());
+        view.scrolls.insert(ScrollArea::Section(app), Scroll::at(0.0));
+        for step in 0..2 {
+            if step == 1 {
+                captions.update_app(app, 1, &[said(10_000, 1)], now);
+            }
+            let panel = Panel { labels: Labels { you: style, speakers: style }, height: 640.0, ..panel(&captions, &view, &keybinds, 560.0) };
+            let (frame, _) = partly.render(&mut surface, &panel).unwrap();
+            let partial = pixels(frame.dc, frame.width, frame.height);
+            let (mut wholly, mut fresh) = (Renderer::new().unwrap(), Surface::default());
+            let (frame, _) = wholly.render(&mut fresh, &panel).unwrap();
+            assert!(same_pixels(&partial, &pixels(frame.dc, frame.width, frame.height)), "step {step} in {style:?} left different pixels");
+        }
+    }
+}
+
+#[test]
+fn clicking_a_speakers_name_names_them_in_every_label_style_but_never_the_first_voice_at_your_mic() {
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+    let (captions, keybinds, view) = (speaker_captions(), Keybinds::default(), View::new());
+    for style in LabelStyle::ALL {
+        let mut renderer = Renderer::new().unwrap();
+        let panel = Panel { labels: Labels { you: style, speakers: style }, height: 640.0, ..panel(&captions, &view, &keybinds, 560.0) };
+        let (_, regions) = renderer.render(&mut Surface::default(), &panel).unwrap();
+        let named: Vec<LineRef> = regions.targets.iter().filter_map(|(_, target)| if let Target::Click(Action::NameVoice(line)) = target { Some(*line) } else { None }).collect();
+        assert!(named.iter().any(|line| line.section == 1), "{style:?}: a Discord speaker can be named");
+        let you = &captions.sections[0].captions;
+        let first_voice = |line: &LineRef| you.iter().find(|caption| (caption.stream, caption.id) == (line.stream, line.id)).is_some_and(|caption| caption.voice == Some(0));
+        assert!(named.iter().filter(|line| line.section == 0).all(|line| !first_voice(line)), "{style:?}: your first voice stays You");
+    }
+}
+
+#[test]
+fn the_apps_tab_lists_saved_voices_to_rename_scope_and_forget() {
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+    let (captions, keybinds, mut view) = (Captions::default(), Keybinds::default(), View::new());
+    let (mut renderer, mut surface) = (Renderer::new().unwrap(), Surface::default());
+    view.tab = Tab::Apps;
+    let voice = |id, name: &str, scope, home: Option<&str>| VoiceInfo { id, name: name.into(), scope, home: home.map(str::to_owned) };
+    let saved = vec![voice(0, "Maya", VoiceScope::Everywhere, Some("Discord")), voice(1, "Sam", VoiceScope::App("Edge".into()), Some("Edge")), voice(2, "Alex", VoiceScope::Everywhere, None)];
+    let settings = settings_window(Panel { saved_voices: saved, ..panel(&captions, &view, &keybinds, 560.0) });
+    let (_, regions) = renderer.render_settings(&mut surface, &settings).unwrap();
+    let has = |action| regions.targets.iter().any(|(_, target)| *target == Target::Click(action));
+    assert!(has(Action::RenameSaved(0)) && has(Action::ForgetSaved(2)) && has(Action::SetVoiceScope(1, false)) && has(Action::SetVoiceScope(0, true)));
+    assert!(!has(Action::SetVoiceScope(2, true)), "a voice named at the mic has no app to be limited to");
+    let empty = settings_window(panel(&captions, &view, &keybinds, 560.0));
+    let texts = renderer.render_settings(&mut Surface::default(), &empty).map(|_| ()).is_ok();
+    assert!(texts);
+}
+
+#[test]
 fn settings_drawing_only_what_changed_matches_drawing_everything() {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
     let (captions, keybinds) = (Captions::default(), Keybinds::default());
@@ -513,15 +611,20 @@ fn subtitles_drawing_only_what_changed_matches_drawing_everything() {
         (vec![named("Sounds good.", "Speaker 1", 0), named("Not for me, sorry.", "Speaker 2", 1)], Theme::Graphite, 92),
         (vec![named("Sounds good.", "Speaker 1", 0), named("Not for me, sorry.", "Speaker 2", 1), named("Hm.", "Mic 2", 1)], Theme::Night, 92),
     ];
-    for dpi in [96.0, 120.0, 144.0, 168.0] {
-        let (mut partly, mut surface) = (Renderer::new().unwrap(), Surface::default());
-        for (step, (lines, theme, opacity)) in steps.iter().enumerate() {
-            let look = SubtitleSettings::default().look(&Themes::from(*theme));
-            let (frame, _) = partly.render_subtitles(&mut surface, &subtitles(&partly, lines, &look, *opacity, dpi)).unwrap();
-            let partial = pixels(frame.dc, frame.width, frame.height);
-            let (mut wholly, mut fresh) = (Renderer::new().unwrap(), Surface::default());
-            let (frame, _) = wholly.render_subtitles(&mut fresh, &subtitles(&wholly, lines, &look, *opacity, dpi)).unwrap();
-            assert!(same_pixels(&partial, &pixels(frame.dc, frame.width, frame.height)), "step {step} at {dpi} DPI left different pixels");
+    // Every DPI with the default label styles, and every style at one.
+    let styles = LabelStyle::ALL.map(|style| (Labels { you: style, speakers: style }, vec![144.0]));
+    let runs = std::iter::once((Labels::default(), vec![96.0, 120.0, 144.0, 168.0])).chain(styles);
+    for (labels, dpis) in runs {
+        for dpi in dpis {
+            let (mut partly, mut surface) = (Renderer::new().unwrap(), Surface::default());
+            for (step, (lines, theme, opacity)) in steps.iter().enumerate() {
+                let look = SubtitleSettings::default().look(&Themes::from(*theme));
+                let (frame, _) = partly.render_subtitles(&mut surface, &SubtitleScene { labels, ..subtitles(&partly, lines, &look, *opacity, dpi) }).unwrap();
+                let partial = pixels(frame.dc, frame.width, frame.height);
+                let (mut wholly, mut fresh) = (Renderer::new().unwrap(), Surface::default());
+                let (frame, _) = wholly.render_subtitles(&mut fresh, &SubtitleScene { labels, ..subtitles(&wholly, lines, &look, *opacity, dpi) }).unwrap();
+                assert!(same_pixels(&partial, &pixels(frame.dc, frame.width, frame.height)), "step {step} at {dpi} DPI in {labels:?} left different pixels");
+            }
         }
     }
 }
@@ -662,12 +765,12 @@ fn snapshots() {
     let mut trying = View::new();
     (trying.tab, trying.typing_word) = (Tab::Words, Some(WordBox::Try));
     trying.try_words.set("um, gg kicku.");
-    trying.scrolls.insert(ScrollArea::Settings, Scroll::at(280.0));
+    trying.scrolls.insert(ScrollArea::Settings, Scroll::at(440.0));
     // The Try box with a snippet's phrase said in a line.
     let mut trying_action = View::new();
     (trying_action.tab, trying_action.typing_word) = (Tab::Words, Some(WordBox::Try));
     trying_action.try_words.set("My email is paste email.");
-    trying_action.scrolls.insert(ScrollArea::Settings, Scroll::at(280.0));
+    trying_action.scrolls.insert(ScrollArea::Settings, Scroll::at(440.0));
     // The Listening tab's remote cards: a host answering, an invalid code, and sharing with a code.
     let key = "A".repeat(43);
     let code = format!("kiku://192.168.1.20:7300/#{key}.{key}");
@@ -706,8 +809,13 @@ fn snapshots() {
     correcting.correction = Correction { app: Some("Discord".into()), only_app: true, ..Correction::default() };
     correcting.correction.heard.set("dictionary");
     correcting.correction.fix.set("fictionary");
+    // A hotword being typed, with a strength of its own.
+    let mut hotword = View::new();
+    (hotword.tab, hotword.typing_word, hotword.new_strength) = (Tab::Words, Some(WordBox::Hotword), Some(2.5));
+    hotword.new_word.set("Lull");
     for theme in [Theme::Night, Theme::Day] {
         let themes = Themes::from(theme);
+        save_settings_window(&mut renderer, &folder.join(format!("settings-words-hotword-{}.png", name(theme))), Panel { themes, ..panel(&captions, &hotword, &keybinds, 560.0) });
         save_settings_window(&mut renderer, &folder.join(format!("settings-words-try-{}.png", name(theme))), Panel { themes, ..panel(&captions, &trying, &keybinds, 560.0) });
         save_settings_window(&mut renderer, &folder.join(format!("settings-words-correct-{}.png", name(theme))), Panel { themes, ..panel(&captions, &correcting, &keybinds, 560.0) });
         save_settings_window(&mut renderer, &folder.join(format!("settings-words-try-action-{}.png", name(theme))), Panel { themes, ..panel(&captions, &trying_action, &keybinds, 560.0) });
@@ -875,6 +983,70 @@ fn snapshots() {
         let scene = SubtitleScene { themes: *themes, rows: 4, height, ..subtitles(&renderer, &speaking, &look, 92, 144.0) };
         write_png(&folder.join(format!("captions-speakers-{theme}.png")), renderer.render_subtitles(&mut Surface::default(), &scene).unwrap().0);
     }
+    // Named voices: the six label styles for the speakers of a call (Maya is named), your lines in two styles, the
+    // naming box, the Apps tab's label choices and saved voices, and captions mode.
+    let call = names_captions();
+    let style_id = |style: LabelStyle| format!("{style:?}").to_lowercase();
+    let mut names_view = View::new();
+    names_view.hovered_line = call.sections[1].captions.get(3).map(|caption| LineRef::of(1, caption));
+    let shot = |name: &str, theme: Theme, labels: Labels, view: &View| {
+        let mut surface = Surface::default();
+        let shown = Panel { usage, themes: Themes::from(theme), height: 700.0, labels, ..panel(&call, view, &keybinds, 560.0) };
+        write_png(&folder.join(format!("{name}.png")), Renderer::new().unwrap().render(&mut surface, &shown).unwrap().0);
+    };
+    for style in LabelStyle::ALL {
+        shot(&format!("panel-names-{}-night", style_id(style)), Theme::Night, Labels { speakers: style, ..Labels::default() }, &names_view);
+    }
+    for style in [LabelStyle::Turns, LabelStyle::Badges] {
+        shot(&format!("panel-names-{}-day", style_id(style)), Theme::Day, Labels { speakers: style, ..Labels::default() }, &View::new());
+    }
+    for style in [LabelStyle::EveryLine, LabelStyle::Turns] {
+        shot(&format!("panel-names-you-{}-night", style_id(style)), Theme::Night, Labels { you: style, ..Labels::default() }, &View::new());
+    }
+    let mut naming = View::new();
+    naming.naming = call.sections[1].captions.front().map(|caption| LineRef::of(1, caption));
+    naming.finder.typing = Some(TextBox::Name);
+    naming.name.set("Ma");
+    for theme in [Theme::Night, Theme::Day] {
+        shot(&format!("panel-names-naming-{}", name(theme)), theme, Labels::default(), &naming);
+    }
+    let voice = |id, name: &str, scope, home: Option<&str>| VoiceInfo { id, name: name.into(), scope, home: home.map(str::to_owned) };
+    let saved = vec![voice(0, "Maya", VoiceScope::Everywhere, Some("Discord")), voice(1, "Sam", VoiceScope::App("Discord".into()), Some("Discord"))];
+    let nothing = Captions::default();
+    let apps_tab = |top: f32, renaming: bool| {
+        let mut view = View::new();
+        view.tab = Tab::Apps;
+        view.scrolls.insert(ScrollArea::Settings, Scroll::at(top));
+        if renaming {
+            (view.renaming, view.typing_word) = (Some(0), Some(WordBox::Rename));
+            view.rename.set("Maya R");
+        }
+        view
+    };
+    for (theme, themes) in [("night", Themes::default()), ("day", Themes::from(Theme::Day))] {
+        for (part, view) in [("labels", apps_tab(150.0, false)), ("voices", apps_tab(560.0, true))] {
+            let shown = Panel { themes, saved_voices: saved.clone(), ..panel(&nothing, &view, &keybinds, 560.0) };
+            save_settings_window(&mut Renderer::new().unwrap(), &folder.join(format!("settings-apps-{part}-{theme}.png")), shown);
+        }
+    }
+    {
+        let apps = apps_tab(0.0, false);
+        let shown = Panel { themes: Themes::default(), ..panel(&nothing, &apps, &keybinds, 560.0) };
+        save_settings_window(&mut Renderer::new().unwrap(), &folder.join("settings-apps-speakers-recognise-night.png"), shown);
+    }
+    let tagged = |text, label, tag: &'static str, voice, speaker| SubtitleLine { label: Some(label), tag: Some(tag.to_owned()), voice: Some(voice), ..SubtitleLine::new(text, speaker) };
+    let spoken = [
+        tagged("Okay so the build passed, but the installer still needs signing.", "Speaker 1", "1", 0, Speaker::App(discord.as_deref())),
+        tagged("I think the certificate is still on the old laptop.", "Maya", "Maya", 1, Speaker::App(discord.as_deref())),
+        tagged("Check the shared drive first.", "Speaker 3", "3", 2, Speaker::App(discord.as_deref())),
+        tagged("Someone else at my desk says hi.", "Mic 2", "Mic 2", 1, Speaker::You),
+    ];
+    for style in [LabelStyle::EveryLine, LabelStyle::Tags, LabelStyle::Badges, LabelStyle::Turns] {
+        let look = SubtitleSettings::default().look(&Themes::default());
+        let height = renderer.subtitle_height(&look, 4).unwrap();
+        let scene = SubtitleScene { rows: 4, height, labels: Labels { you: style, speakers: style }, ..subtitles(&renderer, &spoken, &look, 92, 144.0) };
+        write_png(&folder.join(format!("captions-names-{}-night.png", style_id(style))), renderer.render_subtitles(&mut Surface::default(), &scene).unwrap().0);
+    }
     write_png(&folder.join("icons.png"), icon_sheet(&mut renderer, &mut Surface::default()));
 }
 
@@ -973,6 +1145,7 @@ fn custom_themes() -> Themes {
 fn snapshot_captions() -> Captions {
     let (mut captions, now) = (Captions::default(), Instant::now());
     let discord = captions.add_app("Discord", discord_exe());
+    captions.set_stream_place(1, Place::App("Discord".into()));
     let edge = captions.add_app("Edge", Some(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe".into()));
     let said = |id, text: &str, complete| Line { id, text: text.into(), complete, voice: None };
     for (id, text) in ["Hey, can everyone hear me okay?", "Cool. So the build passed last night, but the installer still needs signing.", "Who has the certificate?"].iter().enumerate() {
@@ -988,6 +1161,35 @@ fn snapshot_captions() -> Captions {
 }
 
 /// A Discord call of three voices, a video, and you with a second voice at your mic.
+/// A call of three speakers in Discord, the second (Maya) named and speaking in turns of several lines, and your
+/// mic with a second voice, which is copied into Discord.
+fn names_captions() -> Captions {
+    let (mut captions, now) = (Captions::default(), Instant::now());
+    let discord = captions.add_app("Discord", discord_exe());
+    let place = Place::App("Discord".into());
+    captions.set_stream_place(1, place.clone());
+    captions.set_stream_place(2, Place::Mic);
+    let said = |id, (voice, text): (u32, &str)| Line { id, text: text.into(), complete: true, voice: Some(voice) };
+    let call = [
+        (0, "Okay so the build passed, but the installer still needs signing."),
+        (0, "I can look at the certificate after lunch."),
+        (1, "I think the certificate is still on the old laptop."),
+        (1, "Check the shared drive first, there should be a copy there."),
+        (1, "If not, I can export a new one tonight."),
+        (2, "Sounds good to me."),
+        (0, "Great, thanks both."),
+    ];
+    for (id, line) in call.into_iter().enumerate() {
+        captions.update_app(discord, 1, &[said(id as u64, line)], now);
+    }
+    captions.set_names(discord, &place, [(1, "Maya".to_owned())].into());
+    let mine = [(0, "Sure, I will start the build again."), (0, "It should only take a few minutes."), (1, "Someone else at my desk says hi."), (0, "Sorry about that.")];
+    for (id, line) in mine.into_iter().enumerate() {
+        captions.update_mic(2, &[said(id as u64, line)], Some("Discord"));
+    }
+    captions
+}
+
 fn speaker_captions() -> Captions {
     let (mut captions, now) = (Captions::default(), Instant::now());
     let discord = captions.add_app("Discord", discord_exe());

@@ -12,18 +12,18 @@ use windows::{
             ID2D1RenderTarget,
         },
         DirectWrite::{
-            IDWriteLocalizedStrings, IDWriteTextFormat, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-            DWRITE_TEXT_RANGE,
+            IDWriteLocalizedStrings, IDWriteTextFormat, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
         },
     },
 };
 
 use super::{
     design::{self, gradient, hex, mix, with_alpha, Palette, CLEAR, RADIUS_CARD, RADIUS_CONTROL, SETTING_ROW},
-    expand, height, height_of, line_heights, list_top, metrics, pointer_on, rect, text_format, width, Frame, Panel, Renderer, Surface, HANDLE_HEIGHT,
+    expand, height, height_of, line_heights, list_top, metrics, pointer_on, rect, text_format, text_rects, width, Frame, Panel, Renderer, Styled, Surface, HANDLE_HEIGHT,
     HANDLE_STRIP, KNOB, TRACK,
 };
 use crate::overlay::{
+    labels::{badge_text, Lead},
     render::Icon,
     scene::{Glass, Gloss},
     view::{Action, Dropdown, Paint, Regions, Slider, Target},
@@ -31,7 +31,7 @@ use crate::overlay::{
 use kiku_core::{
     captions::YOU,
     keybinds::Command,
-    settings::{MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
+    settings::{LabelStyle, Labels, MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
     subtitles::{Look, MAX_ROWS, PRESET_FONTS},
     theme::{Colours, Theme, Themes},
 };
@@ -44,6 +44,8 @@ const HALO: f32 = 0.75;
 const GAP: f32 = 0.3;
 const ICON: f32 = 1.05;
 const ICON_GAP: f32 = 0.45;
+/// A round badge's diameter, as a fraction of the text size.
+const BADGE: f32 = 1.1;
 /// Room around the pills for antialiasing, in DIPs.
 const MARGIN: f32 = 4.0;
 /// The drag tab's size in DIPs, the same as the panel's.
@@ -74,13 +76,15 @@ pub struct SubtitleLine<'a> {
     pub speaker: Speaker<'a>,
     /// The name shown before the text; for your mic, "You" when the transcript has none.
     pub label: Option<&'a str>,
+    /// The label as short as it goes, for the tag and the badge.
+    pub tag: Option<String>,
     /// Which voice of its source said it, which gives a name its colour.
     pub voice: Option<u32>,
 }
 
 impl<'a> SubtitleLine<'a> {
     pub fn new(text: &'a str, speaker: Speaker<'a>) -> Self {
-        Self { text, speaker, label: None, voice: None }
+        Self { text, speaker, label: None, tag: None, voice: None }
     }
 }
 
@@ -99,6 +103,8 @@ pub enum Speaker<'a> {
 pub struct SubtitleScene<'a> {
     /// Oldest first.
     pub lines: &'a [SubtitleLine<'a>],
+    /// How names show: the styles that read on one pill, else tags.
+    pub labels: Labels,
     pub look: &'a Look,
     /// The pills' opacity in percent.
     pub opacity: u8,
@@ -121,6 +127,8 @@ struct Style {
     /// Around the text, stronger as the pills get more see-through, so text stays readable over anything.
     halo: D2D1_COLOR_F,
     gloss: Gloss,
+    /// How names show on the pills.
+    labels: Labels,
 }
 
 /// Where the Appearance tab's drop-downs sit, so their lists can be drawn over later rows.
@@ -184,7 +192,7 @@ impl Renderer {
     /// The newest line at the bottom and older ones above it until `rows` rows show; the oldest
     /// shown may show only its last rows. Returns the area the pills cover.
     fn draw_subtitles(&mut self, scene: &SubtitleScene) -> Result<D2D_RECT_F> {
-        let style = self.style(scene.look, scene.opacity)?;
+        let style = Style { labels: scene.labels, ..self.style(scene.look, scene.opacity)? };
         self.set_label_colours(self.palette.accent, design::speaker_colours(luminance(style.text) > 0.5, self.palette.accent));
         let (mut bottom, mut rows_left) = (scene.height - MARGIN, scene.rows);
         let mut block: Option<D2D_RECT_F> = None;
@@ -212,26 +220,30 @@ impl Renderer {
         max_rows: usize,
     ) -> Result<(D2D_RECT_F, usize)> {
         let (size, pad_x, pad_y) = (style.size, PAD_X * style.size, PAD_Y * style.size);
-        let lead = if matches!(line.speaker, Speaker::App(_)) { (ICON + ICON_GAP) * size } else { 0.0 };
         let label = line.label.or(matches!(line.speaker, Speaker::You).then_some(YOU));
-        let text = label.map_or_else(|| line.text.to_owned(), |label| format!("{label}: {}", line.text));
-        let width = max_width - 2.0 * pad_x - lead;
-        let layout = self.layout(&style.format, &text, width)?;
-        let prefix = label.map(|label| DWRITE_TEXT_RANGE { startPosition: 0, length: label.encode_utf16().count() as u32 + 1 });
-        if let Some(prefix) = prefix {
-            unsafe { layout.SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, prefix)? };
-        }
+        let label_style = style.labels.style(matches!(line.speaker, Speaker::You)).on_a_pill();
+        let tag = line.tag.as_deref().or(label);
+        let lead = Lead::new(label_style, true, label, tag);
+        let badge = label.is_some() && label_style == LabelStyle::Badges;
+        let icon_room = if matches!(line.speaker, Speaker::App(_)) { (ICON + ICON_GAP) * size } else { 0.0 };
+        let lead_room = icon_room + if badge { (BADGE + ICON_GAP) * size } else { 0.0 };
+        let text = lead.text.clone() + line.text;
+        let width = max_width - 2.0 * pad_x - lead_room;
+        let colour = label.map(|label| unsafe { self.label_brush(label, line.voice).GetColor() });
+        // The halo's copies share this plain layout, bold as the name is; the name's colour goes on a layout of its own.
+        let plain = Styled { lead: &lead, bold: true, brush: None };
+        let layout = self.lead_layout(&style.format, &text, width, (lead.marked > 0).then_some(plain))?;
         let rows = line_heights(&layout)?;
         let shown = rows.len().min(max_rows);
         let (hidden, tall) = rows.split_at(rows.len() - shown);
         let (hidden, tall): (f32, f32) = (hidden.iter().sum(), tall.iter().sum());
-        let half_width = (metrics(&layout)?.width + 2.0 * pad_x + lead) / 2.0;
+        let half_width = (metrics(&layout)?.width + 2.0 * pad_x + lead_room) / 2.0;
         let pill = rect(center - half_width, bottom - tall - 2.0 * pad_y, center + half_width, bottom);
         self.scene.borrow_mut().pill(pill, style.pill / 2.0, style.gloss);
         if let Speaker::App(icon) = line.speaker {
             self.draw_app_icon(icon, pill.left + pad_x, (pill.top + pill.bottom) / 2.0, ICON * size, style)?;
         }
-        let (x, y) = (pill.left + pad_x + lead, pill.top + pad_y);
+        let (x, y) = (pill.left + pad_x + lead_room, pill.top + pad_y);
         if hidden > 0.0 {
             self.push_clip(rect(pill.left, y, pill.right, pill.bottom));
         }
@@ -242,13 +254,26 @@ impl Renderer {
                 self.draw_layout(&layout, x + dx, y - hidden + dy, halo)?;
             }
         }
-        // The halo's copies share the cached layout, so a name's colour goes on a layout of its own.
-        let layout = match (label, prefix, line.voice) {
-            (Some(label), Some(prefix), Some(_)) if label != YOU => {
-                self.named_layout(&style.format, &text, width, prefix, self.label_brush(label, line.voice))?
+        let layout = match label {
+            Some(label) if lead.marked > 0 && line.voice.is_some() && label != YOU => {
+                let brush = self.label_brush(label, line.voice);
+                self.lead_layout(&style.format, &text, width, Some(Styled { lead: &lead, bold: true, brush: Some(brush) }))?
             }
             _ => layout,
         };
+        if let (Some(colour), true) = (colour, lead.pill || badge) {            if lead.pill && let Some(&tag) = text_rects(&layout, 0, lead.marked, x, y - hidden)?.first() {
+                let tint = rect(tag.left, tag.top + 1.0, tag.right, tag.bottom - 1.0);
+                self.fill_rounded(tint, height(&tint) / 2.0, with_alpha(colour, 0.3))?;
+            }
+            if badge {
+                let first_row = line_heights(&layout)?.first().copied().unwrap_or(0.0);
+                let (centre, middle) = (pill.left + pad_x + icon_room + BADGE * size / 2.0, y - hidden + first_row / 2.0);
+                self.fill_dot(centre, middle, BADGE * size / 2.0, colour)?;
+                let initial = self.layout(&style.format, &badge_text(tag.unwrap_or_default()), f32::MAX)?;
+                let ink = if 0.299 * colour.r + 0.587 * colour.g + 0.114 * colour.b > 0.6 { design::black(0.85) } else { design::white(0.95) };
+                self.draw_layout(&initial, centre - metrics(&initial)?.width / 2.0, middle - height_of(&initial)? / 2.0, ink)?;
+            }
+        }
         self.draw_layout(&layout, x, y - hidden, style.text)?;
         if hidden > 0.0 {
             self.pop_clip();
@@ -274,7 +299,7 @@ impl Renderer {
         // Light text gets a dark halo, dark text a light one; none on solid pills.
         let see_through = 1.0 - opacity as f32 / 100.0;
         let halo = hex(if luminance(text) > 0.5 { 0x000000 } else { 0xffffff }, (see_through * 0.85 * 20.0).round() / 20.0);
-        Ok(Style { format, size, pill: row + 2.0 * PAD_Y * size, text, halo, gloss: gloss(look.pill, opacity) })
+        Ok(Style { format, size, pill: row + 2.0 * PAD_Y * size, text, halo, gloss: gloss(look.pill, opacity), labels: Labels::default() })
     }
 
     /// Made again only when the font or size changes.

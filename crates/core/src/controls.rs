@@ -16,6 +16,7 @@ use crate::{
     engine::{Hotword, Line, SAMPLE_RATE},
     update::Release,
     macros::{MacroBook, Mode},
+    voices::book::{NameRequest, Place, SavedVoices},
     words::WordBook,
 };
 
@@ -78,6 +79,10 @@ pub struct Controls {
     /// Tell voices apart in apps' audio, and at the mic. Either one loads models with the speaker model.
     pub voices_apps: AtomicBool,
     pub voices_mic: AtomicBool,
+    /// Recognise speakers across apps with one numbering, instead of in each app (`voices.recognise`).
+    pub voices_across_apps: AtomicBool,
+    /// The voices the user named, saved for later runs; the decoder recognises them, the panel names them.
+    pub saved_voices: SavedVoices,
     /// A newer version the update check found, waiting for the panel to offer it.
     update: Mutex<Option<Release>>,
     /// What a check asked for by hand found: whether there is a newer version, or why it failed.
@@ -167,6 +172,8 @@ impl Controls {
             dictation_only: AtomicBool::new(false),
             voices_apps: AtomicBool::new(true),
             voices_mic: AtomicBool::new(false),
+            voices_across_apps: AtomicBool::new(false),
+            saved_voices: SavedVoices::in_memory(),
             update: Mutex::new(None),
             checked: Mutex::new(None),
             words: WordBook::default(),
@@ -279,6 +286,21 @@ impl Controls {
     /// Whether a model loads with the speaker model: some stream tells voices apart.
     pub fn voices_wanted(&self) -> bool {
         self.voices_for(true) || self.voices_for(false)
+    }
+
+    /// Where a stream's voices are recognised: the mic's, an app's own, or all apps' together (`voices.recognise`).
+    pub fn voice_place(&self, app: Option<&str>) -> Place {
+        match app {
+            None => Place::Mic,
+            Some(label) => Place::of_app(label, self.voices_across_apps.load(Ordering::Relaxed)),
+        }
+    }
+
+    /// Asks the decoder to name the voice shown as `voice` (zero-based) among the speakers of the app labelled
+    /// `app` (none for the mic), and save it. Naming a voice that has a name renames it. An error, for the panel to
+    /// show, when the name is blank.
+    pub fn name_voice(&self, app: Option<&str>, voice: u32, name: &str) -> std::result::Result<(), String> {
+        self.saved_voices.request_name(NameRequest { place: self.voice_place(app), voice, name: name.to_owned(), app: app.map(str::to_owned) })
     }
 
     /// The words to load a model with.
@@ -548,6 +570,20 @@ mod tests {
         controls.set_hotwords(kiku(2.5));
         assert_eq!(controls.take_changed_hotwords(), Some(kiku(2.5)), "a new boost is a change");
         assert_eq!(controls.hotwords(), kiku(2.5));
+    }
+
+    #[test]
+    fn voices_are_recognised_per_app_unless_asked_across_apps() {
+        let choice = Choice { model: crate::catalog::by_id_or_default(crate::catalog::DEFAULT_ID), device: crate::engine::Device::Cpu };
+        let controls = Controls::new(THRESHOLD_MIN_DB, THRESHOLD_MIN_DB, choice);
+        assert_eq!(controls.voice_place(None), Place::Mic);
+        assert_eq!(controls.voice_place(Some("Discord")), Place::App("Discord".into()));
+        controls.voices_across_apps.store(true, Ordering::Relaxed);
+        assert_eq!(controls.voice_place(Some("Discord")), Place::AllApps);
+        assert_eq!(controls.voice_place(None), Place::Mic, "the mic is always its own place");
+        assert!(controls.name_voice(Some("Edge"), 1, " \t").is_err(), "a blank name is refused");
+        assert_eq!(controls.name_voice(Some("Edge"), 1, " Sam "), Ok(()));
+        assert_eq!(controls.saved_voices.take_name_requests(), [NameRequest { place: Place::AllApps, voice: 1, name: "Sam".into(), app: Some("Edge".into()) }]);
     }
 
     #[test]

@@ -28,6 +28,7 @@ use super::app_icon::register_class;
 use super::render::{Renderer, Speaker, SubtitleLine, SubtitleScene, Surface, DRAG_TAB};
 use kiku_core::{
     captions::{Captions, YOU_SECTION},
+    settings::Labels,
     subtitles::{newest, Mark, SubtitleSettings},
     theme::Themes,
 };
@@ -152,7 +153,7 @@ impl Subtitles {
     }
 
     /// Draws the newest lines, and `dictating` (the badge's text) while dictation goes on until told; anything said since the last frame keeps them up for another quiet spell.
-    pub fn draw(&mut self, renderer: &mut Renderer, captions: &Captions, hint: &str, dictating: Option<&str>) -> Result<()> {
+    pub fn draw(&mut self, renderer: &mut Renderer, captions: &Captions, labels: Labels, hint: &str, dictating: Option<&str>) -> Result<()> {
         if self.hidden {
             return Ok(());
         }
@@ -169,6 +170,7 @@ impl Subtitles {
                 text: &caption.text,
                 speaker: if section == YOU_SECTION { Speaker::You } else { Speaker::App(captions.sections[section].exe_path.as_deref()) },
                 label: caption.label(),
+                tag: caption.tag(),
                 voice: caption.voice,
             })
             .collect();
@@ -184,7 +186,7 @@ impl Subtitles {
         }
         let look = self.settings.look(&self.themes);
         let opacity = self.settings.opacity;
-        let scene = SubtitleScene { lines: &lines, look: &look, opacity, themes: self.themes, rows: self.settings.rows as usize, width: self.size.0, height: self.size.1, dpi: self.dpi };
+        let scene = SubtitleScene { lines: &lines, labels, look: &look, opacity, themes: self.themes, rows: self.settings.rows as usize, width: self.size.0, height: self.size.1, dpi: self.dpi };
         let (origin, scale) = (self.origin(), self.dpi / 96.0);
         let (frame, block) = renderer.render_subtitles(&mut self.surface, &scene)?;
         frame.present(self.window, origin, self.alpha)?;

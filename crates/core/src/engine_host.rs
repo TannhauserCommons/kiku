@@ -19,7 +19,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::engine::{load_here, Backend, Device, Engine, EngineStream, Hotword, Line, ModelSpec, Result, SAMPLE_RATE};
+use crate::{
+    engine::{load_here, Backend, Device, Engine, EngineStream, Hotword, Line, ModelSpec, Result, SAMPLE_RATE},
+    voices::{book::Print, HeardVoice, Known},
+};
 
 const HELPER: &str = "kiku-engine";
 /// Loading a model and hearing the test clip takes seconds; a GPU stack that hangs gets this long.
@@ -42,6 +45,8 @@ pub(crate) const POLL: u8 = 4;
 pub(crate) const FLUSH: u8 = 5;
 pub(crate) const CLOSE: u8 = 6;
 pub(crate) const HOTWORDS: u8 = 7;
+/// Asks a stream for its speakers' prints. Only the local helper answers it: a host never receives or sends a print.
+const PRINTS: u8 = 8;
 // Replies.
 pub(crate) const OK: u8 = 0;
 pub(crate) const LINES: u8 = 1;
@@ -102,6 +107,13 @@ impl HostedEngine {
         }
     }
 
+    fn open(&self, voices: bool, known: &[Known]) -> Result<Box<dyn EngineStream + '_>> {
+        let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
+        let open = if known.is_empty() { encode_open(id, voices) } else { encode_open_knowing(id, known) };
+        self.request(OPEN, &open)?;
+        Ok(Box::new(HostedStream { engine: self, id }))
+    }
+
     /// Sends a request that gets no reply.
     fn send(&self, kind: u8, payload: &[u8]) -> Result<()> {
         write_frame(&mut self.pipes.lock().unwrap().to_helper, kind, payload).map_err(|_| "the model's helper stopped unexpectedly".into())
@@ -110,9 +122,11 @@ impl HostedEngine {
 
 impl Engine for HostedEngine {
     fn open_stream_with(&self, voices: bool) -> Result<Box<dyn EngineStream + '_>> {
-        let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
-        self.request(OPEN, &encode_open(id, voices))?;
-        Ok(Box::new(HostedStream { engine: self, id }))
+        self.open(voices, &[])
+    }
+
+    fn open_stream_knowing(&self, known: &[Known]) -> Result<Box<dyn EngineStream + '_>> {
+        self.open(true, known)
     }
 
     fn helper_process(&self) -> Option<u32> {
@@ -157,6 +171,10 @@ impl EngineStream for HostedStream<'_> {
     fn flush(&mut self) -> Result<Vec<Line>> {
         decode_lines(&self.engine.request(FLUSH, &self.id.to_le_bytes())?)
     }
+
+    fn voice_prints(&mut self) -> Result<Option<Vec<HeardVoice>>> {
+        decode_prints(&self.engine.request(PRINTS, &self.id.to_le_bytes())?)
+    }
 }
 
 impl Drop for HostedStream<'_> {
@@ -183,7 +201,7 @@ pub fn serve() {
                 engine = Some(Box::leak(loaded));
                 Ok(Vec::new())
             })),
-            (OPEN, Some(engine)) => Some(engine.open_stream_with(opens_with_voices(&payload)).map(|stream| {
+            (OPEN, Some(engine)) => Some(open_requested(engine, &payload).map(|stream| {
                 streams.insert(id, stream);
                 Vec::new()
             })),
@@ -198,6 +216,10 @@ pub fn serve() {
                 (Some(error), _) => Err(error.into()),
                 (None, Some(stream)) => if kind == POLL { stream.poll() } else { stream.flush() }.map(|lines| encode_lines(&lines)),
                 (None, None) => Err("no such stream".into()),
+            }),
+            (PRINTS, _) => Some(match streams.get_mut(&id) {
+                Some(stream) => stream.voice_prints().map(|heard| encode_prints(heard.as_deref())),
+                None => Err("no such stream".into()),
             }),
             (CLOSE, _) => {
                 streams.remove(&id);
@@ -387,6 +409,85 @@ pub(crate) fn opens_with_voices(payload: &[u8]) -> bool {
     payload.get(8) == Some(&1)
 }
 
+/// An OPEN for a stream that begins knowing `known`: the plain request for a stream with voices, then a count and
+/// each voice's similarity, length and values. Only the local helper is ever sent this; the remote protocol's client
+/// uses `encode_open` alone, so a print can't reach a host.
+fn encode_open_knowing(id: u64, known: &[Known]) -> Vec<u8> {
+    let mut payload = encode_open(id, true);
+    payload.extend((known.len() as u32).to_le_bytes());
+    for voice in known {
+        payload.extend(voice.min_similarity.to_le_bytes());
+        push_values(&mut payload, voice.print.values());
+    }
+    payload
+}
+
+/// The voices an OPEN request says the stream knows; none for a plain one.
+fn decode_known(payload: &[u8]) -> Vec<Known> {
+    let mut reader = payload.get(9..).unwrap_or_default();
+    let known: Option<Vec<Known>> = (|| {
+        let count = take_u32(&mut reader)?;
+        (0..count).map(|_| Some(Known { min_similarity: f32::from_bits(take_u32(&mut reader)?), print: Print::new(&take_values(&mut reader)?)? })).collect()
+    })();
+    known.unwrap_or_default()
+}
+
+/// Opens the stream an OPEN request asks for.
+fn open_requested<'e>(engine: &'e dyn Engine, payload: &[u8]) -> Result<Box<dyn EngineStream + 'e>> {
+    match decode_known(payload) {
+        known if known.is_empty() => engine.open_stream_with(opens_with_voices(payload)),
+        known => engine.open_stream_knowing(&known),
+    }
+}
+
+/// A stream's speakers: 0 when it doesn't track them, else 1, a count and each one's label, seconds, strength and print.
+fn encode_prints(heard: Option<&[HeardVoice]>) -> Vec<u8> {
+    let Some(heard) = heard else { return vec![0] };
+    let mut payload = vec![1];
+    payload.extend((heard.len() as u32).to_le_bytes());
+    for voice in heard {
+        payload.extend(voice.label.to_le_bytes());
+        payload.extend(voice.seconds.to_le_bytes());
+        payload.extend(voice.strength.to_le_bytes());
+        push_values(&mut payload, voice.print.values());
+    }
+    payload
+}
+
+fn decode_prints(payload: &[u8]) -> Result<Option<Vec<HeardVoice>>> {
+    let garbled = || "garbled reply from the model's helper";
+    let (&tracked, mut reader) = payload.split_first().ok_or_else(garbled)?;
+    if tracked == 0 {
+        return Ok(None);
+    }
+    let count = take_u32(&mut reader).ok_or_else(garbled)?;
+    let mut heard = Vec::new();
+    for _ in 0..count {
+        let label = take_u32(&mut reader).ok_or_else(garbled)?;
+        let seconds = f32::from_bits(take_u32(&mut reader).ok_or_else(garbled)?);
+        let strength = f32::from_bits(take_u32(&mut reader).ok_or_else(garbled)?);
+        let print = Print::new(&take_values(&mut reader).ok_or_else(garbled)?).ok_or_else(garbled)?;
+        heard.push(HeardVoice { label, print, strength, seconds });
+    }
+    Ok(Some(heard))
+}
+
+fn push_values(payload: &mut Vec<u8>, values: &[f32]) {
+    payload.extend((values.len() as u32).to_le_bytes());
+    payload.extend(values.iter().flat_map(|x| x.to_le_bytes()));
+}
+
+fn take_u32(reader: &mut &[u8]) -> Option<u32> {
+    let (head, rest) = reader.split_first_chunk::<4>()?;
+    *reader = rest;
+    Some(u32::from_le_bytes(*head))
+}
+
+fn take_values(reader: &mut &[u8]) -> Option<Vec<f32>> {
+    let count = take_u32(reader)? as usize;
+    (0..count).map(|_| take_u32(reader).map(f32::from_bits)).collect()
+}
+
 /// A hotword as one line: its boost, a space and its text.
 pub(crate) fn encode_hotword(word: &Hotword) -> String {
     format!("{} {}", word.boost, word.text)
@@ -471,6 +572,25 @@ mod tests {
         assert_eq!(read_frame(&mut framed.as_slice()).unwrap(), (POLL, b"abc".to_vec()));
     }
 
+    #[test]
+    fn known_voices_and_prints_survive_the_pipe_and_a_host_is_sent_none() {
+        let print = |values: &[f32]| Print::new(values).unwrap();
+        let known = vec![Known { print: print(&[1.0, 2.0, 3.0]), min_similarity: 0.55 }, Known { print: print(&[0.0, 1.0, 0.0]), min_similarity: 0.4 }];
+        let open = encode_open_knowing(9, &known);
+        assert!(opens_with_voices(&open) && open[..9] == encode_open(9, true)[..], "the plain request comes first, so an engine that ignores prints reads it as ever");
+        let read = decode_known(&open);
+        assert!(read.len() == 2 && read.iter().zip(&known).all(|(a, b)| a.min_similarity == b.min_similarity && a.print.similarity(&b.print) > 0.9999));
+        assert!(decode_known(&encode_open(9, true)).is_empty() && decode_known(&encode_open(9, false)).is_empty());
+        assert!(decode_known(&open[..open.len() - 3]).is_empty(), "a cut request knows no one");
+
+        let heard = vec![HeardVoice { label: 0, print: print(&[1.0, 0.0]), strength: 11.0, seconds: 12.5 }, HeardVoice { label: 3, print: print(&[0.0, 2.0]), strength: 0.25, seconds: 0.5 }];
+        let read = decode_prints(&encode_prints(Some(&heard))).unwrap().unwrap();
+        assert!(read.len() == 2 && read.iter().zip(&heard).all(|(a, b)| (a.label, a.seconds, a.strength) == (b.label, b.seconds, b.strength) && a.print.similarity(&b.print) > 0.9999));
+        assert_eq!(decode_prints(&encode_prints(None)).unwrap().map(|v| v.len()), None);
+        assert!(decode_prints(&[1, 5, 0, 0, 0]).is_err() && decode_prints(&[]).is_err());
+        assert!(format!("{:?}", heard[1]).contains("Print(2 values)") && !format!("{:?}", heard[1]).contains("0.5,"), "a print is never spelled out");
+    }
+
     /// With voices on, lines come through the helper's pipe with their speaker (the test clip has one voice), and
     /// a stream opened without voices on the same engine gives the same words and no speaker.
     /// Needs Parakeet Unified and the speaker model installed (`KIKU_MODELS_DIR` can point at them) and the
@@ -494,6 +614,49 @@ mod tests {
         assert!(without.iter().all(|line| line.voice.is_none()), "{without:?}");
         let words = |lines: &[Line]| lines.iter().map(|line| line.text.clone()).collect::<Vec<_>>().join(" ");
         assert_eq!(words(&with), words(&without));
+    }
+
+    /// A print handed back by one stream, saved, and sent in with the next one's OPEN is recognised: its speaker comes
+    /// back as label 0 and the session names it, while a stream told about another voice calls the reader a new
+    /// speaker. Needs Parakeet Unified and the speaker model installed (`KIKU_MODELS_DIR` can point at them) and the
+    /// helper built (`cargo build -p kiku-core --bin kiku-engine`).
+    #[test]
+    #[ignore]
+    fn a_saved_print_crosses_the_pipe_and_its_speaker_comes_back_named() {
+        use crate::voices::{
+            book::{Place, SavedVoices, VoiceScope},
+            session::{Session, NAMED_SIMILARITY},
+        };
+        let model = crate::catalog::by_id_or_default(crate::catalog::DEFAULT_ID);
+        let variant = model.variants.iter().find(|variant| variant.installed()).expect("Parakeet Unified is installed");
+        let voices = crate::catalog::speaker_model().expect("the speaker model is installed");
+        let engine = crate::engine::load(&ModelSpec { voices: Some(voices), ..model.spec(variant) }).unwrap();
+        let hear = |known: &[Known]| {
+            let mut stream = engine.open_stream_knowing(known).unwrap();
+            for chunk in probe_clip().chunks(SAMPLE_RATE as usize / 10) {
+                stream.push(chunk).unwrap();
+            }
+            let lines = stream.flush().unwrap();
+            (lines, stream.voice_prints().unwrap().expect("a stream with voices tracks its speakers"))
+        };
+        let (lines, heard) = hear(&[]);
+        assert!(!lines.is_empty() && lines.iter().all(|line| line.voice == Some(0)), "{lines:?}");
+        assert_eq!(heard.len(), 1);
+        assert!(heard[0].seconds > 1.0, "{heard:?}");
+
+        let saved = SavedVoices::in_memory();
+        saved.add("Reader", heard[0].print.clone(), heard[0].seconds, VoiceScope::Everywhere, None);
+        let mut session = Session::default();
+        let (mut following, known) = session.follow(Place::Mic, None, &saved.snapshot());
+        let (mut lines, heard_again) = hear(&known);
+        assert_eq!(lines.last().and_then(|line| line.voice), Some(0), "the reader is the known voice (a first phrase too short to tell may not be): {lines:?}");
+        session.number_lines(&mut following, &mut lines, &saved, || Some(heard_again));
+        assert_eq!(lines.last().and_then(|line| line.voice), Some(0), "the run's first voice");
+        assert_eq!(session.names(&Place::Mic, &saved.snapshot()).get(&0).map(String::as_str), Some("Reader"));
+
+        let opposite = Print::new(&heard[0].print.values().iter().map(|x| -x).collect::<Vec<_>>()).unwrap();
+        let (lines, _) = hear(&[Known { print: opposite, min_similarity: NAMED_SIMILARITY }]);
+        assert!(lines.iter().all(|line| line.voice == Some(1)), "another voice is known, so the reader is a new speaker: {lines:?}");
     }
 
     /// A word's strength changed on a loaded model, as Settings' sliders do, applies from the next phrase:

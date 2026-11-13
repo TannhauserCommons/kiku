@@ -57,6 +57,8 @@ pub struct Settings {
     pub auto_fold_minutes: u32,
     pub block_answer: BlockAnswer,
     pub your_lines: YourLines,
+    /// How names show on lines: yours and the speakers' (`labels.you`, `labels.speakers`).
+    pub labels: Labels,
     /// Apps blocked always, by name: never captured or captioned.
     pub blocked: Vec<String>,
     /// Apps, by name, that get every line you say.
@@ -73,6 +75,8 @@ pub struct Settings {
     pub voices_apps: bool,
     /// Tell voices apart at your mic, which is "You" otherwise (`voices.mic`, default off).
     pub voices_mic: bool,
+    /// Recognise speakers across apps, with one numbering, rather than in each app (`voices.recognise`, default each app).
+    pub voices_across_apps: bool,
     /// Where word rules and transforms apply.
     pub words: WordSettings,
     /// Where the model runs: this PC, or the host in `engine_host`.
@@ -147,6 +151,71 @@ impl YourLines {
     }
 }
 
+/// How a speaker's name is shown on the lines it said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelStyle {
+    /// "Name:" before every line.
+    EveryLine,
+    /// The name once per turn, then a rail in the speaker's colour down the turn's lines.
+    Turns,
+    /// A short tag on every line, tinted in the speaker's colour.
+    Tags,
+    /// The rail only; the name shows under the pointer.
+    Colour,
+    /// A round badge with the number or initial at each turn.
+    Badges,
+    /// A small header with the name above each turn.
+    Blocks,
+}
+
+impl LabelStyle {
+    pub const ALL: [LabelStyle; 6] = [LabelStyle::EveryLine, LabelStyle::Turns, LabelStyle::Tags, LabelStyle::Colour, LabelStyle::Badges, LabelStyle::Blocks];
+
+    fn id(self) -> &'static str {
+        match self {
+            LabelStyle::EveryLine => "every-line",
+            LabelStyle::Turns => "turns",
+            LabelStyle::Tags => "tags",
+            LabelStyle::Colour => "colour",
+            LabelStyle::Badges => "badges",
+            LabelStyle::Blocks => "blocks",
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|style| style.id() == id)
+    }
+
+    /// The style for a pill of captions mode, where each line stands alone: the ones that read on a single
+    /// line stay, the others become tags.
+    pub fn on_a_pill(self) -> Self {
+        match self {
+            LabelStyle::EveryLine | LabelStyle::Badges => self,
+            _ => LabelStyle::Tags,
+        }
+    }
+}
+
+/// The label style of your lines (your mic) and of the other speakers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Labels {
+    pub you: LabelStyle,
+    pub speakers: LabelStyle,
+}
+
+impl Default for Labels {
+    fn default() -> Self {
+        Self { you: LabelStyle::EveryLine, speakers: LabelStyle::Turns }
+    }
+}
+
+impl Labels {
+    /// The style for a line of yours (`mine`) or of another speaker.
+    pub fn style(self, mine: bool) -> LabelStyle {
+        if mine { self.you } else { self.speakers }
+    }
+}
+
 impl Settings {
     pub fn choice(&self) -> Choice {
         Choice { model: catalog::by_id_or_default(&self.model), device: self.device }
@@ -170,6 +239,7 @@ impl Default for Settings {
             auto_fold_minutes: 2,
             block_answer: BlockAnswer::Ask,
             your_lines: YourLines::default(),
+            labels: Labels::default(),
             blocked: Vec::new(),
             pinned: Vec::new(),
             check_updates: true,
@@ -178,6 +248,7 @@ impl Default for Settings {
             dictation_only: false,
             voices_apps: true,
             voices_mic: false,
+            voices_across_apps: false,
             words: WordSettings::default(),
             engine_where: EngineWhere::ThisPc,
             engine_host: String::new(),
@@ -230,8 +301,11 @@ impl Settings {
                 "pinned" if !value.is_empty() => settings.pinned.push(value.to_owned()),
                 "check_updates" => settings.check_updates = value != "off",
                 "dictation_only" => settings.dictation_only = value == "on",
+                "labels.you" => settings.labels.you = LabelStyle::from_id(value).unwrap_or(Labels::default().you),
+                "labels.speakers" => settings.labels.speakers = LabelStyle::from_id(value).unwrap_or(Labels::default().speakers),
                 "voices.apps" => settings.voices_apps = value != "off",
                 "voices.mic" => settings.voices_mic = value == "on",
+                "voices.recognise" => settings.voices_across_apps = value == "across-apps",
                 "engine.where" => settings.engine_where = if value == "host" { EngineWhere::Host } else { EngineWhere::ThisPc },
                 "engine.host" => settings.engine_host = value.to_owned(),
                 "host.on" => settings.host_on = value == "true",
@@ -264,7 +338,7 @@ impl Settings {
         let blocked: String = self.blocked.iter().map(|name| format!("blocked = {name}\n")).collect();
         let pinned: String = self.pinned.iter().map(|name| format!("pinned = {name}\n")).collect();
         format!(
-            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\nvoices.apps = {}\nvoices.mic = {}\nengine.where = {}\nengine.host = {}\nhost.on = {}\nmacros.wake = {}\nmacros.run = {}\nmacros.run_anywhere = {}\nmacros.phrases = {}\n{}{blocked}{pinned}{}{}{}{}",
+            "mic_threshold_db = {}\ncomputer_threshold_db = {}\nmodel = {}\ndevice = {}\nsave_mode = {}\nauto_save = {}\nkeep_days = {}\nauto_fold = {}\nblock_answer = {}\nyour_lines = {}\ncheck_updates = {}\nwindow_opacity = {}\ntext_opacity = {}\nlocked_window_opacity = {}\nlocked_text_opacity = {}\ndictation_only = {}\nvoices.apps = {}\nvoices.mic = {}\nvoices.recognise = {}\nlabels.you = {}\nlabels.speakers = {}\nengine.where = {}\nengine.host = {}\nhost.on = {}\nmacros.wake = {}\nmacros.run = {}\nmacros.run_anywhere = {}\nmacros.phrases = {}\n{}{blocked}{pinned}{}{}{}{}",
             self.mic_threshold_db,
             self.computer_threshold_db,
             self.model,
@@ -283,6 +357,9 @@ impl Settings {
             if self.dictation_only { "on" } else { "off" },
             if self.voices_apps { "on" } else { "off" },
             if self.voices_mic { "on" } else { "off" },
+            if self.voices_across_apps { "across-apps" } else { "each-app" },
+            self.labels.you.id(),
+            self.labels.speakers.id(),
             if self.engine_where == EngineWhere::Host { "host" } else { "this-pc" },
             self.engine_host,
             self.host_on,
@@ -345,6 +422,7 @@ mod tests {
             auto_fold_minutes: 10,
             block_answer: BlockAnswer::Always,
             your_lines: YourLines::Both,
+            labels: Labels { you: LabelStyle::Blocks, speakers: LabelStyle::Badges },
             blocked: vec!["Discord".into(), "Steam, Inc. = client".into()],
             pinned: vec!["Slack".into()],
             check_updates: false,
@@ -353,6 +431,7 @@ mod tests {
             dictation_only: true,
             voices_apps: false,
             voices_mic: true,
+            voices_across_apps: true,
             words: WordSettings { rules: crate::words::Scope::Captions, transforms: crate::words::Scope::Both, hotwords: false, strength: 1.0 },
             engine_where: EngineWhere::Host,
             engine_host: "kiku://studio:7300/#ab.cd".into(),
@@ -368,6 +447,9 @@ mod tests {
         assert_eq!(Settings::parse("mic_threshold_db = NaN").mic_threshold_db, Settings::default().mic_threshold_db);
         let defaults = Settings::default();
         assert!(defaults.voices_apps && !defaults.voices_mic, "apps are told apart by default, the mic stays You");
+        assert!(!defaults.voices_across_apps, "speakers are recognised in each app unless asked otherwise");
+        assert_eq!(defaults.labels, Labels { you: LabelStyle::EveryLine, speakers: LabelStyle::Turns });
+        assert_eq!(Settings::parse("labels.you = sideways").labels, defaults.labels, "an unknown style keeps the default");
         assert_eq!(Settings::parse("voices = on"), defaults, "0.5's unreleased line is ignored");
         let older = Settings::parse("window_opacity = 40\ntext_opacity = 80");
         assert_eq!(older.locked_opacity, older.opacity, "locked follows unlocked until set");

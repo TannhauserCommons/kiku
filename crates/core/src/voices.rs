@@ -3,8 +3,10 @@
 //!
 //! A voice print is biometric data: embeddings stay in memory, are never logged and never leave the process.
 
+pub mod book;
 pub mod conversation;
 pub mod metrics;
+pub mod session;
 
 use std::path::Path;
 
@@ -14,6 +16,7 @@ use crate::{
     engine::{Line, Result, SAMPLE_RATE},
     log,
     sherpa::Phrase,
+    voices::book::Print,
 };
 
 /// Audio quieter than this (about -60 dBFS) has no voice to embed.
@@ -95,8 +98,33 @@ impl Default for Thresholds {
     }
 }
 
-/// Online clustering of one stream's phrases into speaker labels (0, 1, 2, ... in order of first appearance).
-/// A label once given never changes.
+/// A voice a stream is told it should know when it opens (`.loop/speakers/NAMES.md`, N8): the clusterer matches
+/// it before starting a new speaker, and its speaker takes the next label (0, 1, ... in the order given).
+#[derive(Clone, Debug)]
+pub struct Known {
+    pub print: Print,
+    /// The cosine similarity a phrase needs with it to be that voice: its own for a saved voice and for a speaker
+    /// heard earlier this run.
+    pub min_similarity: f32,
+}
+
+/// A speaker heard in a stream: the audio it absorbed since the stream began (not the known voice it started as), as the
+/// direction of the seconds-weighted sum of its phrases' embeddings (`print`) and that sum's length (`strength`), so
+/// `print × strength` is the sum itself and what was heard between two looks is the difference of the two sums.
+#[derive(Clone, Debug)]
+pub struct HeardVoice {
+    pub label: u32,
+    pub print: Print,
+    pub strength: f32,
+    /// The seconds of audio the sum rests on.
+    pub seconds: f32,
+}
+
+/// How many confident matches a known voice's print counts for, so a stream adapts to it but is not thrown off by one phrase.
+const KNOWN_WEIGHT: f32 = 4.0;
+
+/// Online clustering of one stream's phrases into speaker labels (0, 1, 2, ... in order of first appearance,
+/// known voices first). A label once given never changes.
 pub struct Clusterer {
     thresholds: Thresholds,
     speakers: Vec<Speaker>,
@@ -107,6 +135,15 @@ pub struct Clusterer {
 struct Speaker {
     centroid: Vec<f32>,
     matches: f32,
+    /// Audio (seconds) absorbed into the centroid since the stream began.
+    heard: f32,
+    /// The phrases absorbed since the stream began, each embedding scaled to length 1 and weighted by its seconds. Unlike
+    /// the centroid it holds nothing of the known voice the speaker started as.
+    audio: Vec<f32>,
+    /// The similarity a phrase needs with the centroid to be this speaker.
+    min_similarity: f32,
+    /// Started from a known voice, whose centroid has length 1: phrases are scaled to match when absorbed.
+    known: bool,
 }
 
 impl Clusterer {
@@ -114,20 +151,26 @@ impl Clusterer {
         Self { thresholds, speakers: Vec::new(), last: None }
     }
 
+    /// A clusterer that begins with the speakers `known`, labelled 0, 1, ... in that order.
+    pub fn knowing(thresholds: Thresholds, known: &[Known]) -> Self {
+        let speakers = known.iter().map(|known| Speaker { centroid: known.print.values().to_vec(), matches: KNOWN_WEIGHT, heard: 0.0, audio: vec![0.0; known.print.values().len()], min_similarity: known.min_similarity, known: true }).collect();
+        Self { thresholds, speakers, last: None }
+    }
+
     /// The label of a phrase `seconds` long with this embedding. A phrase too short, or with no embedding, takes
     /// the previous label (0 at the start) and changes nothing.
     pub fn assign(&mut self, embedding: &[f32], seconds: f32) -> u32 {
         let label = if !self.thresholds.embeds(seconds) || embedding.is_empty() {
-            self.last.unwrap_or(0)
+            self.previous()
         } else {
-            self.match_or_add(embedding)
+            self.match_or_add(embedding, seconds)
         };
         self.last = Some(label);
         label
     }
 
     /// The label of a part of a split phrase, or of a whole phrase, `seconds` long: as [`assign`](Self::assign) when
-    /// long enough to cluster, else the known speaker closest to its embedding if that passes `similarity` (a short part
+    /// long enough to cluster, else the known speaker closest to its embedding if that passes its similarity (a short part
     /// follows a change, so the previous label is likelier wrong), else the previous label.
     pub fn assign_part(&mut self, embedding: &[f32], seconds: f32) -> u32 {
         if self.thresholds.embeds(seconds) {
@@ -135,8 +178,8 @@ impl Clusterer {
         }
         let best = self.speakers.iter().enumerate().map(|(i, s)| (i as u32, cosine(&s.centroid, embedding))).max_by(|a, b| a.1.total_cmp(&b.1));
         let label = match best {
-            Some((label, score)) if !embedding.is_empty() && score >= self.thresholds.similarity => label,
-            _ => self.last.unwrap_or(0),
+            Some((label, score)) if !embedding.is_empty() && score >= self.speakers[label as usize].min_similarity => label,
+            _ => self.previous(),
         };
         self.last = Some(label);
         label
@@ -147,19 +190,34 @@ impl Clusterer {
         self.speakers.get(label as usize).map(|speaker| speaker.centroid.as_slice())
     }
 
-    fn match_or_add(&mut self, embedding: &[f32]) -> u32 {
+    /// The speakers that absorbed any audio in this stream, with their prints.
+    pub fn heard_voices(&self) -> Vec<HeardVoice> {
+        let heard = self.speakers.iter().enumerate().filter(|(_, speaker)| speaker.heard > 0.0);
+        heard.filter_map(|(label, speaker)| Some(HeardVoice { label: label as u32, print: Print::new(&speaker.audio)?, strength: length(&speaker.audio), seconds: speaker.heard })).collect()
+    }
+
+    /// The label a phrase that can't be told takes: the previous one, or at the start the next new speaker's (0 when
+    /// none is known), never a known voice that hasn't been heard.
+    fn previous(&self) -> u32 {
+        self.last.unwrap_or(self.speakers.len() as u32)
+    }
+
+    fn match_or_add(&mut self, embedding: &[f32], seconds: f32) -> u32 {
         let mut scores: Vec<(u32, f32)> = self.speakers.iter().enumerate().map(|(i, s)| (i as u32, cosine(&s.centroid, embedding))).collect();
         scores.sort_by(|a, b| b.1.total_cmp(&a.1));
-        match scores.as_slice() {
-            [(best, score), rest @ ..] if *score >= self.thresholds.similarity => {
-                let second = rest.first().map_or(f32::NEG_INFINITY, |&(_, score)| score);
+        match scores.iter().find(|&&(label, score)| score >= self.speakers[label as usize].min_similarity) {
+            Some(&(best, score)) => {
+                let second = scores.iter().find(|&&(label, _)| label != best).map_or(f32::NEG_INFINITY, |&(_, score)| score);
                 if score - second >= self.thresholds.margin {
-                    self.speakers[*best as usize].absorb(embedding);
+                    self.speakers[best as usize].absorb(embedding, seconds);
                 }
-                *best
+                best
             }
-            _ => {
-                self.speakers.push(Speaker { centroid: embedding.to_vec(), matches: 1.0 });
+            None => {
+                let min_similarity = self.thresholds.similarity;
+                let mut speaker = Speaker { centroid: embedding.to_vec(), matches: 1.0, heard: 0.0, audio: vec![0.0; embedding.len()], min_similarity, known: false };
+                speaker.hear(embedding, seconds);
+                self.speakers.push(speaker);
                 self.speakers.len() as u32 - 1
             }
         }
@@ -167,12 +225,25 @@ impl Clusterer {
 }
 
 impl Speaker {
-    fn absorb(&mut self, embedding: &[f32]) {
+    /// Takes `seconds` of audio with this embedding into what the speaker has heard.
+    fn hear(&mut self, embedding: &[f32], seconds: f32) {
+        self.heard += seconds;
+        let weight = seconds / length(embedding).max(f32::EPSILON);
+        self.audio.iter_mut().zip(embedding).for_each(|(sum, e)| *sum += e * weight);
+    }
+
+    fn absorb(&mut self, embedding: &[f32], seconds: f32) {
         self.matches += 1.0;
+        self.hear(embedding, seconds);
+        let scale = if self.known { 1.0 / length(embedding).max(f32::EPSILON) } else { 1.0 };
         for (c, e) in self.centroid.iter_mut().zip(embedding) {
-            *c += (e - *c) / self.matches;
+            *c += (e * scale - *c) / self.matches;
         }
     }
+}
+
+fn length(values: &[f32]) -> f32 {
+    values.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -349,10 +420,15 @@ pub struct Labeller<'a> {
 }
 
 impl<'a> Labeller<'a> {
-    /// A labeller with the tuned thresholds and windows (`.loop/voices/progress.md`); `split` cuts phrases at a
-    /// change of speaker, else each is labelled whole.
-    pub fn new(embedder: &'a Embedder, split: bool) -> Self {
-        Self { embedder, clusterer: Clusterer::new(Thresholds::default()), windows: WindowParams::default(), split }
+    /// A labeller with the tuned thresholds and windows (`.loop/voices/progress.md`) that starts out knowing the
+    /// voices `known`; `split` cuts phrases at a change of speaker, else each is labelled whole.
+    pub fn new(embedder: &'a Embedder, split: bool, known: &[Known]) -> Self {
+        Self { embedder, clusterer: Clusterer::knowing(Thresholds::default(), known), windows: WindowParams::default(), split }
+    }
+
+    /// The speakers heard so far, with their prints.
+    pub fn heard_voices(&self) -> Vec<HeardVoice> {
+        self.clusterer.heard_voices()
     }
 
     /// The parts of `phrase`, whose speech is `audio`, each with its voice; neighbours of one voice are joined.
@@ -436,7 +512,7 @@ pub fn overlaps(segments: &[Segment]) -> Vec<(f32, f32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{join_same_voice, middle, too_quiet, Clusterer, Embedder, Part, Thresholds, WindowParams, Windows};
+    use super::{join_same_voice, middle, too_quiet, Clusterer, Embedder, Known, Part, Print, Thresholds, WindowParams, Windows};
 
     #[test]
     fn a_speaker_model_that_cannot_load_means_voices_off() {
@@ -464,6 +540,37 @@ mod tests {
         assert!(windows.mean(0.0, 0.5).is_empty(), "no window fits inside");
     }
 
+
+    fn known(values: &[f32], min_similarity: f32) -> Known {
+        Known { print: Print::new(values).unwrap(), min_similarity }
+    }
+
+    #[test]
+    fn a_clusterer_starts_with_the_voices_it_knows() {
+        let mut clusterer = Clusterer::knowing(Thresholds::default(), &[known(&[1.0, 0.0], 0.8), known(&[0.0, 1.0], 0.4)]);
+        assert_eq!(clusterer.assign(&[0.0, 3.0], 2.0), 1, "the second known voice, whatever the scale of the embedding");
+        assert_eq!(clusterer.assign(&[5.0, 0.5], 2.0), 0);
+        assert_eq!(clusterer.assign(&[-1.0, -1.0], 2.0), 2, "no one known: a new speaker, after the known ones");
+        let heard: Vec<(u32, f32)> = clusterer.heard_voices().iter().map(|voice| (voice.label, voice.seconds)).collect();
+        assert_eq!(heard, [(0, 2.0), (1, 2.0), (2, 2.0)]);
+        let norm = clusterer.centroid(0).unwrap().iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(norm < 1.5, "a big embedding doesn't swamp a known voice's print: {norm}");
+    }
+
+
+    #[test]
+    fn a_short_first_phrase_never_takes_a_known_voice_it_is_not() {
+        let mut clusterer = Clusterer::knowing(Thresholds::default(), &[known(&[1.0, 0.0], 0.55)]);
+        assert_eq!(clusterer.assign(&[], 0.5), 1, "the next new speaker's label, not the known voice's");
+        assert_eq!(clusterer.assign(&[0.0, 1.0], 2.0), 1, "and that is who it turns out to be");
+        assert_eq!(Clusterer::new(Thresholds::default()).assign(&[], 0.5), 0, "as ever without known voices");
+    }
+    #[test]
+    fn a_known_voice_needs_its_own_similarity_not_clusterings() {
+        let mut clusterer = Clusterer::knowing(Thresholds::default(), &[known(&[1.0, 0.0], 0.95)]);
+        assert_eq!(clusterer.assign(&[1.0, 0.5], 2.0), 1, "0.89 is under its 0.95, though over clustering's 0.4");
+        assert!(Clusterer::knowing(Thresholds::default(), &[known(&[1.0, 0.0], 0.8)]).heard_voices().is_empty(), "a voice not yet heard has no print to hand back");
+    }
     #[test]
     fn a_short_part_takes_the_nearest_known_speaker() {
         let mut clusterer = Clusterer::new(Thresholds::default());

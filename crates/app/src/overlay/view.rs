@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use super::{
+    labels::Shape,
     dictation_card::{DictationAction, DictationCard},
     field::Field,
     finder::{Finder, Period, TextBox},
@@ -23,7 +24,8 @@ use kiku_core::{
     engine::Device,
     keybinds::Command,
     history::Session,
-    settings::{BlockAnswer, EngineWhere, YourLines},
+    settings::{BlockAnswer, EngineWhere, LabelStyle, YourLines},
+    voices::book::VoiceId,
     theme::{Colours, Theme},
     update::Release,
     words::Scope,
@@ -136,12 +138,26 @@ pub enum Action {
     Unpin(usize),
     SetBlockAnswer(BlockAnswer),
     SetYourLines(YourLines),
+    /// How a speaker's name shows on their lines: yours (true) or the others'.
+    SetLabelStyle { you: bool, style: LabelStyle },
+    /// Opens the box to name the speaker of a line, or to rename them.
+    NameVoice(LineRef),
+    /// Recognises speakers across apps (true) or in each app.
+    SetRecognise(bool),
+    /// Opens the box to rename a saved voice.
+    RenameSaved(VoiceId),
+    /// Limits a saved voice to the app it was named in (true), or has it recognised everywhere.
+    SetVoiceScope(VoiceId, bool),
+    /// Forgets a saved voice (a second press confirms).
+    ForgetSaved(VoiceId),
     /// Where word rules (false) or transforms (true) apply.
     WordScope { transforms: bool, scope: Scope },
     /// Whether the model listens for the file's `@` words.
     WordHotwords(bool),
     /// Has a word listened for as strongly as the rest again, by its place in the file's entries.
     ResetWordStrength(usize),
+    /// Adds the word typed in the Words tab's "Listen for a word" box.
+    AddWord,
     /// Removes an entry from the word rules file, by its place in the file's entries.
     RemoveWordEntry(usize),
     /// Opens the word rules file, made first if missing.
@@ -381,6 +397,8 @@ pub enum Slider {
     Strength,
     /// How strongly it listens for one `@` word, by its place in the file's entries.
     WordStrength(usize),
+    /// How strongly it will listen for the word being added in the Words tab's first section.
+    NewWordStrength,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -428,6 +446,8 @@ pub struct CaptionRegion {
     pub x: f32,
     pub y: f32,
     pub width: f32,
+    /// How its speaker's name was shown, which says how a point in the text maps to the text as copied.
+    pub shape: Shape,
 }
 
 impl Regions {
@@ -533,8 +553,11 @@ impl Scroll {
 pub enum WordBox {
     Host,
     Try,
+    Hotword,
     Heard,
     Fix,
+    /// A saved voice's new name.
+    Rename,
 }
 
 /// A misheard word being corrected: what was heard, what it should be, and the app its line came from.
@@ -605,6 +628,14 @@ pub struct View {
     pub confirm_delete: Option<Download>,
     /// A new host code waiting for a second press.
     pub confirm_new_code: bool,
+    /// A saved voice waiting for a second press of Forget.
+    pub confirm_forget: Option<VoiceId>,
+    /// The line whose speaker is being named in the panel, and what is typed.
+    pub naming: Option<LineRef>,
+    pub name: Field,
+    /// The saved voice being renamed in the settings window, and what is typed.
+    pub renaming: Option<VoiceId>,
+    pub rename: Field,
     /// The settings window is walking through setup, at this step.
     pub setup: Option<SetupStep>,
     /// The pointer is over the title bar, where dragging moves the panel.
@@ -624,6 +655,9 @@ pub struct View {
     pub font_matches: Vec<usize>,
     /// The Words tab's Try box, its correction, and which of their boxes keys go to.
     pub try_words: Field,
+    /// The word being added as a hotword, and the strength picked for it (`None`: the settings').
+    pub new_word: Field,
+    pub new_strength: Option<f32>,
     pub macros: MacroTab,
     /// The macro palette, open over the panel.
     pub palette: Option<Palette>,
@@ -663,6 +697,11 @@ impl View {
             update_check: None,
             confirm_delete: None,
             confirm_new_code: false,
+            confirm_forget: None,
+            naming: None,
+            name: Field::default(),
+            renaming: None,
+            rename: Field::default(),
             setup: None,
             drag_hover: false,
             notice: None,
@@ -675,6 +714,8 @@ impl View {
             font_search: Field::default(),
             font_matches: Vec::new(),
             try_words: Field::default(),
+            new_word: Field::default(),
+            new_strength: None,
             macros: MacroTab::default(),
             palette: None,
             dictation: DictationCard::default(),
@@ -695,8 +736,10 @@ impl View {
         match which {
             WordBox::Host => &self.host_code,
             WordBox::Try => &self.try_words,
+            WordBox::Hotword => &self.new_word,
             WordBox::Heard => &self.correction.heard,
             WordBox::Fix => &self.correction.fix,
+            WordBox::Rename => &self.rename,
         }
     }
 
@@ -704,8 +747,10 @@ impl View {
         match which {
             WordBox::Host => &mut self.host_code,
             WordBox::Try => &mut self.try_words,
+            WordBox::Hotword => &mut self.new_word,
             WordBox::Heard => &mut self.correction.heard,
             WordBox::Fix => &mut self.correction.fix,
+            WordBox::Rename => &mut self.rename,
         }
     }
 
@@ -785,7 +830,7 @@ mod tests {
         let line = LineRef { section: 1, stream: 1, id: 7 };
         let visible = D2D_RECT_F { left: 0.0, top: 0.0, right: 100.0, bottom: 20.0 };
         let row = D2D_RECT_F { right: 156.0, ..visible };
-        let regions = Regions { captions: vec![CaptionRegion { line, visible, row, x: 0.0, y: 0.0, width: 100.0 }], ..Default::default() };
+        let regions = Regions { captions: vec![CaptionRegion { line, visible, row, x: 0.0, y: 0.0, width: 100.0, shape: Shape { style: LabelStyle::EveryLine, first: true } }], ..Default::default() };
         assert_eq!(regions.line_at(140.0, 10.0), Some(line));
         assert!(regions.caption_at(140.0, 10.0).is_none());
         assert_eq!(regions.line_at(50.0, 10.0), Some(line));

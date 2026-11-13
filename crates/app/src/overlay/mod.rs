@@ -16,6 +16,7 @@ mod finder;
 mod folds;
 mod icons;
 mod keys;
+mod labels;
 mod macro_run;
 mod macro_tab;
 mod palette;
@@ -100,12 +101,13 @@ use kiku_core::{
     hardware::Hardware,
     imports,
     remote::HostCode,
-    settings::{BlockAnswer, Opacity, Settings, YourLines, MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
+    settings::{BlockAnswer, Labels, Opacity, Settings, YourLines, MIN_TEXT_OPACITY, MIN_WINDOW_OPACITY},
+    voices::book::{VoiceId, VoiceScope},
     subtitles::SubtitleSettings,
     theme::Themes,
     transcripts,
     update::{self, Release},
-    words::{WordSettings, ASSISTANT_INSTRUCTIONS},
+    words::{Kind, WordSettings, ASSISTANT_INSTRUCTIONS},
 };
 use crate::processes::snapshot;
 use app_icon::register_class;
@@ -286,6 +288,7 @@ pub fn run(
         auto_fold: settings.auto_fold_minutes,
         block_answer: settings.block_answer,
         your_lines: settings.your_lines,
+        labels: settings.labels,
         opacity: settings.opacity,
         locked_opacity: settings.locked_opacity,
         wake_discovery,
@@ -384,6 +387,7 @@ struct Window {
     auto_fold: u32,
     block_answer: BlockAnswer,
     your_lines: YourLines,
+    labels: Labels,
     /// The panel's opacity while unlocked, and while locked.
     opacity: Opacity,
     locked_opacity: Opacity,
@@ -476,6 +480,9 @@ impl Window {
             WM_NCHITTEST => return Some(self.hit_test(lparam)),
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                 let target = self.target_at_client(lparam);
+                if self.view.naming.is_some() && !matches!(target, Some(Target::Click(Action::NameVoice(_)))) {
+                    self.stop_typing();
+                }
                 if self.view.palette.is_some() && !matches!(target, Some(Target::Card | Target::Click(Action::RunFromPalette(_)))) {
                     self.view.palette = None;
                     self.redraw();
@@ -602,6 +609,7 @@ impl Window {
         // Only a second press of Delete deletes, and of New code.
         let confirming = std::mem::take(&mut self.settings.view.confirm_delete);
         let confirming_new_code = std::mem::take(&mut self.settings.view.confirm_new_code);
+        let confirming_forget = std::mem::take(&mut self.settings.view.confirm_forget);
         match action {
             Action::Macro(action) => self.macro_action(action),
             Action::RunFromPalette(at) => self.run_from_palette(at),
@@ -679,6 +687,29 @@ impl Window {
                 self.your_lines = look;
                 self.save_settings();
             }
+            Action::SetLabelStyle { you, style } => {
+                *if you { &mut self.labels.you } else { &mut self.labels.speakers } = style;
+                self.save_settings();
+            }
+            Action::SetRecognise(across) => {
+                self.controls.voices_across_apps.store(across, Ordering::Relaxed);
+                self.save_settings();
+            }
+            Action::NameVoice(line) => self.start_naming(line),
+            Action::RenameSaved(id) => self.start_renaming(id),
+            Action::SetVoiceScope(..) | Action::ForgetSaved(_) if self.voices_refused() => {}
+            Action::SetVoiceScope(id, only_home) => {
+                let home = self.controls.saved_voices.list().into_iter().find(|voice| voice.id == id).and_then(|voice| voice.home);
+                let scope = match home {
+                    Some(app) if only_home => VoiceScope::App(app),
+                    _ => VoiceScope::Everywhere,
+                };
+                self.controls.saved_voices.set_scope(id, scope);
+            }
+            Action::ForgetSaved(id) if confirming_forget == Some(id) => {
+                self.controls.saved_voices.forget(id);
+            }
+            Action::ForgetSaved(id) => self.settings.view.confirm_forget = Some(id),
             Action::WordScope { transforms, scope } => {
                 let mut settings = self.controls.words.settings();
                 *if transforms { &mut settings.transforms } else { &mut settings.rules } = scope;
@@ -743,6 +774,7 @@ impl Window {
             Action::CorrectOnlyApp(only) => self.settings.view.correction.only_app = only,
             Action::AddRule => self.add_correction(false),
             Action::AddHotword => self.add_correction(true),
+            Action::AddWord => self.add_new_word(),
             Action::ScrollToLatest(index) => {
                 self.view.scrolls.insert(ScrollArea::Section(index), Scroll::default());
             }
@@ -1287,6 +1319,9 @@ impl Window {
         let field = view.word_box_mut(which);
         if !field.edit(key, ctrl, || clipboard::text(hwnd)) {
             match key {
+                VK_RETURN if which == WordBox::Hotword => return self.perform(Action::AddWord),
+                VK_RETURN if which == WordBox::Rename => return self.finish_rename(),
+                VK_ESCAPE if which == WordBox::Rename => view.typing_word = None,
                 VK_TAB if which == WordBox::Heard => view.typing_word = Some(WordBox::Fix),
                 VK_TAB if which == WordBox::Fix => view.typing_word = Some(WordBox::Heard),
                 VK_ESCAPE if !field.text.is_empty() => field.clear(),
@@ -1318,6 +1353,34 @@ impl Window {
         view.typing_word = Some(WordBox::Fix);
         view.scrolls.insert(ScrollArea::Settings, Scroll::at_top());
         self.redraw();
+    }
+
+    /// Adds the word typed in "Listen for a word" as a hotword, with the strength picked if it isn't the settings'.
+    fn add_new_word(&mut self) {
+        let view = &self.settings.view;
+        let word = view.new_word.text.trim().to_owned();
+        if word.is_empty() {
+            return self.notify("Type the word to listen for first".into(), true);
+        }
+        let settings = self.controls.words.settings();
+        let own = view.new_strength.filter(|&strength| strength != settings.strength);
+        let added = self.controls.words.add_word(&word).and_then(|()| match own {
+            Some(strength) => {
+                let words = self.controls.words.words();
+                let entry = words.entries().iter().find(|entry| matches!(&entry.kind, Kind::Word { word: known, .. } if known.eq_ignore_ascii_case(&word)));
+                entry.map_or(Ok(()), |entry| self.controls.words.set_strength(entry, Some(strength)))
+            }
+            None => Ok(()),
+        });
+        match added {
+            Ok(()) => {
+                let done = if settings.hotwords { format!("Listening for {word} from the next phrase") } else { format!("Added {word}; turn on Listen for @ words to use it") };
+                self.settings.view.new_word.clear();
+                self.settings.view.new_strength = None;
+                self.notify(done, false);
+            }
+            Err(error) => self.notify(format!("Couldn't add it: {}", plain_error(&error)), true),
+        }
     }
 
     /// Adds the correction to the word rules file: as a rule, heard => should be, or with `hotword` what
@@ -1392,6 +1455,10 @@ impl Window {
                 self.controls.words.set_settings(WordSettings { strength, ..settings });
                 settings.strength != strength
             }
+            Slider::NewWordStrength => {
+                let strength = Some(strength_at(&track, x));
+                std::mem::replace(&mut self.settings.view.new_strength, strength) != strength
+            }
             Slider::WordStrength(index) => {
                 let strength = Some((index, strength_at(&track, x)));
                 std::mem::replace(&mut self.settings.view.word_strength, strength) != strength
@@ -1453,6 +1520,7 @@ impl Window {
             auto_fold_minutes: self.auto_fold,
             block_answer: self.block_answer,
             your_lines: self.your_lines,
+            labels: self.labels,
             blocked: self.controls.blocked().into_iter().filter(|app| app.always).map(|app| app.name).collect(),
             pinned: self.captions.lock().unwrap().pinned.clone(),
             check_updates: self.controls.check_updates.load(Ordering::Relaxed),
@@ -1461,6 +1529,7 @@ impl Window {
             dictation_only: self.controls.dictation_only.load(Ordering::Relaxed),
             voices_apps: self.controls.voices_for(false),
             voices_mic: self.controls.voices_for(true),
+            voices_across_apps: self.controls.voices_across_apps.load(Ordering::Relaxed),
             words: self.controls.words.settings(),
             engine_where: self.controls.engine_where(),
             engine_host: self.controls.engine_host(),
@@ -1703,7 +1772,7 @@ impl Window {
         let region = if nearest { self.view.regions.nearest_caption(x, y)? } else { self.view.regions.caption_at(x, y)? };
         let caption = self.caption(region.line)?;
         let y = y.clamp(region.visible.top, region.visible.bottom - 0.5);
-        let offset = self.renderer.text_offset(&caption, region.width, x - region.x, y - region.y).ok()?;
+        let offset = self.renderer.text_offset(&caption, region.shape, region.width, x - region.x, y - region.y).ok()?;
         Some(TextPoint { line: region.line, offset })
     }
 
@@ -1912,27 +1981,94 @@ impl Window {
     /// Gives the keyboard back: the panel no longer takes it when clicked.
     fn stop_typing(&mut self) {
         if self.view.finder.typing.take().is_some() {
+            self.view.naming = None;
             unsafe { SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) | WS_EX_NOACTIVATE.0 as isize) };
             self.redraw();
         }
     }
 
+    /// Whether the saved voices can't be kept this run, which the panel says.
+    fn voices_refused(&mut self) -> bool {
+        let refusal = self.controls.saved_voices.refusal();
+        if let Some(why) = &refusal {
+            self.notify(why.clone(), true);
+        }
+        refusal.is_some()
+    }
+
+    /// Opens the box that names the speaker of `line` (or renames them), unless names can't work.
+    fn start_naming(&mut self, line: LineRef) {
+        if self.view.naming == Some(line) || self.voices_refused() {
+            return;
+        }
+        if self.controls.model().remote.is_some() {
+            return self.notify("Names need the model on this PC: it is running on another computer".into(), true);
+        }
+        let Some(caption) = self.caption(line).filter(|caption| caption.nameable()) else { return };
+        self.view.name.set(if caption.is_named() { caption.label().unwrap_or_default() } else { "" });
+        self.view.naming = Some(line);
+        self.start_typing(TextBox::Name);
+        self.redraw();
+    }
+
+    /// Names the speaker of the line being named with what was typed; a name that can't be kept is said and the box stays.
+    fn finish_naming(&mut self) {
+        let Some(line) = self.view.naming else { return };
+        let (Some(caption), name) = (self.caption(line), self.view.name.text.trim().to_owned()) else { return self.stop_typing() };
+        let app = (!caption.mine).then(|| self.captions.lock().unwrap().sections[line.section].label.clone());
+        match caption.voice.map(|voice| self.controls.name_voice(app.as_deref(), voice, &name)) {
+            Some(Err(why)) => self.notify(why, true),
+            _ => {
+                self.stop_typing();
+                self.notify(format!("Named {name}"), false);
+            }
+        }
+    }
+
+    /// Opens the settings window's box to rename the saved voice `id`, with its name in it.
+    fn start_renaming(&mut self, id: VoiceId) {
+        if self.voices_refused() {
+            return;
+        }
+        let view = &mut self.settings.view;
+        if view.renaming != Some(id) {
+            let name = self.controls.saved_voices.list().into_iter().find(|voice| voice.id == id).map(|voice| voice.name);
+            view.rename.set(&name.unwrap_or_default());
+            view.renaming = Some(id);
+        }
+        view.typing_word = Some(WordBox::Rename);
+    }
+
+    /// Renames the saved voice with what was typed; a name that can't be kept is said and the box stays.
+    fn finish_rename(&mut self) {
+        let view = &mut self.settings.view;
+        let Some(id) = view.renaming else { return };
+        match self.controls.saved_voices.rename(id, &view.rename.text) {
+            Ok(()) => (view.typing_word, view.renaming) = (None, None),
+            Err(why) => self.notify(why, true),
+        }
+        self.redraw();
+    }
+
     /// The history box being typed in.
     fn typing_field(&mut self) -> Option<&mut field::Field> {
-        let finder = &mut self.view.finder;
-        match finder.typing? {
-            TextBox::Search => Some(&mut finder.search),
-            TextBox::Sql => Some(&mut finder.sql),
+        let view = &mut self.view;
+        match view.finder.typing? {
+            TextBox::Search => Some(&mut view.finder.search),
+            TextBox::Sql => Some(&mut view.finder.sql),
+            TextBox::Name => Some(&mut view.name),
         }
     }
 
     /// Editing keys for the box being typed in; Escape empties it, then leaves it, and Enter runs SQL.
     fn on_typing_key(&mut self, key: VIRTUAL_KEY) {
         let (ctrl, hwnd) = (ctrl_held(), self.hwnd);
-        let sql = self.view.finder.typing == Some(TextBox::Sql);
+        let (sql, naming) = (self.view.finder.typing == Some(TextBox::Sql), self.view.finder.typing == Some(TextBox::Name));
         let Some(field) = self.typing_field() else { return };
         if !field.edit(key, ctrl, || clipboard::text(hwnd)) {
             match key {
+                VK_ESCAPE if naming => return self.stop_typing(),
+                VK_RETURN if naming => return self.finish_naming(),
                 VK_ESCAPE if !field.text.is_empty() => field.clear(),
                 VK_ESCAPE => return self.stop_typing(),
                 VK_RETURN if sql => return self.perform(Action::RunSql),
@@ -2442,7 +2578,7 @@ impl Window {
         let hint = format!("Captions mode  ·  {} or double-click the tab beside them for the transcript", self.keybinds.shortcut(Command::Subtitles));
         let dictating = self.dispatch.latched().then(|| format!("Dictating  ·  {}", self.stop_hint()));
         let captions = self.captions.lock().unwrap();
-        self.subtitles.draw(&mut self.renderer, &captions, &hint, dictating.as_deref())
+        self.subtitles.draw(&mut self.renderer, &captions, self.labels, &hint, dictating.as_deref())
     }
 
     /// Draws captions mode or the panel, whichever shows, and the settings window if it is open. A panel
@@ -2500,6 +2636,9 @@ impl Window {
             blocked: &blocked,
             block_answer: self.block_answer,
             your_lines: self.your_lines,
+            labels: self.labels,
+            recognise_across_apps: self.controls.voices_across_apps.load(Ordering::Relaxed),
+            saved_voices: self.controls.saved_voices.list(),
             themes: self.subtitles.themes,
             shown_opacity: self.shown_opacity(),
             opacity: self.opacity,
@@ -2541,6 +2680,12 @@ impl Window {
         }
         if let Some(regions) = settings_regions {
             self.settings.view.regions = regions;
+        }
+        // A box for a line that is no longer drawn (scrolled away, folded, hidden, blocked, trimmed) must not keep the keyboard.
+        if let Some(line) = self.view.naming
+            && !(panel_shows && self.view.regions.captions.iter().any(|region| region.line == line))
+        {
+            self.stop_typing();
         }
         Ok(())
     }

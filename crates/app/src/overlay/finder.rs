@@ -73,11 +73,12 @@ impl Who {
     }
 }
 
-/// The history screen's two text boxes.
+/// The panel's text boxes: the history screen's two, and the one that names a speaker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextBox {
     Search,
     Sql,
+    Name,
 }
 
 /// Examples SQL mode offers to run: their names, and what they show.

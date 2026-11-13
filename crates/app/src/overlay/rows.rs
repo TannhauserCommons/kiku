@@ -41,6 +41,10 @@ impl Rows {
         self.rows.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
     /// The height of all the rows together.
     pub fn total(&self) -> f32 {
         self.rows.back().map_or(0.0, |last| (last.end() - self.origin()) as f32)
@@ -81,6 +85,12 @@ impl Rows {
         self.rows.range_mut(index + 1..).for_each(|row| row.start += change);
     }
 
+    /// Gives row `index` an estimated height again, e.g. because what it shows changed.
+    pub fn set_estimate(&mut self, index: usize, height: f32) {
+        self.set_measured(index, height);
+        self.rows[index].measured = false;
+    }
+
     /// Drops the first `count` rows.
     pub fn drop_front(&mut self, count: usize) {
         self.rows.drain(..count.min(self.rows.len()));
@@ -106,12 +116,20 @@ pub struct SectionRows {
 }
 
 impl SectionRows {
-    /// Drops the rows of lines the section dropped, and gives new and revised lines an `estimate`d height.
-    pub fn sync(&mut self, section: &Section, estimate: impl Fn(&Caption) -> f32) {
-        self.rows.drop_front((section.dropped() - self.dropped) as usize);
+    /// Drops the rows of lines the section dropped, and gives new and revised lines an `estimate`d height
+    /// (from the line before it and the line itself).
+    pub fn sync(&mut self, section: &Section, estimate: impl Fn(Option<&Caption>, &Caption) -> f32) {
+        let dropped = (section.dropped() - self.dropped) as usize;
+        self.rows.drop_front(dropped);
+        // The line that is now first may have been in the middle of a turn, and shows differently.
+        if dropped > 0 && !self.rows.is_empty() && !section.captions.is_empty() {
+            self.rows.set_estimate(0, estimate(None, &section.captions[0]));
+        }
         let changed = section.changed_since(self.revision).min(self.rows.len());
         self.rows.truncate(changed);
-        section.captions.range(changed..).for_each(|caption| self.rows.push_estimate(estimate(caption)));
+        for row in changed..section.captions.len() {
+            self.rows.push_estimate(estimate(row.checked_sub(1).map(|before| &section.captions[before]), &section.captions[row]));
+        }
         (self.revision, self.dropped) = (section.revision(), section.dropped());
     }
 }
@@ -153,6 +171,22 @@ mod tests {
     }
 
     #[test]
+    fn the_line_that_becomes_first_is_estimated_again() {
+        let (mut captions, now) = (Captions::default(), Instant::now());
+        let app = captions.add_app("App", None);
+        let line = |id| Line { id, text: format!("line {id}"), complete: true, voice: Some(0) };
+        let lines: Vec<Line> = (0..10_000).map(line).collect();
+        captions.update_app(app, 1, &lines, Instant::now());
+        let (mut section, tall_when_first) = (SectionRows::default(), |before: Option<&Caption>, _: &Caption| if before.is_none() { 30.0 } else { 10.0 });
+        section.sync(&captions.sections[app], tall_when_first);
+        (0..10_000).for_each(|row| section.rows.set_measured(row, 10.0));
+        captions.update_app(app, 1, &[line(10_000)], now);
+        section.sync(&captions.sections[app], tall_when_first);
+        assert_eq!((section.rows.len(), section.rows.height(0)), (10_000, 30.0), "the new first row isn't a stale 10");
+        assert_eq!(section.rows.estimated_between(0.0, 30.0), [0]);
+    }
+
+    #[test]
     fn dropping_old_rows_keeps_the_others_in_place() {
         let mut rows = rows(&[10.0, 20.0, 30.0]);
         rows.drop_front(1);
@@ -169,10 +203,10 @@ mod tests {
         let line = |id, complete| Line { id, text: format!("line {id}"), complete, voice: None };
         captions.update_app(app, 1, &[line(1, true), line(2, false), line(3, true)], now);
         let mut section = SectionRows::default();
-        section.sync(&captions.sections[app], |_| 10.0);
+        section.sync(&captions.sections[app], |_, _| 10.0);
         (0..3).for_each(|row| section.rows.set_measured(row, 20.0));
         captions.update_app(app, 1, &[line(2, true), line(4, true)], now);
-        section.sync(&captions.sections[app], |_| 10.0);
+        section.sync(&captions.sections[app], |_, _| 10.0);
         assert_eq!(section.rows.len(), 4);
         assert_eq!(section.rows.estimated_between(0.0, 100.0), [1, 2, 3], "the revised line, those after it, and the new one");
         assert_eq!(section.rows.total(), 50.0);

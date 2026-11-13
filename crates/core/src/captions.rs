@@ -4,12 +4,12 @@
 //! you pinned, whichever window is in front, or with none pinned, inside the app in front.
 
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     path::PathBuf,
     time::{Duration, Instant, SystemTime},
 };
 
-use crate::engine::Line;
+use crate::{engine::Line, voices::book::Place};
 
 /// Oldest lines are dropped past this, to bound memory on very long sessions.
 const MAX_LINES_PER_SECTION: usize = 10_000;
@@ -31,6 +31,12 @@ pub struct Caption {
     pub voice: Option<u32>,
     /// The name shown before the text: your own lines' ("You", "Mic 2"), or the speaker's once a section holds two.
     label: Option<String>,
+    /// Whether the label is a name given to the voice rather than its number.
+    named: bool,
+    /// Said into your mic: in the You section, or one of your lines copied into an app.
+    pub mine: bool,
+    /// Where its voice was recognised, which says what its voice number and any name mean.
+    place: Option<Place>,
     pub text: String,
     pub complete: bool,
     /// When the line was first heard.
@@ -52,6 +58,35 @@ impl Caption {
     /// The name before the text, without its colon.
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
+    }
+
+    fn set_label(&mut self, label: Option<(String, bool)>) {
+        (self.label, self.named) = match label {
+            Some((label, named)) => (Some(label), named),
+            None => (None, false),
+        };
+    }
+
+    /// Whether the voice has a name of its own, which the label then is.
+    pub fn is_named(&self) -> bool {
+        self.named
+    }
+
+    /// Whether the voice that said it can be given a name: any but the first voice at your mic, which is "You".
+    pub fn nameable(&self) -> bool {
+        match self.voice {
+            Some(voice) => !self.mine || voice > 0,
+            None => false,
+        }
+    }
+
+    /// The label as short as it goes: a speaker without a name is its number ("3"), anything else its label.
+    pub fn tag(&self) -> Option<String> {
+        let label = self.label()?;
+        match (self.named, self.mine, self.voice) {
+            (false, false, Some(voice)) => Some((voice + 1).to_string()),
+            _ => Some(label.to_owned()),
+        }
     }
 
     /// How many UTF-16 units of [`Caption::display_text`] are the label and its colon.
@@ -76,6 +111,9 @@ pub struct Section {
     mic: bool,
     /// The voices of the section's own lines, which are labelled once there are two.
     voices: BTreeSet<u32>,
+    /// The saved voices among the voices heard in each place (by zero-based number): a name replaces "Speaker N".
+    /// Lines keep the place they were heard in, so changing where speakers are recognised leaves earlier lines as they were.
+    names: HashMap<Place, HashMap<u32, String>>,
     /// How often earlier lines were given labels, which moves the text after them.
     relabels: u32,
     /// When the app itself last spoke (not your mic lines shown here).
@@ -91,7 +129,7 @@ const SPEAKING_FOR: Duration = Duration::from_secs(10);
 
 impl Section {
     fn new(label: &str, exe_path: Option<PathBuf>, mic: bool) -> Self {
-        Self { label: label.to_owned(), exe_path, captions: VecDeque::new(), mic, voices: BTreeSet::new(), relabels: 0, last_spoke: None, revision: 0, dropped: 0 }
+        Self { label: label.to_owned(), exe_path, captions: VecDeque::new(), mic, voices: BTreeSet::new(), names: HashMap::new(), relabels: 0, last_spoke: None, revision: 0, dropped: 0 }
     }
 
     /// Whether this app said something in the last few seconds.
@@ -132,11 +170,13 @@ pub struct Captions {
     pub sections: Vec<Section>,
     /// Apps, by label, that get every mic line once they have a section.
     pub pinned: Vec<String>,
+    /// Where the voices of each stream are recognised, for streams that tell voices apart.
+    places: HashMap<StreamId, Place>,
 }
 
 impl Default for Captions {
     fn default() -> Self {
-        Self { sections: vec![Section::new(YOU, None, true)], pinned: Vec::new() }
+        Self { sections: vec![Section::new(YOU, None, true)], pinned: Vec::new(), places: HashMap::new() }
     }
 }
 
@@ -153,9 +193,10 @@ impl Captions {
 
     /// Applies new or revised lines from an app's stream.
     pub fn update_app(&mut self, section: usize, stream: StreamId, lines: &[Line], now: Instant) {
+        let place = self.places.get(&stream).cloned();
         let section = &mut self.sections[section];
         for line in lines.iter().filter(|l| !l.text.is_empty()) {
-            section.upsert(stream, line, None);
+            section.upsert(stream, line, None, place.as_ref());
             section.last_spoke = Some(now);
         }
     }
@@ -163,19 +204,37 @@ impl Captions {
     /// Applies new or revised lines from the mic's stream: to the You section, and as "You:" lines
     /// to the pinned apps, or with none heard yet, to the app labelled `in_front` (the window in front).
     pub fn update_mic(&mut self, stream: StreamId, lines: &[Line], in_front: Option<&str>) {
+        let place = self.places.get(&stream).cloned();
         let apps = YOU_SECTION + 1..self.sections.len();
         let pinned: Vec<usize> = apps.clone().filter(|&index| self.is_pinned(index)).collect();
         let in_front = apps.into_iter().find(|&index| in_front == Some(self.sections[index].label.as_str()));
         for line in lines.iter().filter(|l| !l.text.is_empty()) {
-            self.sections[YOU_SECTION].upsert(stream, line, None);
+            self.sections[YOU_SECTION].upsert(stream, line, None, place.as_ref());
             let apps = match pinned.is_empty() {
                 true => self.app_showing(stream, line.id).or(in_front).into_iter().collect(),
                 false => pinned.clone(),
             };
             for app in apps {
-                self.sections[app].upsert(stream, line, Some(YOU));
+                self.sections[app].upsert(stream, line, Some(YOU), place.as_ref());
             }
         }
+    }
+
+    /// Says where the voices of `stream` are recognised, so its lines are named by that place's names.
+    pub fn set_stream_place(&mut self, stream: StreamId, place: Place) {
+        self.places.insert(stream, place);
+    }
+
+    /// Names the saved voices heard in `place` (zero-based number to name) in a section, replacing that place's earlier
+    /// names there and relabelling its lines; lines of other places keep theirs.
+    pub fn set_names(&mut self, section: usize, place: &Place, names: HashMap<u32, String>) {
+        self.sections[section].set_names(place, names);
+    }
+
+    /// Names the saved voices among the mic's, in the You section and on your lines shown in apps. The first mic voice
+    /// is always "You".
+    pub fn set_mic_names(&mut self, names: HashMap<u32, String>) {
+        self.sections.iter_mut().for_each(|section| section.set_names(&Place::Mic, names.clone()));
     }
 
     /// Whether the section at `index` gets every mic line.
@@ -228,32 +287,57 @@ fn mic_name(voice: Option<u32>) -> String {
 }
 
 impl Section {
-    /// The label for a line with `voice`: yours (`speaker`) always, the section's own once it holds two voices.
-    fn label_for(&self, speaker: Option<&str>, voice: Option<u32>) -> Option<String> {
+    /// The label for a line with `voice` heard in `place`: yours (`speaker`) always, the section's own once it holds two
+    /// voices; a saved voice's name always, except for the first voice at the mic, which is always "You".
+    /// With whether it is a saved voice's name.
+    fn label_for(&self, speaker: Option<&str>, voice: Option<u32>, place: Option<&Place>) -> Option<(String, bool)> {
+        let named = || self.names.get(place?)?.get(&voice?).map(|name| (name.clone(), true));
+        let numbered = |label| Some((label, false));
         match (speaker, voice) {
-            (Some(_), _) => Some(mic_name(voice)),
-            (None, Some(voice)) if self.voices.len() >= 2 => Some(if self.mic { mic_name(Some(voice)) } else { format!("Speaker {}", voice + 1) }),
-            _ => None,
+            (Some(_), None | Some(0)) => numbered(YOU.to_owned()),
+            (Some(_), _) => named().or_else(|| numbered(mic_name(voice))),
+            (None, Some(0)) if self.mic => (self.voices.len() >= 2).then(|| (YOU.to_owned(), false)),
+            (None, Some(voice)) => named().or_else(|| {
+                (self.voices.len() >= 2).then(|| (if self.mic { mic_name(Some(voice)) } else { format!("Speaker {}", voice + 1) }, false))
+            }),
+            (None, None) => None,
         }
     }
 
-    fn upsert(&mut self, stream: StreamId, line: &Line, speaker: Option<&'static str>) {
+    /// Replaces the names of the voices heard in `place`, relabelling the lines they changed.
+    fn set_names(&mut self, place: &Place, names: HashMap<u32, String>) {
+        if self.names.get(place).map_or(names.is_empty(), |old| *old == names) {
+            return;
+        }
+        match names.is_empty() {
+            true => self.names.remove(place),
+            false => self.names.insert(place.clone(), names),
+        };
+        self.revision += 1;
+        self.label_own_lines();
+    }
+
+    fn upsert(&mut self, stream: StreamId, line: &Line, speaker: Option<&'static str>, place: Option<&Place>) {
+
         self.revision += 1;
         let before = self.voices.len();
         if let (None, Some(voice)) = (speaker, line.voice) {
             self.voices.insert(voice);
         }
-        let label = self.label_for(speaker, line.voice);
+        let label = self.label_for(speaker, line.voice, place);
         if let Some(index) = self.find(stream, line.id) {
             let existing = &mut self.captions[index];
             existing.text.clone_from(&line.text);
             existing.complete = line.complete;
-            (existing.voice, existing.label) = (line.voice, label);
+            existing.voice = line.voice;
+            existing.set_label(label);
             // Revised lines are recent, so this stamps only the last few.
             self.captions.range_mut(index..).for_each(|caption| caption.revision = self.revision);
         } else {
             let (time, revision) = (SystemTime::now(), self.revision);
-            self.captions.push_back(Caption { stream, id: line.id, speaker, voice: line.voice, label, text: line.text.clone(), complete: line.complete, time, revision });
+            let mut caption = Caption { stream, id: line.id, speaker, voice: line.voice, label: None, named: false, mine: speaker.is_some() || self.mic, place: place.cloned(), text: line.text.clone(), complete: line.complete, time, revision };
+            caption.set_label(label);
+            self.captions.push_back(caption);
             self.trim();
         }
         if before < 2 && self.voices.len() >= 2 {
@@ -263,10 +347,10 @@ impl Section {
 
     /// A second voice has come: the lines before it get their labels too, and the whole section counts as changed.
     fn label_own_lines(&mut self) {
-        let labels: Vec<Option<String>> = self.captions.iter().map(|c| self.label_for(c.speaker, c.voice)).collect();
+        let labels: Vec<_> = self.captions.iter().map(|c| self.label_for(c.speaker, c.voice, c.place.as_ref())).collect();
         self.relabels += 1;
         for (caption, label) in self.captions.iter_mut().zip(labels) {
-            caption.label = label;
+            caption.set_label(label);
             caption.revision = self.revision;
         }
     }
@@ -437,6 +521,16 @@ mod tests {
     }
 
     #[test]
+    fn tags_are_short_and_only_other_voices_can_be_named() {
+        let (mut captions, now) = (Captions::default(), Instant::now());
+        let app = captions.add_app("Meet", None);
+        captions.update_app(app, APP, &[said_by(1, "Hi.", 0), said_by(2, "Hello.", 2)], now);
+        captions.update_mic(MIC, &[said_by(1, "Me.", 0), said_by(2, "Not me.", 1)], Some("Meet"));
+        let tags: Vec<_> = captions.sections[app].captions.iter().map(|c| (c.tag(), c.nameable(), c.is_named())).collect();
+        assert_eq!(tags, [(Some("1".into()), true, false), (Some("3".into()), true, false), (Some("You".into()), false, false), (Some("Mic 2".into()), true, false)]);
+    }
+
+    #[test]
     fn a_label_says_how_much_of_the_shown_text_it_is() {
         let (mut captions, now) = (Captions::default(), Instant::now());
         let app = captions.add_app("Meet", None);
@@ -458,6 +552,55 @@ mod tests {
         assert_eq!(shown(&captions, YOU_SECTION), ["You: On my way.", "Mic 2: Hi, I'm his friend.", "Without a voice."]);
         assert_eq!(shown(&captions, app), ["Speaker 1: Joining?", "Speaker 2: Yes.", "You: On my way.", "Mic 2: Hi, I'm his friend.", "You: Without a voice."]);
     }
+
+    #[test]
+    fn a_saved_voices_name_replaces_its_label_on_earlier_lines_too() {
+        let (mut captions, now) = (Captions::default(), Instant::now());
+        let app = captions.add_app("Discord", None);
+        let place = Place::App("Discord".into());
+        captions.set_stream_place(APP, place.clone());
+        captions.set_stream_place(MIC, Place::Mic);
+        captions.update_app(app, APP, &[said_by(1, "Joining?", 0)], now);
+        assert_eq!(shown(&captions, app), ["Joining?"], "one voice, no label");
+        let stamp = captions.sections[app].revision();
+        captions.set_names(app, &place, HashMap::from([(0, "Alex".to_string())]));
+        assert_eq!(shown(&captions, app), ["Alex: Joining?"], "a name is shown even for the only voice");
+        assert!(captions.sections[app].revision() > stamp);
+        assert_eq!(captions.sections[app].changed_since(stamp), 0, "the relabelled lines count as changed, for the panel's rows and captions mode");
+        captions.update_app(app, APP, &[said_by(2, "Yes.", 1)], now);
+        assert_eq!(shown(&captions, app), ["Alex: Joining?", "Speaker 2: Yes."]);
+        let stamp = captions.sections[app].revision();
+        captions.set_names(app, &place, HashMap::new());
+        assert_eq!(shown(&captions, app), ["Speaker 1: Joining?", "Speaker 2: Yes."], "forgotten, it is a number again");
+        assert_eq!(captions.sections[app].changed_since(stamp), 0);
+        captions.set_names(app, &place, HashMap::new());
+        assert_eq!(captions.sections[app].revision(), stamp + 1, "no change, no new stamp");
+
+        captions.update_mic(MIC, &[said_by(3, "On my way.", 0), said_by(4, "Hi.", 1)], Some("Discord"));
+        let stamp = captions.sections[app].revision();
+        captions.set_mic_names(HashMap::from([(0, "Me".to_string()), (1, "Sam".to_string())]));
+        assert_eq!(shown(&captions, app)[2..], ["You: On my way.", "Sam: Hi."], "the first mic voice stays You; another may take a saved name");
+        assert_eq!(shown(&captions, YOU_SECTION), ["You: On my way.", "Sam: Hi."]);
+        assert_eq!(captions.sections[app].changed_since(stamp), 0);
+    }
+
+    #[test]
+    fn changing_where_voices_are_recognised_leaves_earlier_lines_named_as_they_were() {
+        let (mut captions, now) = (Captions::default(), Instant::now());
+        let app = captions.add_app("Discord", None);
+        let (each, across) = (Place::App("Discord".into()), Place::AllApps);
+        captions.set_stream_place(1, each.clone());
+        captions.update_app(app, 1, &[said_by(1, "Before.", 0)], now);
+        captions.set_names(app, &each, HashMap::from([(0, "Alex".to_string())]));
+        // The setting flips: a new stream recognises voices across apps, where number 1 is someone else.
+        captions.set_stream_place(2, across.clone());
+        captions.update_app(app, 2, &[said_by(1, "After.", 0)], now);
+        captions.set_names(app, &across, HashMap::from([(0, "Sam".to_string())]));
+        assert_eq!(shown(&captions, app), ["Alex: Before.", "Sam: After."]);
+        captions.set_names(app, &across, HashMap::new());
+        assert_eq!(shown(&captions, app), ["Alex: Before.", "After."], "the other place's names never reach the earlier lines");
+    }
+
 
     #[test]
     fn restarted_app_keeps_its_section() {

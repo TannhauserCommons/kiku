@@ -46,6 +46,7 @@ mod icon;
 mod macros;
 mod remote;
 mod subtitles;
+mod voices;
 mod words;
 
 use design::*;
@@ -55,7 +56,8 @@ use subtitles::AppearanceAnchors;
 pub use subtitles::{Speaker, SubtitleLine, SubtitleScene, DRAG_TAB};
 
 use super::{
-    finder::{Period, EXAMPLES},
+    finder::{Period, TextBox, EXAMPLES},
+    labels::{Lead, Shape},
     folds::{auto_fold_after, AUTO_FOLD_MINUTES},
     icons::Icons,
     rows::{Rows, SectionRows},
@@ -76,10 +78,11 @@ use kiku_core::{
     hardware::{gb, Gpu, Hardware},
     keybinds::{Command, Key, Keybinds},
     macros::{Macros, Mode},
-    settings::{BlockAnswer, EngineWhere, Opacity, YourLines},
+    settings::{BlockAnswer, EngineWhere, LabelStyle, Labels, Opacity, YourLines},
     subtitles::SubtitleSettings,
     theme::{CustomTheme, Theme, Themes},
     update::{self, Release},
+    voices::book::VoiceInfo,
     words::{Scope, WordSettings, Words, STRENGTHS},
 };
 use std::time::Instant;
@@ -98,6 +101,8 @@ const CHEVRON: f32 = 20.0;
 const CAPTION_INDENT: f32 = 16.0;
 /// How far the highlight behind your lines reaches left of their text, its bar at that edge.
 const HIGHLIGHT_INSET: f32 = 10.0;
+/// A turn's heading (the blocks style) against the text's size.
+const HEADER_SCALE: f32 = 0.8;
 const BUTTON: f32 = 28.0;
 /// A button in a floating toolbar.
 const TOOL_BUTTON: f32 = 24.0;
@@ -180,6 +185,12 @@ pub struct Panel<'a> {
     pub blocked: &'a [Blocked],
     pub block_answer: BlockAnswer,
     pub your_lines: YourLines,
+    /// How speakers' names show on their lines.
+    pub labels: Labels,
+    /// Speakers are recognised across apps, not in each app.
+    pub recognise_across_apps: bool,
+    /// The voices you named, oldest first.
+    pub saved_voices: Vec<VoiceInfo>,
     /// The app's look: the panel, the settings window and captions mode.
     pub themes: Themes,
     /// Kiku only dictates: no app is captioned.
@@ -315,6 +326,16 @@ struct LayoutKey {
     text: String,
     /// The brush that colours the label's name, if there is one.
     label_brush: usize,
+    /// How many UTF-16 units of the text's start are the lead drawn bold or in a colour.
+    marked: u32,
+}
+
+/// The lead of a laid out line, and how its marked start is drawn: bold or not, and in a speaker's colour
+/// (a halo's copy is bold without one).
+struct Styled<'a> {
+    lead: &'a Lead,
+    bold: bool,
+    brush: Option<&'a ID2D1SolidColorBrush>,
 }
 
 /// Text layouts used by the last frame and this one, so text that hasn't changed isn't laid out again.
@@ -406,6 +427,10 @@ pub struct Renderer {
     card_first_row: Cell<f32>,
     /// How your lines in an app's section are marked; their heights are measured again when it changes.
     your_lines: YourLines,
+    /// How names show on lines; heights are measured again when it changes.
+    labels: Labels,
+    /// Sample lines for the label styles' previews.
+    preview: Captions,
 }
 
 impl Renderer {
@@ -455,6 +480,8 @@ impl Renderer {
             settings_height: 0.0,
             card_first_row: Cell::new(0.0),
             your_lines: YourLines::default(),
+            labels: Labels::default(),
+            preview: super::labels::sample(),
         })
     }
 
@@ -493,7 +520,7 @@ impl Renderer {
     /// colours from the other end, so "Mic 2" and an app's "Speaker 2" never share one.
     fn label_brush(&self, label: &str, voice: Option<u32>) -> &ID2D1SolidColorBrush {
         match voice {
-            Some(voice) if label.starts_with(MIC) => &self.voice_brushes[SPEAKERS - 1 - voice as usize % SPEAKERS],
+            Some(voice) if label.strip_prefix(MIC).is_some_and(|rest| rest.starts_with(' ')) => &self.voice_brushes[SPEAKERS - 1 - voice as usize % SPEAKERS],
             Some(voice) if label != YOU => &self.voice_brushes[voice as usize % SPEAKERS],
             _ => &self.speaker_brush,
         }
@@ -521,13 +548,15 @@ impl Renderer {
             // Cached captions keep the "You:" brush's colour, so all is drawn again.
             (surface.frame, surface.see_through) = (None, see_through);
         }
-        if self.your_lines != panel.your_lines {
-            // Italics wrap differently.
-            (self.your_lines, self.section_rows) = (panel.your_lines, Vec::new());
+        if (self.your_lines, self.labels) != (panel.your_lines, panel.labels) {
+            // Italics and label styles wrap differently.
+            (self.your_lines, self.labels, self.section_rows) = (panel.your_lines, panel.labels, Vec::new());
         }
         let frame = self.render_on(surface, size, HANDLE_STRIP, panel.dpi, &panel.themes, |renderer| {
             renderer.see_through(see_through.0, see_through.1);
             let shown = renderer.palette.clone();
+            // Rails and badges take their colours from the brushes while the frame is recorded.
+            renderer.set_label_colours(shown.accent, shown.speakers);
             let drawn = renderer.draw_panel(panel, &mut regions);
             renderer.see_through(100, 100);
             renderer.set_label_colours(shown.accent, shown.speakers);
@@ -541,7 +570,10 @@ impl Renderer {
     pub fn render_settings<'s>(&mut self, surface: &'s mut Surface, panel: &Panel) -> Result<(&'s mut Frame, Regions)> {
         let mut regions = Regions::default();
         let size = (panel.width, panel.height);
-        let frame = self.render_on(surface, size, 0.0, panel.dpi, &panel.themes, |renderer| renderer.draw_settings_window(panel, &mut regions))?;
+        let frame = self.render_on(surface, size, 0.0, panel.dpi, &panel.themes, |renderer| {
+            renderer.set_label_colours(renderer.palette.accent, renderer.palette.speakers);
+            renderer.draw_settings_window(panel, &mut regions)
+        })?;
         Ok((frame, regions))
     }
 
@@ -1037,8 +1069,13 @@ impl Renderer {
     /// section shows until none on screen is an estimate. Returns how much each section holds and shows.
     fn measure_sections(&mut self, panel: &Panel, sections: &[(usize, &Section)], text_width: f32, available: f32) -> Result<Vec<Extent>> {
         let font_size = unsafe { self.fonts.caption.GetFontSize() };
-        let shown_len = |caption: &Caption| caption.display_len();
-        let estimate = |caption: &Caption| estimated_height(shown_len(caption), font_size, text_width) + ROW_GAP;
+        let labels = self.labels;
+        let estimate = |before: Option<&Caption>, caption: &Caption| {
+            let shape = Shape::of(caption, before, labels);
+            let lead = shape.lead(caption);
+            let header = if lead.header { font_size * HEADER_SCALE * 1.33 } else { 0.0 };
+            estimated_height(lead.text.len() + caption.text.len(), font_size, text_width - shape.indent(caption)) + header + ROW_GAP
+        };
         for &(index, section) in sections {
             if self.section_rows.len() <= index {
                 self.section_rows.resize_with(index + 1, SectionRows::default);
@@ -1057,7 +1094,8 @@ impl Renderer {
             for (&(index, section), extent) in sections.iter().zip(&extents) {
                 let top = panel.view.scroll(ScrollArea::Section(index)).top(*extent);
                 for row in self.section_rows[index].rows.estimated_between(top, top + extent.viewport) {
-                    let height = self.caption_height(&section.captions[row], text_width)?;
+                    let shape = self.shape_at(&section.captions, row);
+                    let height = height_of(&self.caption_layout(&section.captions[row], shape, text_width)?)?;
                     self.section_rows[index].rows.set_measured(row, height + ROW_GAP);
                     measured = true;
                 }
@@ -1198,18 +1236,20 @@ impl Renderer {
         self.push_clip(rect(area.left - HIGHLIGHT_INSET, area.top, area.right, area.bottom));
         for (row, row_top, line_height) in shown {
             let caption = &captions[row];
-            let y = origin + row_top;
-            let line = LineRef::of(section, caption);
-            let layout = self.caption_layout(caption, text_width)?;
+            let shape = self.shape_at(captions, row);
+            let (y, indent) = (origin + row_top, shape.indent(caption));
+            let (text_x, line) = (area.left + indent, LineRef::of(section, caption));
+            let layout = self.caption_layout(caption, shape, text_width)?;
             if caption.speaker.is_some() && self.your_lines.highlight() {
                 self.draw_your_highlight(area.left, y, text_width, line_height)?;
             }
             if let Some(&(start, end)) = selected.get(&line) {
-                self.fill_text_range(&layout, start, end, area.left, y, self.palette.selected)?;
+                let (start, end) = (shape.to_laid_out(caption, start), shape.to_laid_out(caption, end));
+                self.fill_text_range(&layout, start, end, text_x, y, self.palette.selected)?;
             }
             let visible = clipped(rect(area.left, y, area.left + text_width, y + line_height), area);
             let row = clipped(rect(area.left, y, area.right, y + line_height), area);
-            regions.captions.push(CaptionRegion { line, visible, row, x: area.left, y, width: text_width });
+            regions.captions.push(CaptionRegion { line, visible, row, x: text_x, y, width: text_width - indent, shape });
             let hovered = matches!(panel.view.hovered, Some(Action::CopyLine(l) | Action::CorrectLine(l) | Action::ShareLine(l)) if l == line);
             if hovered || panel.view.hovered_line == Some(line) {
                 let buttons = vec![
@@ -1220,17 +1260,19 @@ impl Renderer {
                 let first = regions.targets.len();
                 // Level with the line's first row.
                 let middle = y + line_height.min(CAPTION_SIZE * 1.33) / 2.0;
-                self.draw_toolbar(&[buttons], area.right - TOOLBAR_INSET, middle, panel, regions)?;
+                let toolbar = self.draw_toolbar(&[buttons], area.right - TOOLBAR_INSET, middle, panel, regions)?;
+                if shape.style == LabelStyle::Colour {
+                    self.draw_name_chip(caption, toolbar - 6.0, middle)?;
+                }
                 for target in &mut regions.targets[first..] {
                     target.0 = clipped(target.0, area);
                 }
             }
-            if let Some(label) = caption.label() {
-                // Color just the name and its colon, so speaker and finished/unfinished stay separate signals.
-                let prefix = DWRITE_TEXT_RANGE { startPosition: 0, length: caption.label_len() as u32 };
-                unsafe { layout.SetDrawingEffect(self.label_brush(label, caption.voice), prefix)? };
+            self.draw_label_marks(caption, shape, &layout, (area.left, y, line_height), line, panel, regions)?;
+            self.draw_layout(&layout, text_x, y, caption_color(caption, &self.palette))?;
+            if panel.view.naming == Some(line) && panel.view.finder.typing == Some(TextBox::Name) {
+                self.draw_naming_box(text_x, y, area, panel, regions)?;
             }
-            self.draw_layout(&layout, area.left, y, caption_color(caption, &self.palette))?;
         }
         self.pop_clip();
         Ok(())
@@ -1242,7 +1284,7 @@ impl Renderer {
         let rows = &self.section_rows[section].rows;
         let Some(row) = rows.between(top, top + 1.0).next() else { return Ok(top) };
         let mut line_top = rows.top(row);
-        let layout = self.caption_layout(&captions[row], text_width)?;
+        let layout = self.caption_layout(&captions[row], self.shape_at(captions, row), text_width)?;
         for line_height in line_heights(&layout)? {
             if line_top >= top - 0.5 {
                 return Ok(line_top);
@@ -1569,14 +1611,18 @@ impl Renderer {
                 let detail = progress.map(|p| progress_text(&p)).unwrap_or_else(|| format!("{}, needed to tell speakers apart", megabytes(model.size())));
                 y = renderer.draw_two_line_row("Speaker model", &detail, &download_buttons(target, false, panel), inner, y, panel, regions)?;
             }
-            Ok(y)
+            let across = panel.recognise_across_apps;
+            let scopes = [("In each app", !across, Action::SetRecognise(false)), ("Across apps", across, Action::SetRecognise(true))];
+            renderer.draw_choice_row("Recognise speakers", &scopes, inner, y, panel, regions)
         })?;
-        self.draw_hint("Lines are named \"Speaker 1\", \"Speaker 2\" once an app has more than one voice. Your mic stays \"You\" unless you turn it on.", content, y)
+        self.draw_hint("Speakers are numbered once an app has more than one voice, and keep their number for the whole run. Across apps, a voice heard in one app is the same speaker in another. Your mic stays \"You\" unless you turn it on.", content, y)
     }
 
     /// How the panel folds apps, then blocking: what the block button does, and the blocked apps. Returns the y below.
     fn draw_app_settings(&mut self, panel: &Panel, content: D2D_RECT_F, y: f32, regions: &mut Regions) -> Result<f32> {
         let mut y = self.draw_speaker_settings(panel, content, y, regions)?;
+        y = self.draw_label_settings(panel, content, y + SECTION_GAP, regions)?;
+        y = self.draw_saved_voices(panel, content, y, regions)?;
         y = self.draw_heading("Folding", content, y + SECTION_GAP)?;
         // "Never" last, after the minutes.
         let minutes: Vec<u32> = AUTO_FOLD_MINUTES.iter().copied().filter(|&m| m != 0).chain([0]).collect();
@@ -2286,37 +2332,38 @@ impl Renderer {
     }
 
     /// Where in a caption's text a point falls, as a UTF-16 offset; `x` and `y` are relative to the text's top-left.
-    pub fn text_offset(&self, caption: &Caption, width: f32, x: f32, y: f32) -> Result<u32> {
+    pub fn text_offset(&self, caption: &Caption, shape: Shape, width: f32, x: f32, y: f32) -> Result<u32> {
         // Outside a frame there is no surface's cache to use, and a cache kept here would never be pruned.
-        let layout = self.new_layout(self.caption_format(caption), &caption.display_text(), width.max(1.0), false)?;
+        let lead = shape.lead(caption);
+        let brush = self.label_brush(caption.label().unwrap_or_default(), caption.voice);
+        let styled = Styled { lead: &lead, bold: lead.pill || lead.header, brush: Some(brush) };
+        let layout = self.new_lead_layout(self.caption_format(caption), &(lead.text.clone() + &caption.text), width.max(1.0), &styled)?;
         let (mut trailing, mut inside, mut hit) = (Default::default(), Default::default(), DWRITE_HIT_TEST_METRICS::default());
         unsafe { layout.HitTestPoint(x, y, &mut trailing, &mut inside, &mut hit)? };
-        Ok(hit.textPosition + if trailing.as_bool() { hit.length } else { 0 })
+        Ok(shape.to_copied(caption, hit.textPosition + if trailing.as_bool() { hit.length } else { 0 }))
     }
 
     /// Highlights the characters `start..end` of laid-out text drawn at `x`, `y` in `colour`.
     fn fill_text_range(&self, layout: &IDWriteTextLayout, start: u32, end: u32, x: f32, y: f32, colour: D2D1_COLOR_F) -> Result<()> {
-        if end <= start {
-            return Ok(());
-        }
-        let mut count = 0;
-        // The first call only reports how many rectangles the range needs.
-        let _ = unsafe { layout.HitTestTextRange(start, end - start, x, y, None, &mut count) };
-        let mut boxes = vec![DWRITE_HIT_TEST_METRICS::default(); count as usize];
-        unsafe { layout.HitTestTextRange(start, end - start, x, y, Some(&mut boxes), &mut count)? };
-        for b in &boxes {
-            self.fill_rounded(rect(b.left, b.top, b.left + b.width, b.top + b.height), 2.0, colour)?;
+        for area in text_rects(layout, start, end, x, y)? {
+            self.fill_rounded(area, 2.0, colour)?;
         }
         Ok(())
     }
 
-    fn caption_height(&self, caption: &Caption, width: f32) -> Result<f32> {
-        height_of(&self.caption_layout(caption, width)?)
+    /// How the caption at `row` shows, which depends on the line before it.
+    fn shape_at(&self, captions: &VecDeque<Caption>, row: usize) -> Shape {
+        Shape::of(&captions[row], row.checked_sub(1).map(|before| &captions[before]), self.labels)
     }
 
-    /// A caption laid out as shown: "You: …" in italics when it is yours.
-    fn caption_layout(&self, caption: &Caption, width: f32) -> Result<IDWriteTextLayout> {
-        self.layout(self.caption_format(caption), &caption.display_text(), width)
+    /// A caption laid out as shown in a column `width` wide: its lead (a name, a tag, a heading) and text,
+    /// the lead in the speaker's colour, in italics when it is yours.
+    fn caption_layout(&self, caption: &Caption, shape: Shape, width: f32) -> Result<IDWriteTextLayout> {
+        let (lead, format) = (shape.lead(caption), self.caption_format(caption));
+        let (text, width) = (lead.text.clone() + &caption.text, width - shape.indent(caption));
+        let brush = self.label_brush(caption.label().unwrap_or_default(), caption.voice);
+        let bold = lead.pill || lead.header;
+        self.lead_layout(format, &text, width, (lead.marked > 0).then_some(Styled { lead: &lead, bold, brush: Some(brush) }))
     }
 
     fn caption_format(&self, caption: &Caption) -> &IDWriteTextFormat {
@@ -2342,7 +2389,7 @@ impl Renderer {
     /// Lays out `text`, or reuses the layout of the same text, format and width from the last frame.
     fn cached_layout(&self, format: &IDWriteTextFormat, text: &str, max_width: f32, single_line: bool) -> Result<IDWriteTextLayout> {
         let max_width = max_width.max(1.0);
-        let key = LayoutKey { format: format.as_raw() as usize, width: max_width.to_bits(), single_line, text: text.to_owned(), label_brush: 0 };
+        let key = LayoutKey { format: format.as_raw() as usize, width: max_width.to_bits(), single_line, text: text.to_owned(), label_brush: 0, marked: 0 };
         if let Some(layout) = self.layouts.borrow_mut().get(&key) {
             return Ok(layout);
         }
@@ -2351,20 +2398,35 @@ impl Renderer {
         Ok(layout)
     }
 
-    /// Like [`Self::layout`], with the first `prefix` bold and drawn with `brush`; a layout of its own, so the
-    /// same text can also be drawn plain (a halo) from the other.
-    fn named_layout(&self, format: &IDWriteTextFormat, text: &str, max_width: f32, prefix: DWRITE_TEXT_RANGE, brush: &ID2D1SolidColorBrush) -> Result<IDWriteTextLayout> {
+    /// Like [`Self::layout`], with the lead's marked part (bold or not, a small heading or not) drawn with
+    /// `brush`; a layout of its own, so the same text can also be drawn plain (a halo) from the other.
+    fn lead_layout(&self, format: &IDWriteTextFormat, text: &str, max_width: f32, styled: Option<Styled>) -> Result<IDWriteTextLayout> {
+        let Some(styled) = styled else { return self.layout(format, text, max_width) };
         let max_width = max_width.max(1.0);
-        let key = LayoutKey { format: format.as_raw() as usize, width: max_width.to_bits(), single_line: false, text: text.to_owned(), label_brush: brush.as_raw() as usize };
+        let label_brush = styled.brush.map_or(0, |brush| brush.as_raw() as usize);
+        let key = LayoutKey { format: format.as_raw() as usize, width: max_width.to_bits(), single_line: false, text: text.to_owned(), label_brush, marked: styled.lead.marked };
         if let Some(layout) = self.layouts.borrow_mut().get(&key) {
             return Ok(layout);
         }
-        let layout = self.new_layout(format, text, max_width, false)?;
-        unsafe {
-            layout.SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, prefix)?;
-            layout.SetDrawingEffect(brush, prefix)?;
-        }
+        let layout = self.new_lead_layout(format, text, max_width, &styled)?;
         self.layouts.borrow_mut().current.insert(key, layout.clone());
+        Ok(layout)
+    }
+
+    fn new_lead_layout(&self, format: &IDWriteTextFormat, text: &str, max_width: f32, styled: &Styled) -> Result<IDWriteTextLayout> {
+        let layout = self.new_layout(format, text, max_width, false)?;
+        let marked = DWRITE_TEXT_RANGE { startPosition: 0, length: styled.lead.marked };
+        unsafe {
+            if styled.bold {
+                layout.SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, marked)?;
+            }
+            if styled.lead.header {
+                layout.SetFontSize(format.GetFontSize() * HEADER_SCALE, marked)?;
+            }
+            if let Some(brush) = styled.brush {
+                layout.SetDrawingEffect(brush, marked)?;
+            }
+        }
         Ok(layout)
     }
 
@@ -2719,6 +2781,14 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::SetBlockAnswer(BlockAnswer::Ask) => "Ask each time an app is blocked".into(),
         Action::SetBlockAnswer(BlockAnswer::Session) => "Block apps until Kiku quits, without asking".into(),
         Action::SetBlockAnswer(BlockAnswer::Always) => "Block apps for good, without asking".into(),
+        Action::SetLabelStyle { you, style } => voices::style_tip(style, you),
+        Action::SetRecognise(false) => "Speakers are numbered in each app on its own".into(),
+        Action::SetRecognise(true) => "One numbering for every app: a voice heard in Discord is the same speaker in a game's voice chat".into(),
+        Action::NameVoice(_) => "Name this speaker; Kiku remembers their voice, in any app and later".into(),
+        Action::RenameSaved(_) => "Rename this voice".into(),
+        Action::SetVoiceScope(_, false) => "Recognise this voice in every app and at the mic".into(),
+        Action::SetVoiceScope(_, true) => "Recognise this voice only in the app it was named in".into(),
+        Action::ForgetSaved(_) => "Delete this voice from this PC; its name goes from every line".into(),
         Action::SetYourLines(YourLines::Italic) => "Your lines in an app are in italics".into(),
         Action::SetYourLines(YourLines::Highlight) => "Your lines in an app sit on a highlight with a bar beside them".into(),
         Action::SetYourLines(YourLines::Both) => "Your lines in an app are in italics, on a highlight".into(),
@@ -2733,6 +2803,7 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::WordHotwords(true) => "Help Parakeet Unified hear the @ words; it decodes a little slower while there are any".into(),
         Action::WordHotwords(false) => "Decode as if there were no @ words".into(),
         Action::ResetWordStrength(_) => "Listen for it as strongly as the other @ words again".into(),
+        Action::AddWord => "Listen out for this word from the next phrase".into(),
         Action::RemoveWordEntry(_) => "Take it out of the file".into(),
         Action::OpenWords => "Open words.txt in your text editor".into(),
         Action::CopyWordInstructions => "Copy how the file works for ChatGPT, Claude or another assistant, then add what you want".into(),
@@ -2904,6 +2975,19 @@ fn fraction_of(db: f32) -> f32 {
 fn estimated_height(text_len: usize, font_size: f32, width: f32) -> f32 {
     let lines = (text_len as f32 * font_size * 0.5 / width.max(1.0)).ceil().max(1.0);
     lines * font_size * 1.33
+}
+
+/// Where the characters `start..end` of laid-out text drawn at `x`, `y` are: a rectangle for each line they touch.
+fn text_rects(layout: &IDWriteTextLayout, start: u32, end: u32, x: f32, y: f32) -> Result<Vec<D2D_RECT_F>> {
+    if end <= start {
+        return Ok(Vec::new());
+    }
+    let mut count = 0;
+    // The first call only reports how many rectangles the range needs.
+    let _ = unsafe { layout.HitTestTextRange(start, end - start, x, y, None, &mut count) };
+    let mut boxes = vec![DWRITE_HIT_TEST_METRICS::default(); count as usize];
+    unsafe { layout.HitTestTextRange(start, end - start, x, y, Some(&mut boxes), &mut count)? };
+    Ok(boxes.iter().map(|b| rect(b.left, b.top, b.left + b.width, b.top + b.height)).collect())
 }
 
 /// The height of each line of laid-out text.
