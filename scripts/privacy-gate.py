@@ -22,6 +22,9 @@ ALLOWED = {'info@e-szigno.hu', 'appro@openssl.org'}
 EXAMPLE_DOMAINS = ('@example.com', '@example.org', '@example.net')
 # Files quoting other people's licences, copyright lines and addresses included; private words still count.
 QUOTES = {'THIRD-PARTY-NOTICES.txt': {'an email address'}}
+# An installer's payload is compressed, so its bytes are random enough to spell an address now and then
+# (one stopped 0.7.0); every file it packs is gated unpacked first (target/dist/Kiku).
+INSTALLER = re.compile(r'^Kiku-.*setup\.exe$')
 # Upstream libraries shipped as built (builders' paths, random bytes that look like addresses); only the
 # private words in KIKU_PRIVATE_WORDS are looked for in them.
 UPSTREAM = {'libonnxruntime.so', 'libonnxruntime_providers_cuda.so', 'libonnxruntime_providers_shared.so',
@@ -56,7 +59,7 @@ def findings(path, words):
         words = explicit_words()
     for text in texts(path):
         for what, pattern in PATTERNS.items():
-            if upstream or what in QUOTES.get(path.name, ()):
+            if upstream or what in QUOTES.get(path.name, ()) or (what == 'an email address' and INSTALLER.match(path.name)):
                 continue
             for match in re.finditer(pattern, text, re.ASCII):
                 if match.group() not in ALLOWED and not match.group().lower().endswith(EXAMPLE_DOMAINS):
