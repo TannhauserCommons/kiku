@@ -1,0 +1,82 @@
+# Tool pins and the project's CI tasks (docs/context/ci.md). The shared ci:* tasks come from
+# .github/ci/tasks.toml. Every CI step is one `mise run <task>`.
+
+[tools]
+python = "3.14.10"
+actionlint = "1.7.12"
+# The release scripts (scripts/release.py, make-icon.py, make-fp16.py) run with `uv run`.
+uv = "0.13.8"
+
+[task_config]
+includes = [".github/ci/tasks.toml"]
+
+# `mise run status` reads the repository this checkout pushes to; the candidate and the release
+# branch's state live in the public one.
+[tasks."status:public"]
+description = "The public repository's side: next red or green, its pull requests, the candidate"
+run = "python .github/ci/status.py"
+env = { CI_REPO = "TannhauserCommons/kiku", CI_BRANCH = "next" }
+
+[tasks.version]
+description = "Print the version in Cargo.toml's [workspace.package]"
+run = "python scripts/ci/version.py"
+
+[tasks.bump]
+description = "bump <x.y.z>: write the version into Cargo.toml and Cargo.lock"
+run = "python scripts/ci/version.py bump"
+
+# Lints only the workflows written to the skeleton's rules: publish.yml leaves with a later unit, so
+# `ci:lint` (every workflow) is not run here.
+[tasks.check]
+description = "Everything cheap that gives the same answer every time: privacy gate, workflow lint, switches"
+run = [
+  "python scripts/ci/privacy.py",
+  "python -m unittest discover -s scripts/ci",
+  "actionlint .github/workflows/check.yml .github/workflows/main.yml .github/workflows/after.yml .github/workflows/release.yml",
+  "python .github/ci/lint.py .github/workflows/check.yml .github/workflows/main.yml .github/workflows/after.yml .github/workflows/release.yml",
+  { task = "ci:switches" },
+]
+
+[tasks.engine]
+description = "The Linux engine's tests in the Linux build image (Docker; on Windows through Docker Desktop)"
+run = "python scripts/ci/engine.py"
+
+[tasks.windows]
+description = "The Windows workspace tests to run on this PC before a push (needs third_party's runtime)"
+run = "echo windows: this task runs on Windows only && exit 1"
+run_windows = "cargo test --release --locked --workspace --tests"
+
+[tasks.next]
+description = "Private repository: push the filtered tree as one rolling commit to the public repository's next branch"
+run = "python scripts/ci/next.py"
+
+[tasks.build]
+description = "Test and build this runner's release target into dist/: the installer on Windows, the tarball (and NOTES.md) on Linux"
+run = "python scripts/ci/build_linux.py"
+run_windows = "python scripts/ci/build_windows.py"
+
+[tasks.smoke]
+description = "Test the files build made: install test on Windows, the unpacked tarball on clean Ubuntu and Debian on Linux"
+run = "python scripts/ci/smoke_linux.py"
+run_windows = "python scripts/ci/smoke_windows.py"
+
+[tasks.publish]
+description = "Release, in the candidate's tree: sign the update manifests, make the stable-name copies, gate them"
+run = "python scripts/ci/publish.py"
+
+[tasks.land]
+description = "land <sha>: move the public repository's main to the released commit (DRY_RUN=1 only prints)"
+run = "python scripts/ci/land.py"
+
+[tasks.tarball]
+description = "Download the published release's Linux tarball into image-context/"
+run = "python scripts/ci/tarball.py"
+
+[tasks.image]
+description = "Build the Docker image from image-context/ and push it to ghcr.io (DRY_RUN=1 builds only)"
+run = "python scripts/ci/image.py"
+
+[tasks.models]
+description = "Make and publish the model files the catalog serves from the models-v1 release, if missing"
+run = "echo models: this task runs on Windows only && exit 1"
+run_windows = "pwsh -File scripts/publish-models.ps1"

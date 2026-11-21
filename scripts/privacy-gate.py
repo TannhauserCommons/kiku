@@ -5,6 +5,9 @@
 Every file is searched as bytes and as UTF-16 text (Windows resources) for the patterns below, and for
 private words: KIKU_PRIVATE_WORDS (comma-separated; a CI secret) and this machine's user and computer
 names. Words are matched ignoring case and never printed.
+
+Archives (the installer, the Linux tarball) are gated unpacked, never as they ship: compressed bytes are
+random, so they spell addresses and short words by chance and can't hold readable text anyway.
 """
 import os, pathlib, re, sys
 
@@ -22,10 +25,11 @@ ALLOWED = {'info@e-szigno.hu', 'appro@openssl.org'}
 EXAMPLE_DOMAINS = ('@example.com', '@example.org', '@example.net')
 # Files quoting other people's licences, copyright lines and addresses included; private words still count.
 QUOTES = {'THIRD-PARTY-NOTICES.txt': {'an email address'}}
-# An installer's payload is compressed, so its bytes are random enough to spell an address now and then
-# (one stopped 0.7.0); every file it packs is gated unpacked first (target/dist/Kiku).
-INSTALLER = re.compile(r'^Kiku-.*setup\.exe$')
-# Upstream libraries shipped as built (builders' paths, random bytes that look like addresses); only the
+# Addresses are looked for in text files only (no NUL byte). A binary's data sections spell one by chance
+# now and then, and an address can only reach a binary from text that is gated itself: the published
+# source, or a dependency (then the private words still catch the owner's).
+TEXT_ONLY = {'an email address'}
+# Upstream libraries shipped as built, with their builders' paths inside; only the
 # private words in KIKU_PRIVATE_WORDS are looked for in them.
 UPSTREAM = {'libonnxruntime.so', 'libonnxruntime_providers_cuda.so', 'libonnxruntime_providers_shared.so',
             'libsherpa-onnx-c-api.so', 'libsherpa-onnx-cxx-api.so'}
@@ -46,20 +50,20 @@ def private_words():
     return sorted({w for w in words if len(w) >= SHORTEST_WORD}, key=len, reverse=True)
 
 
-def texts(path):
-    """The file as Latin-1 (byte for byte) and as UTF-16 at both byte alignments."""
-    data = path.read_bytes()
+def texts(data):
+    """The bytes as Latin-1 (byte for byte) and as UTF-16 at both byte alignments."""
     return [data.decode('latin-1'), data.decode('utf-16-le', 'ignore'), data[1:].decode('utf-16-le', 'ignore')]
 
 
 def findings(path, words):
-    found = set()
-    upstream = path.name in UPSTREAM
-    if upstream:
-        words = explicit_words()
-    for text in texts(path):
+    found, data = set(), path.read_bytes()
+    if path.name in UPSTREAM:
+        words, skipped = explicit_words(), set(PATTERNS)
+    else:
+        skipped = set(QUOTES.get(path.name, ())) | (TEXT_ONLY if b'\0' in data else set())
+    for text in texts(data):
         for what, pattern in PATTERNS.items():
-            if upstream or what in QUOTES.get(path.name, ()) or (what == 'an email address' and INSTALLER.match(path.name)):
+            if what in skipped:
                 continue
             for match in re.finditer(pattern, text, re.ASCII):
                 if match.group() not in ALLOWED and not match.group().lower().endswith(EXAMPLE_DOMAINS):

@@ -1,0 +1,199 @@
+name: main
+
+# Every push to the release branch (`main` in the private repository, `next` in
+# the public one): everything check runs, on the merged result. Blocks nothing;
+# after.yml opens the issue when it is red.
+on:
+  push:
+    branches: [main, next]
+
+permissions:
+  contents: read
+
+env:
+  CI_BRANCH: ${{ github.event.repository.private && 'main' || 'next' }}
+  # Where installed copies look for updates, and so what the manifests are signed for; a repository
+  # variable moves it.
+  KIKU_RELEASES: ${{ vars.KIKU_RELEASES || format('https://github.com/{0}/releases', github.repository) }}
+
+# One run at a time. A newer pending run replaces an older pending one, so
+# pushes that land while main is busy are tested together.
+concurrency:
+  group: main
+  cancel-in-progress: false
+
+jobs:
+  # Not on the public main: the release moves it to a commit next already
+  # tested, and nothing is built from it.
+  check:
+    if: ${{ github.event.repository.private || github.ref == 'refs/heads/next' }}
+    uses: ./.github/workflows/check.yml
+    # A called workflow can use only what its caller grants: this is the most
+    # any job in check.yml asks for.
+    permissions:
+      contents: read
+      pull-requests: read
+    # Not inherited: the privacy gate needs the words on the public side.
+    secrets:
+      KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
+    with:
+      all: true
+
+  # Private repository: a green main becomes one rolling commit on the public
+  # repository's next branch, which builds and releases it.
+  next:
+    needs: check
+    if: ${{ github.event.repository.private && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+      - name: mise run next
+        run: mise run next
+        env:
+          DEPLOY_KEY: ${{ secrets.KIKU_DEPLOY_KEY }}
+          KIKU_PUBLIC_REPO: ${{ github.repository_owner }}/kiku
+
+  # Public repository, on next: both Windows installers, each built and tested on
+  # its own architecture (ARM64 natively, since ISCC.exe is an x86 program that
+  # Windows on ARM emulates). The runtime is restored on every run and saved only
+  # by the release branch, so a cold build happens once per change of its inputs.
+  app:
+    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/next' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            image: windows-2025
+          - arch: arm64
+            image: windows-11-arm
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+      - id: runtime
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            third_party/sherpa-onnx
+            third_party/moonshine-src
+            third_party/moonshine-build
+          key: runtime-${{ matrix.arch }}-${{ hashFiles('scripts/fetch-runtime.ps1', 'scripts/build-moonshine.ps1', 'patches/*') }}
+      - name: mise run build
+        run: mise run build
+      # `!cancelled()`: the runtime is worth keeping even when a test failed.
+      - if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', env.CI_BRANCH) && steps.runtime.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            third_party/sherpa-onnx
+            third_party/moonshine-src
+            third_party/moonshine-build
+          key: ${{ steps.runtime.outputs.cache-primary-key }}
+      - name: mise run smoke
+        run: mise run smoke
+        env:
+          KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-app-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  # ubuntu-22.04 is the glibc the engine ships for. The cargo cache has a key of
+  # its own: check.yml's engine job saves one for the same inputs without the
+  # packing build.
+  linux:
+    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/next' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+      - id: runtime
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            third_party/sherpa-onnx
+            third_party/moonshine-src
+            third_party/moonshine-build
+          key: runtime-linux-x64-${{ hashFiles('scripts/fetch-runtime.sh', 'scripts/build-moonshine.sh', 'patches/*') }}
+      - id: cargo
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-dist-linux-x64-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-dist-linux-x64-
+      - name: mise run build
+        run: mise run build
+      - if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', env.CI_BRANCH) && steps.runtime.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            third_party/sherpa-onnx
+            third_party/moonshine-src
+            third_party/moonshine-build
+          key: ${{ steps.runtime.outputs.cache-primary-key }}
+      - if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', env.CI_BRANCH) && steps.cargo.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: ${{ steps.cargo.outputs.cache-primary-key }}
+      - name: mise run smoke
+        run: mise run smoke
+        env:
+          KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-linux
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  # Green marks the commit's files as the release candidate: they go on the
+  # standing release draft, which nobody outside sees until it is published.
+  candidate:
+    needs: [check, app, linux]
+    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/next' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Shared with the release job, so a candidate is never replaced while a
+    # release is signing and publishing it. No other job may join this group:
+    # a third member could push a waiting release out of the queue.
+    concurrency:
+      group: candidate
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          path: dist/
+          merge-multiple: true
+      - name: mise run ci:candidate
+        run: mise run ci:candidate
+        env:
+          GH_TOKEN: ${{ github.token }}

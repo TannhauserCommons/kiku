@@ -55,7 +55,7 @@ impl Hook {
     /// A key some program sent, with `flags` and `dwExtraInfo` as it set them.
     fn sent(&mut self, vk: u16, down: bool, flags: KBDLLHOOKSTRUCT_FLAGS, extra: usize) -> Outcome {
         let flags = if down { flags } else { flags | LLKHF_UP };
-        keys::handle(&mut self.0, &KBDLLHOOKSTRUCT { vkCode: vk.into(), flags, dwExtraInfo: extra, ..Default::default() })
+        keys::handle(&mut self.0, &KBDLLHOOKSTRUCT { vkCode: vk.into(), flags, dwExtraInfo: extra, ..Default::default() }, &|_| true)
     }
 
     /// Presses `vks` in order, then lets them go in reverse; what each did, downs then ups.

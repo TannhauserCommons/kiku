@@ -20,9 +20,10 @@ If you choose to, the speech model can run on another computer of yours instead.
   speaker's name to give it a name of your own: Kiku recognises that voice from then on, in later sessions too.
   Names show as a name per line, once per turn beside a coloured bar, as tags, badges or headings (Settings → Apps).
 - **Captions mode:** the newest lines as subtitles over the screen, in the font, size and colours you pick.
-- **Dictation:** hold Ctrl+Win to type what you say into any app, or press it to start and again to stop;
-  optionally keep listening a moment after you let go; end it by saying "that's all Kiku" (your phrases). Paste or undo
-  it with a key. Every shortcut can be changed. Voice actions in `words.txt` press keys or paste saved text when you say a phrase.
+- **Dictation:** hold Ctrl+Win and talk, and what you said is typed into the app in front as you let go;
+  or press it to start and again to stop; optionally keep listening a moment after you let go; end it by saying
+  "that's all Kiku" (your phrases). Paste or undo it with a key. Every shortcut can be changed. Voice actions in
+  `words.txt` press keys or paste saved text when you say a phrase.
 - **Voice macros:** say a phrase to run several steps in the app in front: paste text with variables (date,
   clipboard, what was just said), press key sequences, paste or attach files. Edit them in Settings → Macros.
 - **Drive the PC by voice:** macros can open a link, file or app, bring an app's window to the front, run your

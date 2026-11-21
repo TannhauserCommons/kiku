@@ -37,6 +37,8 @@ mod macros_phase2_tests;
 mod macros_phase3_tests;
 #[cfg(test)]
 mod triggers_tests;
+#[cfg(test)]
+mod keys_tests;
 mod rows;
 mod scene;
 mod settings;
@@ -283,6 +285,7 @@ pub fn run(
         dictation: settings.dictation,
         steps: VecDeque::new(),
         step_waiting: false,
+        held_back: false,
         lent: None,
         keybinds: settings.keybinds,
         auto_fold: settings.auto_fold_minutes,
@@ -380,6 +383,8 @@ struct Window {
     /// Dictation steps still to run, and whether [`STEP_TIMER`] is set to run the next.
     steps: VecDeque<Step>,
     step_waiting: bool,
+    /// Typing waits for the captions key to be let go ([`keys::holding_captions_key`]).
+    held_back: bool,
     /// The clipboard as it was before a paste, until it is given back.
     lent: Option<Lent>,
     keybinds: Keybinds,
@@ -886,6 +891,7 @@ impl Window {
             Action::ResetKeys => {
                 self.keybinds = Keybinds::default();
                 keys::set_keybinds(self.keybinds.clone());
+                self.type_waiting();
                 self.macro_settings_changed();
                 self.save_settings();
                 self.notify(format!("Shortcuts reset. {}", self.keybinds.dictate_words(self.dictation.key)), false);
@@ -1825,6 +1831,11 @@ impl Window {
     /// Plans what was said into steps and starts running them: the dictated lines waiting (text to paste, keys
     /// to press, macros) and the lines heard that listening macros run.
     fn type_dictation(&mut self) {
+        // Waits for the captions key to be let go, then is planned for the app and mode it lands in.
+        if keys::holding_captions_key() {
+            self.held_back = true;
+            return;
+        }
         let lines = self.controls.take_typing();
         if lines.is_empty() && !self.controls.has_heard() {
             return;
@@ -1846,9 +1857,14 @@ impl Window {
     }
 
     /// Runs the next step; when more wait, they follow on a timer so the app has read the clipboard
-    /// before it is lent again, later still after a `wait` step.
+    /// before it is lent again, later still after a `wait` step. None runs while the captions key is held:
+    /// they wait for [`keys::KeyEvent::LetGo`].
     fn run_next_step(&mut self) {
         self.step_waiting = false;
+        if !self.steps.is_empty() && keys::holding_captions_key() {
+            self.held_back = true;
+            return;
+        }
         let Some(step) = self.steps.pop_front() else {
             return;
         };
@@ -1879,9 +1895,23 @@ impl Window {
         }
     }
 
-    /// Erases what this app last typed.
+    /// Types what waited for the captions key to be let go: dictated lines not planned yet, then the steps held back.
+    fn type_waiting(&mut self) {
+        self.held_back = false;
+        self.type_dictation();
+        if !self.step_waiting {
+            self.run_next_step();
+        }
+    }
+
+    /// Erases what this app last typed; dictation still waiting for the captions key to be let go typed
+    /// nothing, so it is dropped instead.
     fn undo_typing(&mut self) {
         self.steps.clear();
+        if std::mem::take(&mut self.held_back) {
+            self.controls.take_typing();
+            return;
+        }
         if let Some(typed) = self.typed.take() {
             keys::erase(typed.erase);
         }
@@ -2098,6 +2128,9 @@ impl Window {
         if let keys::KeyEvent::Captured { vk, down } = event {
             return self.on_captured(vk, down);
         }
+        if event == keys::KeyEvent::LetGo {
+            return self.type_waiting();
+        }
         if matches!(event, keys::KeyEvent::Macro { generation, .. } if generation != self.macro_shortcuts.0) {
             return;
         }
@@ -2307,7 +2340,9 @@ impl Window {
 
     /// Ends rebinding: `None` when cancelled, else what happened.
     fn finish_rebinding(&mut self, result: Option<std::result::Result<String, String>>) {
+        // The hook forgets the keys held when it stops capturing, with no LetGo for what waited on them.
         keys::set_capturing(false);
+        self.type_waiting();
         unsafe { KillTimer(Some(self.hwnd), REBIND_TIMER).ok() }.unwrap_or_default();
         self.settings.view.rebinding = None;
         self.settings.view.macros.cancel_recording();

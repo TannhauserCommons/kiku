@@ -1,0 +1,8 @@
+# Feature switches: the one list for the whole project, compiled into the app (crates/core/src/switches.rs).
+# A switch starts "off", and off is exactly the app as it is today. A finished feature waits off
+# (ready = true) until a one-line commit sets default = "on"; it ships in the next release.
+# After that release the code for off is deleted, the entry is removed and its name goes in
+# `tombstones`: a removed name is never reused. `mise run ci:switches` checks this file.
+
+cap_per_area = 2 # proposed; the owner has not decided the cap
+tombstones = []

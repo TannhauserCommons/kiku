@@ -1,0 +1,20 @@
+# The path map: one key per path-gated job id in check.yml. A job whose key is
+# absent here always runs. A push runs a gated job only when its paths changed;
+# main.yml runs them all.
+
+# The Linux engine: the crates and everything the engine's build and tests read.
+engine:
+  - 'crates/**'
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'rust-toolchain.toml'
+  - '.cargo/**'
+  - 'patches/**'
+  - 'switches.toml'
+  - 'scripts/fetch-runtime.sh'
+  - 'scripts/build-moonshine.sh'
+  - 'scripts/linux-build.Dockerfile'
+  - 'scripts/ci/engine.py'
+  - 'scripts/ci/docker_image.py'
+  - 'scripts/ci/common.py'
+  - '.github/workflows/check.yml'

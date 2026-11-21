@@ -1,0 +1,39 @@
+name: after
+
+# Reacts to a finished check or main run, from the default branch's code and
+# with its own token, so PR runs need no write access: reruns an infra failure
+# once, files flake issues, opens or closes the red-main issue.
+on:
+  workflow_run:
+    workflows: [check, main]
+    types: [completed]
+
+permissions:
+  contents: read
+
+# PROJECT: the release branch is main in the private repository and next in
+# the public one.
+env:
+  CI_BRANCH: ${{ github.event.repository.private && 'main' || 'next' }}
+
+jobs:
+  after:
+    # A cancelled PR run needs nothing. A cancelled main run may be a job that
+    # hit its timeout, which GitHub also concludes "cancelled".
+    if: ${{ github.event.workflow_run.conclusion != 'skipped' && (github.event.workflow_run.conclusion != 'cancelled' || github.event.workflow_run.name == 'main') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: false
+      - name: mise run ci:after
+        run: mise run ci:after ${{ github.event.workflow_run.id }}
+        env:
+          GH_TOKEN: ${{ github.token }}

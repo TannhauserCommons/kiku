@@ -1,0 +1,144 @@
+name: check
+
+# Every pull request, and (main.yml, with `all: true`) every push to the release
+# branch. The one required status is `gate` (shown as "check / gate").
+#
+# Both repositories carry this file. A change reaches the release branch through
+# a pull request, which the owner approves, so a pushed branch is checked once
+# it has one. The release branch is `main` in the private repository and `next`
+# in the public one: its pushes come through main.yml.
+on:
+  pull_request:
+  workflow_call:
+    inputs:
+      all:
+        description: Run every job, whatever paths changed
+        type: boolean
+        default: false
+    secrets:
+      KIKU_PRIVATE_WORDS:
+        description: Words the privacy gate rejects (empty in the private repository, where .private-words has them)
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CI_BRANCH: ${{ github.event.repository.private && 'main' || 'next' }}
+
+# A newer push to a pull request cancels the older run. The private
+# repository's Actions minutes are scarce, so a superseded run stops.
+# Cancelled is neither red nor green.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Always runs, so the required status never hangs in Pending. Decides which
+  # path-gated jobs run and which of them the gate may see skipped.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.select.outputs.run }}
+      skippable: ${{ steps.select.outputs.skippable }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+      - id: filter
+        if: ${{ !inputs.all }}
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: .github/ci/paths.yml
+      - id: select
+        name: mise run ci:select
+        run: mise run ci:select ${{ inputs.all && '--all' || '' }}
+        env:
+          CHANGES: ${{ steps.filter.outputs.changes }}
+
+  # Each job is checkout, mise, one `mise run <task>`. A path-gated job has a
+  # key in .github/ci/paths.yml and this `if:`; any other job always runs.
+  # Every job id goes in the gate's `needs:`. Everything here runs on Linux:
+  # the Windows tests run on this PC (`mise run windows`) and, later, in the
+  # public repository's build jobs.
+
+  # Privacy gate over the public tree, workflow lint, feature switches.
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+      - name: mise run check
+        run: mise run check
+        env:
+          KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
+
+  # ubuntu-22.04 is the glibc the engine ships for. The runtime and cargo's
+  # registry and target are restored on every run and saved only by the release
+  # branch, so a cold build happens once per change of their inputs.
+  engine:
+    needs: changes
+    if: ${{ contains(fromJSON(needs.changes.outputs.run), 'engine') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+      - id: runtime
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            third_party/sherpa-onnx
+            third_party/moonshine-src
+            third_party/moonshine-build
+          key: runtime-linux-x64-${{ hashFiles('scripts/fetch-runtime.sh', 'scripts/build-moonshine.sh', 'patches/*') }}
+      - id: cargo
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-linux-x64-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-linux-x64-
+      - name: mise run engine
+        run: mise run engine
+      # `!cancelled()`: the runtime is worth keeping even when a test failed.
+      - if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', env.CI_BRANCH) && steps.runtime.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            third_party/sherpa-onnx
+            third_party/moonshine-src
+            third_party/moonshine-build
+          key: ${{ steps.runtime.outputs.cache-primary-key }}
+      - if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', env.CI_BRANCH) && steps.cargo.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: ${{ steps.cargo.outputs.cache-primary-key }}
+
+  # The only required status. `!cancelled()` makes it run when a job it needs
+  # failed (a plain `needs:` job would be skipped, and skipped counts as
+  # passing). It fails on any failed or cancelled job, and lets a job be
+  # skipped only when the path map left it out.
+  gate:
+    if: ${{ !cancelled() }}
+    needs: [changes, check, engine]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          jobs: ${{ toJSON(needs) }}
+          allowed-skips: ${{ needs.changes.outputs.skippable }}

@@ -42,7 +42,11 @@ use kiku_core::{
 pub const WM_CAPTIONS_KEY: u32 = WM_APP + 3;
 /// Set in `dwExtraInfo` of every key Kiku sends, so its keyboard hook lets those through untouched and counts
 /// keys any other program sends (a Stream Deck, AutoHotkey) as typed.
-const OWN_KEYS: usize = 0x4B49_4B55;
+pub(super) const OWN_KEYS: usize = 0x4B49_4B55;
+/// Kiku letting go of a held modifier for a moment while it sends keys ([`press`]), in place of [`OWN_KEYS`].
+pub(super) const LIFT: usize = 0x4B49_4B4C;
+/// Kiku pressing a modifier it lifted down again; the hook swallows it when the user let go of the key meanwhile.
+pub(super) const RESTORE: usize = 0x4B49_4B52;
 /// An unassigned key. Pressing it before a held Win or Alt is let go stops the Start menu or a
 /// window menu from opening, as AutoHotkey does.
 const MASK_KEY: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
@@ -71,6 +75,9 @@ pub enum KeyEvent {
     /// A macro's shortcut: the `index`th of those last handed to [`set_macro_hotkeys`], which bumped
     /// `generation`, so the overlay can ignore one pressed before the macros changed.
     Macro { generation: u32, index: usize },
+    /// The captions key's modifiers are all up again after it was held: what waited on
+    /// [`holding_captions_key`] can be typed.
+    LetGo,
 }
 
 impl KeyEvent {
@@ -82,6 +89,7 @@ impl KeyEvent {
             KeyEvent::Command(command) => (WPARAM(3), LPARAM(Command::ALL.iter().position(|&c| c == command).unwrap_or(0) as isize)),
             KeyEvent::Captured { vk, down } => (WPARAM(if down { 4 } else { 5 }), LPARAM(vk as isize)),
             KeyEvent::Macro { generation, index } => (WPARAM(6), LPARAM(((u64::from(generation) << 32) | index as u64) as isize)),
+            KeyEvent::LetGo => (WPARAM(7), LPARAM(0)),
         }
     }
 
@@ -95,6 +103,7 @@ impl KeyEvent {
                 let packed = lparam.0 as u64;
                 KeyEvent::Macro { generation: (packed >> 32) as u32, index: (packed & u64::from(u32::MAX)) as usize }
             }
+            7 => KeyEvent::LetGo,
             down => KeyEvent::Captured { vk: lparam.0 as u16, down: down == 4 },
         }
     }
@@ -141,6 +150,13 @@ pub fn set_macro_hotkeys(hotkeys: Vec<Hotkey>) -> u32 {
     context().set_macro_hotkeys(hotkeys)
 }
 
+/// Whether the captions key was held and one of its modifiers still is. Keys Kiku sends then would need that
+/// modifier let go for a moment, which its auto-repeat can slip into (a held Win opening Search), so typing
+/// waits for [`KeyEvent::LetGo`].
+pub fn holding_captions_key() -> bool {
+    context().holding(&windows_has_down)
+}
+
 /// Runs the hook until [`Hook`] is dropped. Windows calls a low-level hook on the thread that set it,
 /// while that thread waits for messages, so this thread does nothing else.
 fn run_hook(started: &mpsc::Sender<Result<u32>>) {
@@ -165,13 +181,30 @@ struct State {
     /// The captions key was held or a macro's shortcut pressed, so letting go of a Win or Alt in it must not
     /// open a menu.
     used: bool,
+    /// The captions key was held, and not all of its modifiers have been let go since.
+    holding: bool,
     /// A command or macro key whose key-up must be swallowed like its key-down was.
     swallowed: Option<u32>,
+    /// The modifiers (by virtual-key code, so by side) Kiku has let go for a moment and not pressed again yet;
+    /// while lifted, Windows says they are up whatever the user does.
+    lifted: Vec<u32>,
+    /// The modifiers (by virtual-key code) whose last key the user sent was a key-up.
+    let_go: Vec<u32>,
 }
 
 impl State {
     fn held(&self, binds: &Keybinds) -> bool {
         binds.hold.iter().all(|key| self.down.contains(key))
+    }
+
+    /// The captions key's modifiers that are down.
+    fn hold_modifiers<'a>(&'a self, binds: &'a Keybinds) -> impl Iterator<Item = Key> + 'a {
+        binds.hold.iter().copied().filter(|key| key.is_modifier() && self.down.contains(key))
+    }
+
+    /// Whether held `key` is still down as far as can be told: Windows says so, or Kiku has it lifted.
+    fn still_down(&self, key: Key, windows_has_down: &dyn Fn(Key) -> bool) -> bool {
+        self.lifted.iter().any(|&vk| Key::from_vk(vk as u16) == key) || windows_has_down(key)
     }
 }
 
@@ -200,6 +233,12 @@ impl Context {
         self.state = State::default();
     }
 
+    /// [`holding_captions_key`], reading Windows' key state with `windows_has_down`.
+    pub(super) fn holding(&self, windows_has_down: &dyn Fn(Key) -> bool) -> bool {
+        // Key-ups the hook missed don't count; it forgets those keys, saying so, at the next key.
+        self.state.holding && self.state.hold_modifiers(&self.binds).any(|key| self.state.still_down(key, windows_has_down))
+    }
+
     /// Catches `hotkeys` from now on; returns the new generation their events carry.
     pub(super) fn set_macro_hotkeys(&mut self, hotkeys: Vec<Hotkey>) -> u32 {
         self.macros = hotkeys;
@@ -217,14 +256,27 @@ pub(super) struct Outcome {
     pub mask: bool,
 }
 
-/// What the hook does with `key`; keys Kiku sent itself (tagged in `dwExtraInfo`) are let through untouched.
-pub(super) fn handle(context: &mut Context, key: &KBDLLHOOKSTRUCT) -> Outcome {
+/// What the hook does with `key`, reading Windows' key state with `windows_has_down`. Keys Kiku sent itself
+/// (tagged in `dwExtraInfo`) are let through, except a modifier pressed again that the user let go meanwhile.
+pub(super) fn handle(context: &mut Context, key: &KBDLLHOOKSTRUCT, windows_has_down: &dyn Fn(Key) -> bool) -> Outcome {
     let mut outcome = Outcome::default();
-    if key.dwExtraInfo == OWN_KEYS {
-        return outcome;
-    }
     let (vk, down) = (key.vkCode, !key.flags.contains(LLKHF_UP));
     let Context { binds, capturing, state, macros, generation, .. } = context;
+    match key.dwExtraInfo {
+        OWN_KEYS => return outcome,
+        LIFT => {
+            state.lifted.retain(|&k| k != vk);
+            state.lifted.push(vk);
+            return outcome;
+        }
+        RESTORE => {
+            state.lifted.retain(|&k| k != vk);
+            // Only a key seen going up: one the hook never saw is pressed again, as it may still be held.
+            outcome.swallow = state.let_go.contains(&vk);
+            return outcome;
+        }
+        _ => {}
+    }
     if *capturing {
         outcome.events.push(KeyEvent::Captured { vk: vk as u16, down });
         outcome.swallow = true;
@@ -232,12 +284,19 @@ pub(super) fn handle(context: &mut Context, key: &KBDLLHOOKSTRUCT) -> Outcome {
     }
     let key = Key::from_vk(vk as u16);
     let was_held = state.held(binds);
+    drop_released_modifiers(state, key, windows_has_down);
+    // A hold that was only left over from missed key-ups gives no command, though it ends with Released.
+    let held_before = state.held(binds);
     let in_hold = binds.hold.contains(&key);
     if key.is_modifier() || in_hold {
         outcome.mask = !down && state.used && matches!(key, Key::Win | Key::Alt);
         state.down.retain(|k| *k != key);
+        state.let_go.retain(|&k| k != vk);
         if down {
             state.down.push(key);
+        } else {
+            state.lifted.retain(|&k| k != vk);
+            state.let_go.push(vk);
         }
     }
     if in_hold {
@@ -252,7 +311,7 @@ pub(super) fn handle(context: &mut Context, key: &KBDLLHOOKSTRUCT) -> Outcome {
             outcome.events.push(KeyEvent::Macro { generation: *generation, index });
         }
         (state.swallowed, state.used, outcome.swallow) = (Some(vk), true, true);
-    } else if was_held && down {
+    } else if held_before && down {
         match binds.command_for(key) {
             Some(command) => {
                 outcome.events.push(KeyEvent::Command(command));
@@ -268,6 +327,12 @@ pub(super) fn handle(context: &mut Context, key: &KBDLLHOOKSTRUCT) -> Outcome {
         outcome.events.push(KeyEvent::Held);
     } else if was_held && !held {
         outcome.events.push(KeyEvent::Released);
+    }
+    if held && binds.hold.iter().any(|key| key.is_modifier()) {
+        state.holding = true;
+    } else if state.holding && state.hold_modifiers(binds).next().is_none() {
+        state.holding = false;
+        outcome.events.push(KeyEvent::LetGo);
     }
     if state.down.is_empty() {
         state.used = false;
@@ -286,21 +351,23 @@ fn macro_at(macros: &[Hotkey], down: &[Key], key: Key) -> Option<usize> {
 
 /// Forgets modifiers Windows says are up: the hook misses key-ups while input is on the secure desktop
 /// (Ctrl+Alt+Del, UAC, the lock screen), which would leave them held for good. `current` is the key being
-/// handled, whose state Windows hasn't updated yet.
-fn drop_released_modifiers(state: &mut State, current: Key) {
-    state.down.retain(|key| {
-        if *key == current {
-            return true;
-        }
-        let vk = match key {
-            Key::Ctrl => VK_CONTROL,
-            Key::Alt => VK_MENU,
-            Key::Shift => VK_SHIFT,
-            Key::Win => return unsafe { GetAsyncKeyState(VK_LWIN.0 as i32) < 0 || GetAsyncKeyState(VK_RWIN.0 as i32) < 0 },
-            Key::Other(_) => return true,
-        };
-        (unsafe { GetAsyncKeyState(vk.0 as i32) }) < 0
-    });
+/// handled, whose state Windows hasn't updated yet; Windows says nothing about the keys Kiku has lifted.
+fn drop_released_modifiers(state: &mut State, current: Key, windows_has_down: &dyn Fn(Key) -> bool) {
+    let released: Vec<Key> =
+        state.down.iter().copied().filter(|&key| key.is_modifier() && key != current && !state.still_down(key, windows_has_down)).collect();
+    state.down.retain(|key| !released.contains(key));
+}
+
+/// Whether Windows has `key` down, by either side.
+fn windows_has_down(key: Key) -> bool {
+    let down = |vk: VIRTUAL_KEY| (unsafe { GetAsyncKeyState(vk.0 as i32) }) < 0;
+    match key {
+        Key::Ctrl => down(VK_CONTROL),
+        Key::Alt => down(VK_MENU),
+        Key::Shift => down(VK_SHIFT),
+        Key::Win => down(VK_LWIN) || down(VK_RWIN),
+        Key::Other(_) => true,
+    }
 }
 
 static CONTEXT: LazyLock<Mutex<Context>> = LazyLock::new(Mutex::default);
@@ -314,11 +381,7 @@ extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         let key = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         let (outcome, window) = {
             let mut context = context();
-            // Kiku's own keys lift held modifiers for a moment (a paste while dictating), which must not read as let go.
-            if key.dwExtraInfo != OWN_KEYS {
-                drop_released_modifiers(&mut context.state, Key::from_vk(key.vkCode as u16));
-            }
-            (handle(&mut context, key), context.window)
+            (handle(&mut context, key, &windows_has_down), context.window)
         };
         if outcome.mask {
             tap_mask_key();
@@ -381,15 +444,15 @@ pub fn type_text(text: &str) {
 }
 
 /// Sends `keys` after taking back `erase`. Held modifiers are let go for the moment, so a held
-/// captions key doesn't turn the keys into shortcuts.
+/// captions key doesn't turn the keys into shortcuts, and pressed again unless the user let go of them meanwhile.
 fn press(erase: Option<Erase>, keys: impl IntoIterator<Item = INPUT>) {
     let modifiers = [VK_LCONTROL, VK_RCONTROL, VK_LWIN, VK_RWIN, VK_LMENU, VK_RMENU, VK_LSHIFT, VK_RSHIFT];
     let held: Vec<VIRTUAL_KEY> = modifiers.into_iter().filter(|&k| unsafe { GetAsyncKeyState(k.0 as i32) } < 0).collect();
     let mut inputs = vec![key_input(MASK_KEY, false), key_input(MASK_KEY, true)];
-    inputs.extend(held.iter().map(|&k| key_input(k, true)));
+    inputs.extend(held.iter().map(|&k| tagged_input(k, true, false, LIFT)));
     inputs.extend(erase.map_or_else(Vec::new, erase_keys));
     inputs.extend(keys);
-    inputs.extend(held.iter().map(|&k| key_input(k, false)));
+    inputs.extend(held.iter().map(|&k| tagged_input(k, false, false, RESTORE)));
     send(&inputs);
 }
 
@@ -439,6 +502,11 @@ fn key_input(key: VIRTUAL_KEY, up: bool) -> INPUT {
 }
 
 fn stroke_input(key: VIRTUAL_KEY, up: bool, extended: bool) -> INPUT {
+    tagged_input(key, up, extended, OWN_KEYS)
+}
+
+/// A key Kiku sends, with `tag` in `dwExtraInfo` telling its hook what it is for.
+fn tagged_input(key: VIRTUAL_KEY, up: bool, extended: bool, tag: usize) -> INPUT {
     let mut flags = KEYBD_EVENT_FLAGS(0);
     if up {
         flags |= KEYEVENTF_KEYUP;
@@ -446,6 +514,6 @@ fn stroke_input(key: VIRTUAL_KEY, up: bool, extended: bool) -> INPUT {
     if extended {
         flags |= KEYEVENTF_EXTENDEDKEY;
     }
-    INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: key, dwFlags: flags, dwExtraInfo: OWN_KEYS, ..Default::default() } } }
+    INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: key, dwFlags: flags, dwExtraInfo: tag, ..Default::default() } } }
 }
 

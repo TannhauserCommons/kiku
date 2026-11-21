@@ -1,0 +1,42 @@
+# Shared tasks of the CI skeleton. Copied unchanged; the project's mise.toml
+# includes this file. Contract: docs/context/contract.md in ci-skeleton.
+
+[status]
+description = "Run first: red main, red PRs, stuck PRs, the candidate"
+run = "python .github/ci/status.py"
+
+["ci:select"]
+description = "check: which path-gated jobs run, and which the gate may see skipped"
+run = "python .github/ci/paths.py"
+
+["ci:lint"]
+description = "Workflow lint: actionlint plus the skeleton's own rules"
+run = ["actionlint", "python .github/ci/lint.py"]
+
+["ci:switches"]
+description = "Fail on an expired, tombstoned or malformed switch, or more than the cap"
+run = "python .github/ci/switches.py check"
+
+["ci:after"]
+description = "After a check or main run: one infra rerun, flake issues, the red-main issue"
+run = "python .github/ci/after.py"
+
+["ci:base"]
+description = "Print the last commit main tested green"
+run = "python .github/ci/candidate.py base"
+
+["ci:candidate"]
+description = "Green main: put dist/ on the standing release draft as the candidate"
+run = "python .github/ci/candidate.py record"
+
+["ci:fetch"]
+description = "Release: check every hash, put the candidate in candidate/ and its files in candidate/dist"
+run = "python .github/ci/candidate.py fetch"
+
+["ci:publish"]
+description = "Release: upload the signed files and publish the draft, tag last"
+run = "python .github/ci/candidate.py publish"
+
+["ci:bump"]
+description = "Release: move main to the next version"
+run = "python .github/ci/candidate.py bump"

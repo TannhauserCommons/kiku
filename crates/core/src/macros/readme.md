@@ -43,7 +43,7 @@ say = "search for {words}"
 
 Three ways to run a macro; a macro may have any of them.
 
-- `say`: hold the dictation key and say it, as above.
+- `say`: hold the dictation key and say it, as above. Its steps run once you let go of the key.
 - `hotkey = "Ctrl+Alt+M"`: a shortcut, written as Settings > Shortcuts writes keys (`Ctrl`, `Alt`, `Shift`, `Win`
   in any order, then one key). It needs Ctrl, Alt or Win (or is F13 to F24), never Win+L or Ctrl+Alt+Delete,
   never the captions key (Ctrl+Win by default) or it with a command key (Ctrl+Win+V), and no two macros share

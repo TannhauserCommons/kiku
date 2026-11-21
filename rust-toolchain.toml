@@ -1,0 +1,6 @@
+# The one Rust version every build and test uses: this PC, CI and scripts/linux-build.Dockerfile.
+# Change it here only. clippy is run by the agent loop gates; nothing runs rustfmt.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy"]

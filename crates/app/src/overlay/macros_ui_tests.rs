@@ -295,7 +295,7 @@ fn ui_palette_opens_lists_and_runs() {
     let mut hook = keys::Context::new(Keybinds::default());
     let mut key = |vk: u16, down: bool| {
         let flags = if down { KBDLLHOOKSTRUCT_FLAGS(0) } else { LLKHF_UP };
-        keys::handle(&mut hook, &KBDLLHOOKSTRUCT { vkCode: vk.into(), flags, ..Default::default() })
+        keys::handle(&mut hook, &KBDLLHOOKSTRUCT { vkCode: vk.into(), flags, ..Default::default() }, &|_| true)
     };
     key(0xA2, true);
     key(0x5B, true);

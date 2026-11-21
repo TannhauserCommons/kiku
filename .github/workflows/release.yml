@@ -1,239 +1,138 @@
-# Builds and publishes a release from this repository's source when a version tag (v1.2.3) is pushed: each
-# architecture's installer (x64 and ARM64, each built natively) and signed update manifest, and the Linux
-# model host's tarball, as the tag's release; the host's Docker image on ghcr.io; and model files the app
-# downloads from here, if missing, in the models-v1 release. Publishes only on tag pushes to the public
-# repository itself, never for pull requests or forks, so its signing key reaches no one else's code. Run by
-# hand (workflow_dispatch), it only builds and tests.
-# Secrets: KIKU_SIGNING_KEY (the update manifest's ed25519 key) and KIKU_PRIVATE_WORDS (for the privacy gate).
 name: release
 
+# The owner's command, run in the public repository on `next`. Takes the newest
+# green candidate from the standing release draft: no rebuild. A failure costs a
+# rerun, never a burnt version, because the tag is created last. Kiku's version is
+# bumped in the private repository, so there is no bump step: the release moves
+# the public main to the released commit instead.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Fetch, sign and check, but publish nothing
+        type: boolean
+        default: false
+      notes:
+        description: The release text's first paragraph, and what the update offer says (optional)
+        type: string
+        default: ''
 
-# Each job asks for more where it needs it.
 permissions:
   contents: read
 
-concurrency: release-${{ github.ref }}
-
-defaults:
-  run:
-    shell: pwsh
-
-env:
-  # Where installed copies look for updates; a repository variable moves it.
-  KIKU_RELEASES: ${{ vars.KIKU_RELEASES || format('https://github.com/{0}/releases', github.repository) }}
+# A release never cancels and never overlaps another.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  app:
-    if: ${{ !github.event.repository.fork && (github.event_name == 'workflow_dispatch' || !github.event.repository.private) }}
-    strategy:
-      # Each architecture's result stands on its own; publishing needs both anyway.
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            image: windows-2025
-          - arch: arm64
-            image: windows-11-arm
-    runs-on: ${{ matrix.image }}
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Check the tag
-        if: github.event_name == 'push'
-        run: |
-          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
-          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "The tag $env:GITHUB_REF_NAME doesn't match version $version in Cargo.toml" }
-
-      - uses: actions/cache@v4
-        id: runtime
-        with:
-          path: |
-            third_party/sherpa-onnx
-            third_party/moonshine-src
-            third_party/moonshine-build
-          key: runtime-${{ matrix.arch }}-${{ hashFiles('scripts/fetch-runtime.ps1', 'scripts/build-moonshine.ps1', 'patches/*') }}
-
-      - name: Fetch the runtime and build Moonshine
-        if: steps.runtime.outputs.cache-hit != 'true'
-        run: |
-          ./scripts/fetch-runtime.ps1 -CpuOnly
-          ./scripts/build-moonshine.ps1
-
-      - uses: astral-sh/setup-uv@v6
-
-      - name: Compile in the update key
-        if: github.event_name == 'push'
-        env:
-          KIKU_SIGNING_KEY: ${{ secrets.KIKU_SIGNING_KEY }}
-        run: |
-          $key = uv run scripts/release.py public-key
-          if ($LASTEXITCODE) { throw 'KIKU_SIGNING_KEY is not set' }
-          "KIKU_UPDATE_KEY=$key" >> $env:GITHUB_ENV
-
-      - name: Test and build
-        run: |
-          rustup update stable --no-self-update
-          ./scripts/build-release.ps1 -Test
-
-      - name: Privacy gate
-        env:
-          KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
-        run: python scripts/privacy-gate.py target/dist/Kiku
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kiku-${{ matrix.arch }}
-          path: target/dist/Kiku
-          retention-days: 7
-
-  linux:
-    if: ${{ !github.event.repository.fork && (github.event_name == 'workflow_dispatch' || !github.event.repository.private) }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Check the tag
-        if: github.event_name == 'push'
-        run: |
-          version="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml | tr -d '\r')"
-          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "The tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml" >&2; exit 1; }
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            third_party/sherpa-onnx
-            third_party/moonshine-src
-            third_party/moonshine-build
-          key: runtime-linux-x64-${{ hashFiles('scripts/fetch-runtime.sh', 'scripts/build-moonshine.sh', 'patches/*') }}
-
-      # The same image the Linux gate builds in, so CI and the gate agree. Files made in the container are
-      # handed back to the runner's user afterwards.
-      - name: Test and pack in the build image
-        run: |
-          docker build -q -t kiku-linux-build -f scripts/linux-build.Dockerfile scripts
-          docker run --rm -v "$PWD:/src" -e "OWNER=$(id -u):$(id -g)" kiku-linux-build bash -c '
-            trap "chown -R $OWNER third_party target" EXIT
-            if [ ! -e third_party/sherpa-onnx/lib/libonnxruntime.so ]; then ./scripts/fetch-runtime.sh; fi
-            if [ ! -e third_party/moonshine-build/libmoonshine.a ]; then ./scripts/build-moonshine.sh; fi
-            cargo test --release --locked -p kiku-core --tests
-            ./scripts/pack-linux.sh'
-
-      - name: Privacy gate
-        env:
-          KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
-        run: |
-          unpacked="$RUNNER_TEMP/unpacked"
-          mkdir "$unpacked"
-          tar -xzf target/dist/kiku-engine-*-linux-x64.tar.gz -C "$unpacked"
-          python3 scripts/privacy-gate.py "$unpacked"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kiku-engine-linux-x64
-          path: target/dist/kiku-engine-*-linux-x64.tar.gz
-          retention-days: 7
-
-  publish:
-    needs: [app, linux]
-    if: ${{ github.event_name == 'push' && !github.event.repository.private }}
-    runs-on: windows-2025
+  release:
+    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/next' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # The owner approves each release here; the Environment is limited to next
+    # and holds the key that moves main.
+    environment: release
     permissions:
       contents: write
+      issues: write
+    # Shared with main's candidate job: see main.yml.
+    concurrency:
+      group: candidate
+      cancel-in-progress: false
+    outputs:
+      version: ${{ steps.candidate.outputs.version }}
+      tag: ${{ steps.candidate.outputs.tag }}
+      sha: ${{ steps.candidate.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+      RELEASE_NOTES: ${{ inputs.notes }}
+      CI_BRANCH: next
+      # Checked first, dry run included: without the key the release would
+      # publish and only then fail to move main.
+      BUMP_KEY_SET: ${{ secrets.BUMP_KEY != '' }}
+      # What the builds compiled in, and so what the manifests are signed for.
+      KIKU_RELEASES: ${{ vars.KIKU_RELEASES || format('https://github.com/{0}/releases', github.repository) }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
-
-      # Into target/dist/kiku-x64, kiku-arm64 and kiku-engine-linux-x64.
-      - uses: actions/download-artifact@v4
+      # The release scripts run from next. main is moved with a deploy key: the
+      # workflow's own token may not push a commit that changes workflow files,
+      # and the first release under this design, and any later one that edits
+      # a workflow, does.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          pattern: kiku-*
-          path: target/dist
-
-      - name: Build the installers
-        run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          "VERSION=$version" >> $env:GITHUB_ENV
-          choco install innosetup --no-progress -y
-          foreach ($arch in 'x64', 'arm64') {
-              & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DVersion=$version" "/DArch=$arch" "/DStaged=..\target\dist\kiku-$arch" installer/kiku.iss
-              if ($LASTEXITCODE) { throw "ISCC failed for $arch`: $LASTEXITCODE" }
-          }
-
-      - name: Sign the update manifests
+          fetch-depth: 0
+          ssh-key: ${{ secrets.BUMP_KEY }}
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: false
+      # Puts the candidate's commit in candidate/ and its files in
+      # candidate/dist, every hash checked.
+      - id: candidate
+        name: mise run ci:fetch
+        run: mise run ci:fetch
+      # `published` is true only on a rerun of a release that published and
+      # then failed: moving main is all that is left.
+      # The candidate's own tree signs its files, so the task matches them.
+      - name: mise run publish
+        if: ${{ steps.candidate.outputs.published != 'true' }}
+        working-directory: candidate
+        run: mise run publish
+        # Only the candidate's own mise.toml: not next's, one folder up.
         env:
+          MISE_CEILING_PATHS: ${{ github.workspace }}
           KIKU_SIGNING_KEY: ${{ secrets.KIKU_SIGNING_KEY }}
-        run: |
-          # The release commit's message after its title is what the update offer says changed.
-          $notes = ((git log -1 --format=%b) -join "`n").Trim()
-          "NOTES<<EOF`n$notes`nEOF" >> $env:GITHUB_ENV
-          foreach ($setup in Get-ChildItem target/dist -Filter "Kiku-$env:VERSION-*-setup.exe") {
-              uv run scripts/release.py manifest $setup.FullName $env:VERSION $env:KIKU_RELEASES $notes target/dist
-              if ($LASTEXITCODE) { throw 'Signing failed' }
-          }
-
-      - name: Privacy gate
-        env:
           KIKU_PRIVATE_WORDS: ${{ secrets.KIKU_PRIVATE_WORDS }}
-        run: |
-          $published = Get-ChildItem target/dist -File | Where-Object Name -match '^(Kiku-.*-setup\.exe|latest.*\.json)$'
-          python scripts/privacy-gate.py @($published.FullName)
+      - name: mise run ci:publish
+        if: ${{ steps.candidate.outputs.published != 'true' }}
+        run: mise run ci:publish ${{ inputs.dry_run && '--dry-run' || '' }}
+      # A fast-forward of main to the released commit; a rerun finds it there.
+      - name: mise run land
+        run: mise run land ${{ steps.candidate.outputs.sha }}
 
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/publish-release.ps1 -Version $env:VERSION -Notes $env:NOTES
-
-  models:
-    needs: publish
-    runs-on: windows-2025
-    timeout-minutes: 90
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
-      - name: Make and publish missing model files
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/publish-models.ps1
-
+  # The Linux model host's Docker image, from the tarball the release published.
   image:
-    needs: publish
+    needs: release
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: kiku-engine-linux-x64
-          path: image-context
+          ref: ${{ needs.release.outputs.tag }}
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: false
+      - name: mise run tarball
+        run: mise run tarball
+      # A new package starts private: see docs/RELEASING.md.
+      - name: mise run image
+        run: mise run image
 
-      # ghcr.io wants a lowercase name. A new package starts private: see docs/RELEASING.md.
-      - name: Build and push the image
-        shell: bash
+  # Model files the catalog serves from here, made once and published if missing.
+  models:
+    needs: release
+    if: ${{ !inputs.dry_run }}
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.23
+          cache_save: false
+      - name: mise run models
+        run: mise run models
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kiku-engine"
-          version="${GITHUB_REF_NAME#v}"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker build -f Dockerfile -t "$image:$version" -t "$image:latest" \
-            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" image-context
-          docker push "$image:$version"
-          docker push "$image:latest"

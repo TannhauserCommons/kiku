@@ -24,6 +24,7 @@ pub mod settings;
 pub mod sherpa;
 pub mod status;
 pub mod subtitles;
+pub mod switches;
 pub mod theme;
 pub mod transcripts;
 pub mod update;
