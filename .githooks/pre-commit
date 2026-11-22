@@ -1,0 +1,11 @@
+#!/bin/sh
+# Refuses a commit that stages a private path or text the privacy gate rejects. Installed by
+# `mise run setup` (git config core.hooksPath .githooks); the work is scripts/ci/hooks.py.
+root=$(git rev-parse --show-toplevel) || exit 1
+for py in "${KIKU_PYTHON:-}" python3 python; do
+  if [ -n "$py" ] && command -v "$py" >/dev/null 2>&1 && "$py" -c '' >/dev/null 2>&1; then
+    exec "$py" "$root/scripts/ci/hooks.py" pre-commit "$@"
+  fi
+done
+echo "kiku hooks: no working python (set KIKU_PYTHON); refusing, as the privacy check could not run" >&2
+exit 1
