@@ -11,10 +11,9 @@ on:
 permissions:
   contents: read
 
-# PROJECT: the release branch is main in the private repository and next in
-# the public one.
+# PROJECT: the release branch.
 env:
-  CI_BRANCH: ${{ github.event.repository.private && 'main' || 'next' }}
+  CI_BRANCH: main
 
 jobs:
   after:
