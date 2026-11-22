@@ -9,14 +9,15 @@ from unittest import mock
 import privacy
 
 CI_PUSH = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push"}
-CI_PULL_REQUEST = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request"}
+CI_PULL_REQUEST = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request", "KIKU_FORK_PR": "false"}
+CI_FORK_PULL_REQUEST = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request", "KIKU_FORK_PR": "true"}
 
 
 class GateTest(unittest.TestCase):
     def gate(self, env):
-        """Run privacy.gate with only `env` set, the public repository's layout (no .publicignore) and the gate stubbed."""
+        """Run privacy.gate with only `env` set, no `.private-words` and the gate stubbed."""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
-            patches = [mock.patch.dict("os.environ", env, clear=True), mock.patch.object(privacy, "PUBLIC_IGNORE", Path(folder, "none")),
+            patches = [mock.patch.dict("os.environ", env, clear=True), mock.patch.object(privacy, "words_file", return_value=None),
                        mock.patch.object(privacy.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="ok\n", stderr=""))]
             run = [patch.start() for patch in patches][2]
             try:
@@ -34,8 +35,15 @@ class GateTest(unittest.TestCase):
             self.assertIn("privacy: no private words (KIKU_PRIVATE_WORDS is empty and there is no .private-words): refusing to gate with patterns only", err)
             run.assert_not_called()
 
-    def test_a_ci_pull_request_without_words_gates_the_patterns(self):
-        code, _, run = self.gate(CI_PULL_REQUEST)
+    def test_a_same_repository_pull_request_without_words_fails_too(self):
+        for env in (CI_PULL_REQUEST, {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request"}):
+            code, err, run = self.gate(env)
+            self.assertEqual(code, 1)
+            self.assertIn("no private words", err)
+            run.assert_not_called()
+
+    def test_a_fork_pull_request_without_words_gates_the_patterns(self):
+        code, _, run = self.gate(CI_FORK_PULL_REQUEST)
         self.assertEqual(code, 0)
         run.assert_called_once()
 
@@ -51,6 +59,8 @@ class GateTest(unittest.TestCase):
     def test_workflow_dispatch_and_schedule_need_words_too(self):
         self.assertTrue(privacy.needs_words({"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch"}))
         self.assertFalse(privacy.needs_words({"GITHUB_EVENT_NAME": "push"}))
+        self.assertFalse(privacy.needs_words(CI_FORK_PULL_REQUEST))
+        self.assertTrue(privacy.needs_words(CI_PUSH))
 
 
 if __name__ == "__main__":
