@@ -42,9 +42,9 @@ description = "The Linux engine's tests in the Linux build image (Docker; on Win
 run = "python scripts/ci/engine.py"
 
 [tasks.windows]
-description = "The Windows workspace tests to run on this PC before a push (needs third_party's runtime)"
+description = "The Windows workspace tests (and the snapshots when KIKU_SNAPSHOTS names a folder); fetches the runtime if third_party lacks it"
 run = "echo windows: this task runs on Windows only && exit 1"
-run_windows = "cargo test --release --locked --workspace --tests"
+run_windows = "python scripts/ci/windows.py"
 
 [tasks.next]
 description = "Private repository: push the filtered tree as one rolling commit to the public repository's next branch"

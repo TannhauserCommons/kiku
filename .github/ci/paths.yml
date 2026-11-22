@@ -18,3 +18,19 @@ engine:
   - 'scripts/ci/docker_image.py'
   - 'scripts/ci/common.py'
   - '.github/workflows/check.yml'
+
+# The Windows workspace tests: the crates and what the Windows runtime and test run read.
+windows:
+  - 'crates/**'
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'rust-toolchain.toml'
+  - '.cargo/**'
+  - 'patches/**'
+  - 'switches.toml'
+  - 'scripts/fetch-runtime.ps1'
+  - 'scripts/build-moonshine.ps1'
+  - 'scripts/ci/windows.py'
+  - 'scripts/ci/build_windows.py'
+  - 'scripts/ci/common.py'
+  - '.github/workflows/check.yml'
