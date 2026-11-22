@@ -4,3 +4,25 @@
 /dist
 /image-context
 __pycache__/
+
+# BEGIN private: kept on disk, never committed. The hooks and `mise run check`
+# refuse these paths even when force-added (scripts/ci/privacy.py reads this
+# block, with gitignore's rules for these forms: a name alone matches at any
+# depth, a path with a slash is from the root, a trailing slash is a folder).
+AGENTS.md
+CLAUDE.md
+.claude/
+skills/
+spikes/
+.loop/
+/docs/RELEASING.md
+.private-words
+/scripts/loop-gate.ps1
+/scripts/linux-gate.ps1
+/scripts/voice-gate.sh
+/scripts/voices-gate.sh
+/scripts/macros-gate.sh
+/scripts/macros2-gate.sh
+/scripts/macros3-gate.sh
+/scripts/setup-release.ps1
+# END private
