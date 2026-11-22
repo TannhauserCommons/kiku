@@ -1,10 +1,9 @@
 name: release
 
-# The owner's command, run in the public repository on `next`. Takes the newest
-# green candidate from the standing release draft: no rebuild. A failure costs a
-# rerun, never a burnt version, because the tag is created last. Kiku's version is
-# bumped in the private repository, so there is no bump step: the release moves
-# the public main to the released commit instead.
+# The owner's command, run on `main`. Takes the newest green candidate from the
+# standing release draft: no rebuild, and the tag goes on the candidate's commit.
+# A failure costs a rerun, never a burnt version, because the tag is created
+# last. The version is bumped in a pull request, so there is no bump step.
 on:
   workflow_dispatch:
     inputs:
@@ -27,11 +26,11 @@ concurrency:
 
 jobs:
   release:
-    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/next' }}
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    # The owner approves each release here; the Environment is limited to next
-    # and holds the key that moves main.
+    # The owner approves each release here; the Environment is limited to main
+    # and holds the signing key.
     environment: release
     permissions:
       contents: write
@@ -48,21 +47,14 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
       RELEASE_NOTES: ${{ inputs.notes }}
-      CI_BRANCH: next
-      # Checked first, dry run included: without the key the release would
-      # publish and only then fail to move main.
-      BUMP_KEY_SET: ${{ secrets.BUMP_KEY != '' }}
+      CI_BRANCH: main
       # What the builds compiled in, and so what the manifests are signed for.
       KIKU_RELEASES: ${{ vars.KIKU_RELEASES || format('https://github.com/{0}/releases', github.repository) }}
     steps:
-      # The release scripts run from next. main is moved with a deploy key: the
-      # workflow's own token may not push a commit that changes workflow files,
-      # and the first release under this design, and any later one that edits
-      # a workflow, does.
+      # The release scripts run from main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ssh-key: ${{ secrets.BUMP_KEY }}
       - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
           version: 2026.10.23
@@ -73,13 +65,13 @@ jobs:
         name: mise run ci:fetch
         run: mise run ci:fetch
       # `published` is true only on a rerun of a release that published and
-      # then failed: moving main is all that is left.
+      # then failed: only the image and the models are left.
       # The candidate's own tree signs its files, so the task matches them.
       - name: mise run publish
         if: ${{ steps.candidate.outputs.published != 'true' }}
         working-directory: candidate
         run: mise run publish
-        # Only the candidate's own mise.toml: not next's, one folder up.
+        # Only the candidate's own mise.toml: not main's, one folder up.
         env:
           MISE_CEILING_PATHS: ${{ github.workspace }}
           KIKU_SIGNING_KEY: ${{ secrets.KIKU_SIGNING_KEY }}
@@ -87,9 +79,6 @@ jobs:
       - name: mise run ci:publish
         if: ${{ steps.candidate.outputs.published != 'true' }}
         run: mise run ci:publish ${{ inputs.dry_run && '--dry-run' || '' }}
-      # A fast-forward of main to the released commit; a rerun finds it there.
-      - name: mise run land
-        run: mise run land ${{ steps.candidate.outputs.sha }}
 
   # The Linux model host's Docker image, from the tarball the release published.
   image:
@@ -112,7 +101,7 @@ jobs:
           cache_save: false
       - name: mise run tarball
         run: mise run tarball
-      # A new package starts private: see docs/RELEASING.md.
+      # A new package starts private: the owner makes it public once, in the package's settings.
       - name: mise run image
         run: mise run image
 

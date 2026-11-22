@@ -1,14 +1,14 @@
 name: check
 
-# Every pull request, and (main.yml, with `all: true`) every push to the release
-# branch. The one required status is `gate` (shown as "check / gate").
+# Every pull request to main, and (main.yml, with `all: true`) every push to
+# main. The one required status is `gate` (shown as "check / gate").
 #
-# Both repositories carry this file. A change reaches the release branch through
-# a pull request, which the owner approves, so a pushed branch is checked once
-# it has one. The release branch is `main` in the private repository and `next`
-# in the public one: its pushes come through main.yml.
+# One public repository. A change reaches main through a pull request, which the
+# owner approves, so a pushed branch is checked once it has one. Its pushes to
+# main come through main.yml.
 on:
   pull_request:
+    branches: [main]
   workflow_call:
     inputs:
       all:
@@ -17,18 +17,21 @@ on:
         default: false
     secrets:
       KIKU_PRIVATE_WORDS:
-        description: Words the privacy gate rejects (empty in the private repository, where .private-words has them)
+        description: Words the privacy gate rejects (the gate fails without them, except for pull requests from forks)
         required: false
 
 permissions:
   contents: read
 
 env:
-  CI_BRANCH: ${{ github.event.repository.private && 'main' || 'next' }}
+  CI_BRANCH: main
+  # A pull request from a fork gets no secrets, so its gate checks the patterns
+  # alone. Everything else (a push, a pull request from this repository) must
+  # have KIKU_PRIVATE_WORDS and fails without it (scripts/ci/privacy.py).
+  KIKU_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
 
-# A newer push to a pull request cancels the older run. The private
-# repository's Actions minutes are scarce, so a superseded run stops.
-# Cancelled is neither red nor green.
+# A newer push to a pull request cancels the older run. Cancelled is neither
+# red nor green.
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
@@ -50,7 +53,7 @@ jobs:
       - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
           version: 2026.10.23
-          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - id: filter
         if: ${{ !inputs.all }}
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -76,7 +79,7 @@ jobs:
       - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
           version: 2026.10.23
-          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - name: mise run check
         run: mise run check
         env:
@@ -95,7 +98,7 @@ jobs:
       - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
           version: 2026.10.23
-          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - id: runtime
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -139,7 +142,7 @@ jobs:
       - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
           version: 2026.10.23
-          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' }}
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - id: runtime
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
