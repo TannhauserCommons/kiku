@@ -17,6 +17,10 @@ description = "The public repository's side: next red or green, its pull request
 run = "python .github/ci/status.py"
 env = { CI_REPO = "TannhauserCommons/kiku", CI_BRANCH = "next" }
 
+[tasks.setup]
+description = "Once per checkout: install the git hooks that keep private files and words out of commits and pushes"
+run = "python scripts/ci/hooks.py install"
+
 [tasks.version]
 description = "Print the version in Cargo.toml's [workspace.package]"
 run = "python scripts/ci/version.py"
