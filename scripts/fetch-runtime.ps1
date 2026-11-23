@@ -18,9 +18,25 @@ $NvidiaArchives = @(
     "$Nvidia/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip"
 )
 
+# sha256 of every archive: sherpa-onnx's from its release, NVIDIA's from its redistrib manifests.
+$Sha256 = @{
+    'sherpa-onnx-v2.0.1-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-win-x64-cuda.tar.bz2' = 'cd983fa95431a8a08555b15005e1effd0b771f161d30f7f3bd52d518da48f6b6'
+    'sherpa-onnx-v2.0.1-win-x64-shared-MD-Release-no-tts-lib.tar.bz2' = '3aea6fc2360ac67b349f61b5cbe237f34b2bb53dc805aa4b3df7ab23ba7ab35c'
+    'sherpa-onnx-v2.0.1-win-arm64-shared-MD-Release-no-tts-lib.tar.bz2' = '44c31e2da1b7005da3d29a24e88da9686d71d5368e0805f44a0a517302231f6e'
+    'cuda_cudart-windows-x86_64-12.9.79-archive.zip' = '179e9c43b0735ffe67207b3da556eb5a0c50f3047961882b7657d3b822d34ef8'
+    'libcublas-windows-x86_64-12.9.1.4-archive.zip' = 'd534d98b0b453a98914dbf3adf47d7e84b55037abf02f87466439e1dcef581ed'
+    'cudnn-windows-x86_64-9.27.0.42_cuda12-archive.zip' = '93949680d6499ad0f17fc1abb131825c9dd41b460844513f608e840e0c8ce72b'
+}
+
 function Get-Archive($url) {
-    $file = Join-Path $Root (Split-Path $url -Leaf)
+    $name = Split-Path $url -Leaf
+    $file = Join-Path $Root $name
     if (-not (Test-Path $file)) { Invoke-WebRequest $url -OutFile $file }
+    $actual = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+    if ($actual -ne $Sha256[$name]) {
+        Remove-Item $file
+        throw "$name has sha256 $actual, expected $($Sha256[$name])"
+    }
     $file
 }
 
