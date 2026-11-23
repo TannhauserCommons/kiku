@@ -43,15 +43,15 @@ def age_text(seconds):
 def main_line():
     """`main: red  <where to look>` or `main: green`, named after the release branch.
 
-    The issue is always labelled `main-red`, whatever the branch is called. Red
-    while that issue is open, and also when the newest finished `main.yml` run
+    The issues (one per failed check) are always labelled `main-red`, whatever
+    the branch is called. Red while one is open, each listed, and also when the newest finished `main.yml` run
     on the branch did not succeed: a run that fails at startup (a broken workflow
     file) never reaches `after`, so no issue exists for it.
     """
     name = branch()
-    issue = ghapi.find_issue("main-red")
-    if issue:
-        return f"{name}: red  {issue['html_url']}"
+    issues = ghapi.find_issues("main-red")
+    if issues:
+        return f"{name}: red  " + "  ".join(issue["html_url"] for issue in issues)
     runs = ghapi.api(f"actions/workflows/main.yml/runs?branch={name}&status=completed&per_page=10")
     for run in (runs or {}).get("workflow_runs", []):
         # Cancelled is neither red nor green: the run before it still stands.

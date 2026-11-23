@@ -4,6 +4,9 @@
 [tools]
 python = "3.14.10"
 actionlint = "1.7.12"
+# actionlint runs shellcheck on every `run:` script when it finds one, so it is pinned
+# too: unpinned, a local lint and CI's could check different things.
+shellcheck = "0.11.0"
 # The release scripts (scripts/release.py, make-icon.py, make-fp16.py) run with `uv run`.
 uv = "0.13.8"
 
