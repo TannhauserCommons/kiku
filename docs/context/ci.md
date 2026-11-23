@@ -1,6 +1,6 @@
 # CI
 
-Every CI step is one `mise run <task>`; the tasks are in `mise.toml` (shared `ci:*` tasks in `.github/ci/tasks.toml`, copied from the CI skeleton and never edited here). Tools and the Rust version are pinned: `mise.toml` and `mise.lock` for python, uv and actionlint; `rust-toolchain.toml` for Rust, which the Linux build image installs on the first `cargo` call in `/src`.
+Every CI step is one `mise run <task>`; the tasks are in `mise.toml` (shared `ci:*` tasks in `.github/ci/tasks.toml`, copied from the CI skeleton and never edited here). Tools and the Rust version are pinned: `mise.toml` and `mise.lock` for python, uv, actionlint and shellcheck (which actionlint runs on every `run:` script); `rust-toolchain.toml` for Rust, which the Linux build image installs on the first `cargo` call in `/src`.
 
 ## One public repository
 

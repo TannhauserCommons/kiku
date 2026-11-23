@@ -96,11 +96,16 @@ def ensure_label(name, color="d73a4a", description=""):
         api("labels", "POST", {"name": name, "color": color, "description": description})
 
 
+def find_issues(label):
+    """The open issues with that label, pull requests left out."""
+    issues = api(f"issues?state=open&labels={label}&per_page=100", paginate=True) or []
+    return [issue for issue in issues if "pull_request" not in issue]
+
+
 def find_issue(label, title=None):
     """The open issue with that label (and exact title), or None."""
-    issues = api(f"issues?state=open&labels={label}&per_page=100", paginate=True) or []
-    for issue in issues:
-        if "pull_request" not in issue and (title is None or issue["title"] == title):
+    for issue in find_issues(label):
+        if title is None or issue["title"] == title:
             return issue
     return None
 
