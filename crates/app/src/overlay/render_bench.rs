@@ -23,7 +23,7 @@ use windows::{
 
 use super::{
     dictation_card::DictationCard,
-    finder::{Found, TextBox, Who},
+    finder::{Found, TextBox, Transcript, Who},
     macro_tab::{MacroAction, MacroBox, MacroTab, StepKind},
     palette::Palette,
     render::{Frame, Icon, Meter, Panel, Renderer, Speaker, SubtitleLine, SubtitleScene, Surface},
@@ -219,8 +219,7 @@ fn render_cost() {
     view.palette = None;
     measure("live: Dictating badge showing", 200, |_| draw(Panel { dictating: true, latched: true, stop_hint: DICTATING_HINT, ..panel(&captions, &view, &keybinds, 560.0) }));
 
-    let lines = (0..10_000).map(|i| format!("[14:{:02}] Discord: {}", i % 60, line(i, i as usize).text)).collect();
-    view.screen = Screen::SavedFile { session: 1, title: "Discord  ·  Oct 30, 14:05".into(), lines, focus: None };
+    view.screen = Screen::SavedFile(transcript(1, "Discord  ·  Oct 30, 14:05", 10_000, |i| line(i as u64, i).text, None));
     measure("history: first frame", 1, |_| draw(panel(&captions, &view, &keybinds, 560.0)));
     measure("history: nothing changed", 50, |_| draw(panel(&captions, &view, &keybinds, 560.0)));
     measure("history: resized each frame", 50, |i| draw(panel(&captions, &view, &keybinds, 560.0 + (i % 2) as f32 * 40.0)));
@@ -702,6 +701,9 @@ fn snapshots() {
     let mut found = history_view();
     search_found(&mut found);
     found.hovered = Some(Action::OpenResult(1));
+    let mut deleting_found = history_view();
+    search_found(&mut deleting_found);
+    deleting_found.finder.deleting_found = true;
     let mut who = history_view();
     search_found(&mut who);
     who.open_dropdown = Some(Dropdown::Who);
@@ -709,8 +711,9 @@ fn snapshots() {
     sql_table(&mut sql);
     let mut opened = history_view();
     search_found(&mut opened);
-    let rows = (0..60).map(|i| format!("[14:{:02}:00] Discord: {}", i, if i == 30 { "and the signing can wait until Monday" } else { "so the meeting moved to Thursday" })).collect();
-    opened.screen = Screen::SavedFile { session: 2, title: "Discord  ·  Oct 30, 14:05".into(), lines: rows, focus: Some(30) };
+    let text = |i| if i == 30 { "and the signing can wait until Monday" } else { "so the meeting moved to Thursday" }.to_owned();
+    opened.screen = Screen::SavedFile(transcript(2, "Discord  ·  Oct 30, 14:05", 60, text, Some(30)));
+    opened.hovered_row = Some(32);
     let mut scrolled = View::new();
     scrolled.scrolls.insert(ScrollArea::Section(1), Scroll::at(0.0));
     let mut collapsed = View::new();
@@ -731,6 +734,7 @@ fn snapshots() {
         save_panel(&format!("panel-history-{}", name(theme)), &history, themes, 420.0);
         save_panel(&format!("panel-history-delete-{}", name(theme)), &deleting, themes, 420.0);
         save_panel(&format!("panel-history-found-{}", name(theme)), &found, themes, 420.0);
+        save_panel(&format!("panel-history-found-delete-{}", name(theme)), &deleting_found, themes, 420.0);
         save_panel(&format!("panel-history-who-{}", name(theme)), &who, themes, 420.0);
         save_panel(&format!("panel-history-sql-{}", name(theme)), &sql, themes, 420.0);
         save_panel(&format!("panel-history-opened-{}", name(theme)), &opened, themes, 420.0);
@@ -1073,6 +1077,21 @@ fn history_view() -> View {
 }
 
 /// A search for "signing" being typed, and what it found.
+/// An opened session of `count` lines Discord said today, a second apart, with ids from 0 and the line `focus` marked.
+fn transcript(session: i64, title: &str, count: usize, text: impl Fn(usize) -> String, focus: Option<i64>) -> Transcript {
+    let start = kiku_core::transcripts::start_of_day(0) + Duration::from_secs(14 * 3600);
+    let line = |i: usize| StoredLine {
+        id: i as i64,
+        session,
+        at: start + Duration::from_secs(i as u64),
+        speaker: "Discord".into(),
+        you: false,
+        talking_to: None,
+        text: text(i),
+    };
+    Transcript::new(session, title.into(), (0..count).map(line).collect(), focus)
+}
+
 fn search_found(view: &mut View) {
     let ago = |minutes: u64| std::time::SystemTime::now() - Duration::from_secs(minutes * 60);
     let line = |id, minutes, speaker: &str, talking_to: Option<&str>, text: &str| StoredLine {
@@ -1265,7 +1284,7 @@ fn history_drawn_only_where_changed_matches_drawing_everything() {
     let (captions, keybinds) = (Captions::default(), Keybinds::default());
     for dpi in [96.0, 144.0] {
         let (mut view, mut partly, mut surface) = (history_view(), Renderer::new().unwrap(), Surface::default());
-        for step in 0..8 {
+        for step in 0..11 {
             match step {
                 1 => view.hovered = Some(Action::OpenSaved(1)),
                 2 => (view.hovered, view.finder.deleting) = (Some(Action::DeleteSession(1)), Some(2)),
@@ -1274,8 +1293,17 @@ fn history_drawn_only_where_changed_matches_drawing_everything() {
                 5 => view.open_dropdown = Some(Dropdown::Who),
                 6 => sql_table(&mut view),
                 7 => {
-                    let rows = (0..60).map(|i| format!("[14:{i:02}:00] Discord: the signing can wait")).collect();
-                    view.screen = Screen::SavedFile { session: 2, title: "Discord".into(), lines: rows, focus: Some(40) };
+                    view.screen = Screen::SavedFile(transcript(2, "Discord", 60, |_| "the signing can wait".into(), Some(40)));
+                }
+                8 => view.hovered_row = Some(42),
+                9 => {
+                    if let Screen::SavedFile(transcript) = &mut view.screen {
+                        transcript.remove(&[41]);
+                    }
+                }
+                10 => {
+                    view.screen = Screen::SavedList;
+                    view.finder.deleting_found = true;
                 }
                 _ => {}
             }
@@ -1291,6 +1319,38 @@ fn history_drawn_only_where_changed_matches_drawing_everything() {
             }
         }
     }
+}
+
+#[test]
+fn an_opened_sessions_line_shows_a_delete_button_and_deleting_one_moves_nothing_else() {
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+    let (captions, keybinds, mut view) = (Captions::default(), Keybinds::default(), View::new());
+    let long = |i: usize| format!("{} the signing can wait until Monday", "and then ".repeat(i % 7));
+    view.screen = Screen::SavedFile(transcript(2, "Discord", 200, long, None));
+    // As opened from the list: at the top.
+    view.scrolls.insert(ScrollArea::SavedFile, Scroll::at_top());
+    let (mut renderer, mut surface) = (Renderer::new().unwrap(), Surface::default());
+    let row_rect = |regions: &super::view::Regions, row| regions.targets.iter().find(|(_, target)| *target == Target::Row(row)).map(|(rect, _)| *rect);
+    let (_, regions) = renderer.render(&mut surface, &panel(&captions, &view, &keybinds, 560.0)).unwrap();
+    assert!(row_rect(&regions, 0).is_none(), "the date row shows no line, so it has no button");
+    let third = row_rect(&regions, 3).unwrap();
+    view.hovered_row = regions.row_at(third.left + 4.0, third.top + 2.0);
+    let (_, regions) = renderer.render(&mut surface, &panel(&captions, &view, &keybinds, 560.0)).unwrap();
+    assert!(regions.targets.iter().any(|(_, target)| *target == Target::Click(Action::DeleteLine(2))), "row 3 shows line 2");
+
+    // Scrolled down after the top was measured, a line deleted above the screen moves those below up by its own height.
+    view.hovered_row = None;
+    view.scrolls.insert(ScrollArea::SavedFile, Scroll::at(400.0));
+    let (_, regions) = renderer.render(&mut surface, &panel(&captions, &view, &keybinds, 560.0)).unwrap();
+    // Not the first row on screen, which may be cut off at the top.
+    let row = regions.targets.iter().filter_map(|(_, target)| if let Target::Row(row) = target { Some(*row) } else { None }).nth(2).unwrap();
+    let before = row_rect(&regions, row).unwrap();
+    if let Screen::SavedFile(transcript) = &mut view.screen {
+        transcript.remove(&[2]);
+    }
+    let (_, regions) = renderer.render(&mut surface, &panel(&captions, &view, &keybinds, 560.0)).unwrap();
+    let after = row_rect(&regions, row - 1).unwrap();
+    assert!((before.top - (third.bottom - third.top) - after.top).abs() < 0.01, "moved up {} for a row {} tall", before.top - after.top, third.bottom - third.top);
 }
 
 #[test]

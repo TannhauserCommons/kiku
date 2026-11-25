@@ -495,7 +495,7 @@ impl Window {
                 match target {
                     Some(Target::Header(index)) if message == WM_LBUTTONDBLCLK => self.solo(index),
                     Some(Target::Click(action)) => self.press(Some(action)),
-                    Some(Target::Card) => {}
+                    Some(Target::Card | Target::Row(_)) => {}
                     _ => self.start_selecting(lparam),
                 }
             }
@@ -518,7 +518,7 @@ impl Window {
             WM_MOUSELEAVE => {
                 self.tracking_mouse = false;
                 self.press(None);
-                self.set_hovered(None, None, None);
+                self.set_hovered(None, None, None, None);
             }
             WM_LBUTTONUP if self.selecting => self.finish_selecting(),
             WM_LBUTTONUP => {
@@ -598,6 +598,9 @@ impl Window {
         }
         if !matches!(action, Action::DeleteSession(_)) {
             self.view.finder.deleting = None;
+        }
+        if action != Action::DeleteFound {
+            self.view.finder.deleting_found = false;
         }
         if !matches!(action, Action::TypeWord(_) | Action::ClearWord(_)) {
             self.settings.view.typing_word = None;
@@ -819,7 +822,7 @@ impl Window {
             // Pressed on the list, History goes back to the captions; from a past session, back to the list.
             Action::ShowSaved if matches!(self.view.screen, Screen::SavedList) => self.leave_history(),
             // Back from a session to what the list showed, scrolled as it was.
-            Action::ShowSaved if matches!(self.view.screen, Screen::SavedFile { .. }) => self.view.screen = Screen::SavedList,
+            Action::ShowSaved if matches!(self.view.screen, Screen::SavedFile(_)) => self.view.screen = Screen::SavedList,
             Action::ShowSaved => {
                 self.view.screen = Screen::SavedList;
                 self.searcher.ask(Request::Sessions);
@@ -978,6 +981,16 @@ impl Window {
                 match finder.deleting.take() {
                     Some(pressed) if pressed == session => self.searcher.ask(Request::DeleteSession(session)),
                     _ => finder.deleting = Some(session),
+                }
+            }
+            // One line goes at a click; every line found asks once more.
+            Action::DeleteLine(id) => self.searcher.ask(Request::DeleteLines(vec![id])),
+            Action::DeleteFound => {
+                let finder = &mut self.view.finder;
+                if !std::mem::take(&mut finder.deleting_found) {
+                    finder.deleting_found = true;
+                } else if let Some(request) = finder.delete_found() {
+                    self.searcher.ask(request);
                 }
             }
             Action::ShowSql(on) => {
@@ -1971,19 +1984,36 @@ impl Window {
                 Reply::Found { search, page, total } => self.view.finder.take_page(search, page, total),
                 Reply::Table(table) => (self.view.finder.table, self.view.finder.running) = (Some(table), false),
                 // Only while still on the list it was opened from.
-                Reply::Opened { session, title, rows, focus } if matches!(self.view.screen, Screen::SavedList) => {
+                Reply::Opened(transcript) if matches!(self.view.screen, Screen::SavedList) => {
                     self.stop_typing();
-                    match focus {
+                    match transcript.focus {
                         Some(_) => self.view.scrolls.remove(&ScrollArea::SavedFile),
                         None => self.view.scrolls.insert(ScrollArea::SavedFile, Scroll::at_top()),
                     };
-                    self.view.screen = Screen::SavedFile { session, title, lines: rows, focus };
+                    self.view.screen = Screen::SavedFile(transcript);
                 }
                 Reply::Opened { .. } => {}
                 Reply::Exported { text, lines, share: true } => self.share(&format!("{lines} lines found in Kiku's history"), &text),
                 Reply::Exported { text, lines, share: false } => self.copy(&text, format!("Copied {lines} line{}", plural(lines))),
                 Reply::Deleted(lines) => {
                     self.notify(format!("Deleted the session's {lines} line{}", plural(lines)), false);
+                    self.searcher.ask(Request::Sessions);
+                    self.find();
+                }
+                Reply::DeletedLines { ids, deleted } => {
+                    self.view.finder.forget(&ids);
+                    if let Screen::SavedFile(transcript) = &mut self.view.screen {
+                        transcript.remove(&ids);
+                        if transcript.is_empty() {
+                            self.view.screen = Screen::SavedList;
+                        }
+                    }
+                    if deleted > 0 {
+                        self.searcher.ask(Request::Sessions);
+                    }
+                }
+                Reply::DeletedFound(lines) => {
+                    self.notify(format!("Deleted {lines} line{}", plural(lines)), false);
                     self.searcher.ask(Request::Sessions);
                     self.find();
                 }
@@ -2534,18 +2564,19 @@ impl Window {
         };
         let (x, y) = self.to_dips(point_from(lparam));
         self.view.pointer = (x, y);
-        let (line, header) = (self.view.regions.line_at(x, y), self.view.regions.header_at(x, y));
-        self.set_hovered(hovered, line, header);
+        let regions = &self.view.regions;
+        let (line, header, row) = (regions.line_at(x, y), regions.header_at(x, y), regions.row_at(x, y));
+        self.set_hovered(hovered, line, header, row);
     }
 
-    fn set_hovered(&mut self, hovered: Option<Action>, line: Option<LineRef>, header: Option<usize>) {
+    fn set_hovered(&mut self, hovered: Option<Action>, line: Option<LineRef>, header: Option<usize>, row: Option<usize>) {
         if self.view.hovered != hovered {
             self.view.tip = false;
             self.wait_for_tip(hovered);
         }
         let view = &mut self.view;
-        if (view.hovered, view.hovered_line, view.hovered_header) != (hovered, line, header) {
-            (view.hovered, view.hovered_line, view.hovered_header) = (hovered, line, header);
+        if (view.hovered, view.hovered_line, view.hovered_header, view.hovered_row) != (hovered, line, header, row) {
+            (view.hovered, view.hovered_line, view.hovered_header, view.hovered_row) = (hovered, line, header, row);
             self.redraw();
         }
     }
@@ -2743,7 +2774,7 @@ impl Window {
     fn toggle_lock(&mut self) {
         self.view.locked = !self.view.locked;
         // A click-through window gets no mouse-leave, so clear the hover now.
-        (self.view.hovered, self.view.hovered_header) = (None, None);
+        (self.view.hovered, self.view.hovered_header, self.view.hovered_row) = (None, None, None);
         unsafe {
             let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) ^ WS_EX_TRANSPARENT.0 as isize;
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style);

@@ -38,7 +38,8 @@ If you choose to, the speech model can run on another computer of yours instead.
   GPU. Setup recommends one for your PC and downloads it; you can also add your own sherpa-onnx or
   Moonshine model.
 - **History:** search past captions by words, app or day, or with SQL. Lines are kept for as many days
-  as you choose, or only when you press save.
+  as you choose, or only when you press save; delete one line, everything a search finds, or a whole
+  session whenever you like.
 - **For assistants on your PC:** an MCP server (`kiku-mcp.exe`) lets a local AI assistant read and search
   your captions, and look over your macros, if you set it up.
 - **The model on another computer:** a PC with a good GPU can share its models, and other PCs caption

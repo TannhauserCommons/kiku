@@ -419,8 +419,8 @@ pub struct Renderer {
     scene: RefCell<Scene>,
     /// Each section's caption heights, by section index.
     section_rows: Vec<SectionRows>,
-    /// The open history session's row heights, by session and line count.
-    saved_rows: Option<((i64, usize), Rows)>,
+    /// The open history session's row heights, with the session and the line each row showed, by id.
+    saved_rows: Option<(i64, Vec<Option<i64>>, Rows)>,
     /// The settings window's body height in the last frame, for scrolling it.
     settings_height: f32,
     /// Where the first row of the card being drawn starts; rows after it get a hairline above.
@@ -659,7 +659,7 @@ impl Renderer {
                     self.draw_selection_share(panel, content, regions)?;
                 }
                 Screen::SavedList => self.draw_history(panel, content, regions)?,
-                Screen::SavedFile { session, title, lines, focus } => self.draw_saved_file(panel, *session, title, lines, *focus, content, regions)?,
+                Screen::SavedFile(transcript) => self.draw_saved_file(panel, transcript, content, regions)?,
             }
             self.draw_footer(panel, regions)?;
             self.draw_resize_grips(panel, regions)?;
@@ -2752,7 +2752,7 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::ShowSettings => "Settings".into(),
         Action::ShowShortcuts => "Every shortcut".into(),
         Action::CloseSettings => "Close settings".into(),
-        Action::ShowSaved if matches!(view.screen, Screen::SavedFile { .. }) => "Back to History".into(),
+        Action::ShowSaved if matches!(view.screen, Screen::SavedFile(_)) => "Back to History".into(),
         Action::ShowSaved => "History: search what was said, and past sessions".into(),
         Action::ShowLive => "Back to the captions".into(),
         Action::SaveAll => "Save every app's transcript to History".into(),
@@ -2897,6 +2897,9 @@ fn tooltip(action: Action, panel: &Panel) -> Option<String> {
         Action::SubtitleSize(size) => format!("Text {size} px at 100% scale"),
         Action::DeleteSession(index) if view.saved.get(index).map(|s| s.id) == view.finder.deleting => "Press again to delete it for good".into(),
         Action::DeleteSession(_) => "Delete this session's saved lines".into(),
+        Action::DeleteLine(_) => "Delete this line".into(),
+        Action::DeleteFound if view.finder.deleting_found => "Press again to delete them for good".into(),
+        Action::DeleteFound => "Delete every line found".into(),
         Action::ShowSql(false) => "Search what was said, by words, who and when".into(),
         Action::ShowSql(true) => "Ask your transcripts anything, in SQL".into(),
         Action::ClearSearch | Action::ClearFontSearch => "Clear the search".into(),
