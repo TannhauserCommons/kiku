@@ -134,6 +134,8 @@ pub struct Finder {
     pub running: bool,
     /// The session whose delete button was pressed once; pressing it again deletes it.
     pub deleting: Option<i64>,
+    /// Delete every line found was pressed once; pressing it again deletes them.
+    pub deleting_found: bool,
     /// Counts searches, so the results of one typed over since are dropped.
     searches: u64,
     /// The search box's text when the search last started.
@@ -195,6 +197,8 @@ impl Finder {
         self.searches += 1;
         self.searched.clone_from(&self.search.text);
         self.found = Found::default();
+        // A press to delete what was found isn't one for what is found next.
+        self.deleting_found = false;
         let query = self.query()?;
         self.found.loading = true;
         Some(Request::Find { query, search: self.searches })
@@ -215,6 +219,11 @@ impl Finder {
         Some(Request::Export { query: Query { limit: EXPORT_MAX, ..self.query()? }, share })
     }
 
+    /// The request to delete every line the search finds, not only those loaded.
+    pub fn delete_found(&self) -> Option<Request> {
+        Some(Request::DeleteFound(self.query()?))
+    }
+
     /// Takes in a page of results, unless the search has changed since it was asked for.
     pub fn take_page(&mut self, search: u64, page: Vec<StoredLine>, total: Option<usize>) {
         if search != self.searches {
@@ -225,6 +234,14 @@ impl Finder {
         found.lines.extend(page);
         found.total = total.unwrap_or(found.total);
         found.loading = false;
+    }
+
+    /// Takes lines deleted since the search out of what it found.
+    pub fn forget(&mut self, ids: &[i64]) {
+        let found = &mut self.found;
+        let before = found.lines.len();
+        found.lines.retain(|line| !ids.contains(&line.id));
+        found.total = found.total.saturating_sub(before - found.lines.len());
     }
 
     /// Where the search words are in a result's text, as UTF-16 ranges of the text `snippet` gives.
@@ -255,6 +272,46 @@ pub fn table_text(table: &Table) -> String {
 fn utf16_range(text: &str, range: Range<usize>) -> Range<u32> {
     let units = |end: usize| text[..end].encode_utf16().count() as u32;
     units(range.start)..units(range.end)
+}
+
+/// A past session opened to read: its lines as rows, with the date wherever it changes.
+pub struct Transcript {
+    pub session: i64,
+    pub title: String,
+    lines: Vec<StoredLine>,
+    /// The rows to draw, and the line each shows by id: date rows show none.
+    pub rows: Vec<String>,
+    pub ids: Vec<Option<i64>>,
+    /// The line opened from the search, by id: marked, and in view when the session opens.
+    pub focus: Option<i64>,
+}
+
+impl Transcript {
+    pub fn new(session: i64, title: String, lines: Vec<StoredLine>, focus: Option<i64>) -> Self {
+        let mut transcript = Self { session, title, lines, rows: Vec::new(), ids: Vec::new(), focus };
+        transcript.lay_out();
+        transcript
+    }
+
+    fn lay_out(&mut self) {
+        let lines = &self.lines;
+        (self.rows, self.ids) = transcripts::history_rows(lines).into_iter().map(|(row, line)| (row, line.map(|at| lines[at].id))).unzip();
+    }
+
+    /// The row of the line opened from the search.
+    pub fn focus_row(&self) -> Option<usize> {
+        self.focus.and_then(|id| self.ids.iter().position(|&row| row == Some(id)))
+    }
+
+    /// Takes deleted lines out, and any date left with no line under it.
+    pub fn remove(&mut self, ids: &[i64]) {
+        self.lines.retain(|line| !ids.contains(&line.id));
+        self.lay_out();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
 }
 
 /// A line as one row of text: "[14:05:12] Discord: ...".
@@ -294,17 +351,25 @@ pub enum Request {
     /// Every line a query finds, as text, to copy or share.
     Export { query: Query, share: bool },
     DeleteSession(i64),
+    /// Lines, by id.
+    DeleteLines(Vec<i64>),
+    /// Every line a query finds.
+    DeleteFound(Query),
 }
 
 /// The query thread's answer.
 pub enum Reply {
     Sessions(Vec<Session>, Vec<Speaker>),
     Found { search: u64, page: Vec<StoredLine>, total: Option<usize> },
-    /// A session's lines as rows to read, and the row of the line asked for.
-    Opened { session: i64, title: String, rows: Vec<String>, focus: Option<usize> },
+    /// A session's lines to read.
+    Opened(Transcript),
     Table(Result<Table, String>),
     Exported { text: String, lines: usize, share: bool },
     Deleted(usize),
+    /// Lines deleted by id, and how many of them were still there.
+    DeletedLines { ids: Vec<i64>, deleted: usize },
+    /// How many lines a query found and deleted.
+    DeletedFound(usize),
     Failed(String),
 }
 
@@ -368,10 +433,7 @@ fn answer(reader: &mut Option<History>, request: Request) -> engine::Result<Repl
         Request::Open { session, line } => {
             let found = history.sessions()?.into_iter().find(|s| s.id == session).ok_or("that session has been deleted")?;
             let lines = history.query(&Query { session: Some(session), ..Default::default() })?;
-            // A line's row is the last of the text up to it, which may add a date above it.
-            let focus = line.and_then(|id| lines.iter().position(|l| l.id == id)).map(|at| transcripts::format_history(&lines[..=at]).lines().count() - 1);
-            let rows = transcripts::format_history(&lines).lines().map(str::to_owned).collect();
-            Reply::Opened { session, title: session_title(&found), rows, focus }
+            Reply::Opened(Transcript::new(session, session_title(&found), lines, line))
         }
         Request::Sql(sql) => Reply::Table(history.read_sql(&sql, SQL_MAX_ROWS).map_err(|error| error.to_string())),
         Request::Export { query, share } => {
@@ -380,6 +442,14 @@ fn answer(reader: &mut Option<History>, request: Request) -> engine::Result<Repl
         }
         // The reader only reads; deleting takes a connection that writes.
         Request::DeleteSession(session) => Reply::Deleted(History::open()?.delete_session(session)?),
+        Request::DeleteLines(ids) => {
+            let deleted = History::open()?.delete_lines(&ids)?;
+            Reply::DeletedLines { ids, deleted }
+        }
+        Request::DeleteFound(query) => {
+            let ids: Vec<i64> = history.query(&Query { limit: 0, ..query })?.iter().map(|line| line.id).collect();
+            Reply::DeletedFound(History::open()?.delete_lines(&ids)?)
+        }
     })
 }
 
@@ -430,6 +500,42 @@ mod tests {
         assert!(finder.found.lines.is_empty() && finder.found.loading, "the old search's page is dropped");
         finder.take_page(second, vec![line(5)], Some(1));
         assert_eq!((finder.found.lines.len(), finder.found.total, finder.found.complete), (1, 1, true));
+    }
+
+    #[test]
+    fn deleted_lines_leave_the_results_and_the_count() {
+        let mut finder = finder("paste");
+        let line = |id| StoredLine { id, session: 1, at: SystemTime::now(), speaker: "Discord".into(), you: false, talking_to: None, text: "paste".into() };
+        let Some(Request::Find { search, .. }) = finder.search() else { panic!("a search") };
+        finder.take_page(search, vec![line(3), line(2), line(1)], Some(250));
+        finder.forget(&[2, 99]);
+        let ids: Vec<i64> = finder.found.lines.iter().map(|line| line.id).collect();
+        assert_eq!((ids, finder.found.total), (vec![3, 1], 249), "a line not loaded isn't counted off");
+        let Some(Request::DeleteFound(query)) = finder.delete_found() else { panic!("deletes what the search finds") };
+        assert_eq!(query.text.as_deref(), Some("paste"));
+        finder.deleting_found = true;
+        finder.search.set("pastel");
+        finder.search();
+        assert!(!finder.deleting_found, "a new search needs its own press to confirm");
+    }
+
+    #[test]
+    fn a_transcript_drops_deleted_lines_and_dates_left_empty() {
+        let day = 86_400;
+        let at = |days: u64, seconds: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000 + days * day + seconds);
+        let line = |id, at| StoredLine { id, session: 1, at, speaker: "Discord".into(), you: false, talking_to: None, text: format!("line {id}") };
+        let mut transcript = Transcript::new(1, "Discord".into(), vec![line(1, at(0, 0)), line(2, at(0, 60)), line(3, at(1, 0))], Some(3));
+        assert_eq!(transcript.ids, [None, Some(1), Some(2), None, None, Some(3)], "a date, two lines, a gap, a date, a line");
+        assert_eq!(transcript.focus_row(), Some(5));
+
+        transcript.remove(&[3]);
+        assert_eq!(transcript.ids, [None, Some(1), Some(2)], "the second day goes with its only line");
+        assert_eq!((transcript.rows.len(), transcript.focus_row()), (3, None));
+        transcript.remove(&[1]);
+        assert_eq!(transcript.ids, [None, Some(2)]);
+        assert!(transcript.rows[1].ends_with("Discord: line 2"));
+        transcript.remove(&[2]);
+        assert!(transcript.is_empty() && transcript.rows.is_empty());
     }
 
     #[test]

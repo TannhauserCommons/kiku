@@ -6,7 +6,7 @@ use super::{
     labels::Shape,
     dictation_card::{DictationAction, DictationCard},
     field::Field,
-    finder::{Finder, Period, TextBox},
+    finder::{Finder, Period, TextBox, Transcript},
     folds::Folds,
     macro_tab::{MacroAction, MacroTab},
     palette::Palette,
@@ -36,9 +36,8 @@ pub enum Screen {
     Live,
     /// History: past sessions, or what the search or SQL found.
     SavedList,
-    /// One past session's lines, from the history database, as rows to read, and the row of a line
-    /// opened from the search, which starts in view.
-    SavedFile { session: i64, title: String, lines: Vec<String>, focus: Option<usize> },
+    /// One past session's lines, from the history database.
+    SavedFile(Transcript),
 }
 
 /// A tab of the settings window.
@@ -257,6 +256,10 @@ pub enum Action {
     OpenSaved(usize),
     /// Deletes a past session, by its place in the list, when pressed a second time.
     DeleteSession(usize),
+    /// Deletes a line, by id: a search result, or a line of an opened session.
+    DeleteLine(i64),
+    /// Deletes every line the search finds, when pressed a second time.
+    DeleteFound,
     /// History's SQL mode (true) or its search.
     ShowSql(bool),
     /// Keys go to this box, until it is left.
@@ -368,6 +371,8 @@ pub enum Target {
     Resize(Corner),
     /// A section's header; double-clicking it shows the section alone.
     Header(usize),
+    /// A row of an opened session, which shows its buttons under the pointer.
+    Row(usize),
     /// A prompt and the panel behind it: clicks there do nothing.
     Card,
     /// Dragging along it sets a value.
@@ -473,6 +478,14 @@ impl Regions {
     pub fn header_at(&self, x: f32, y: f32) -> Option<usize> {
         self.targets.iter().find_map(|(rect, target)| match target {
             Target::Header(index) if contains(rect, x, y) => Some(*index),
+            _ => None,
+        })
+    }
+
+    /// The opened session's row under a point, buttons included.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.targets.iter().find_map(|(rect, target)| match target {
+            Target::Row(row) if contains(rect, x, y) => Some(*row),
             _ => None,
         })
     }
@@ -616,6 +629,8 @@ pub struct View {
     pub hovered_line: Option<LineRef>,
     /// The section header under the pointer, which shows its buttons.
     pub hovered_header: Option<usize>,
+    /// The opened session's row under the pointer, which shows its delete button.
+    pub hovered_row: Option<usize>,
     pub folds: Folds,
     pub blocking: Option<BlockPrompt>,
     /// Asking whether to quit while a download runs.
@@ -690,6 +705,7 @@ impl View {
             pressed: None,
             hovered_line: None,
             hovered_header: None,
+            hovered_row: None,
             folds: Folds::default(),
             blocking: None,
             quit_prompt: false,

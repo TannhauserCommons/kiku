@@ -56,21 +56,30 @@ pub fn transcript_text(sections: &[Section]) -> String {
 /// Lines from the history database as text: "[HH:MM:SS] Discord: ..." and "[HH:MM:SS] You (to Discord): ...",
 /// with the date wherever it changes.
 pub fn format_history(lines: &[StoredLine]) -> String {
-    let mut text = String::new();
+    history_rows(lines).into_iter().map(|(row, _)| row + "\n").collect()
+}
+
+/// [`format_history`]'s text as rows, each with the index in `lines` of the line it shows: a date row, and
+/// the blank row before each date but the first, show none.
+pub fn history_rows(lines: &[StoredLine]) -> Vec<(String, Option<usize>)> {
+    let mut rows = Vec::with_capacity(lines.len() + 1);
     let mut day = None;
-    for line in lines {
+    for (index, line) in lines.iter().enumerate() {
         let local = local_time(line.at);
         if day != Some(local.date_naive()) {
             day = Some(local.date_naive());
-            text.push_str(&format!("{}== {} ==\n", if text.is_empty() { "" } else { "\n" }, local.format("%b %-d, %Y")));
+            if !rows.is_empty() {
+                rows.push((String::new(), None));
+            }
+            rows.push((format!("== {} ==", local.format("%b %-d, %Y")), None));
         }
         let speaker = match &line.talking_to {
             Some(app) if line.you => format!("{} (to {app})", line.speaker),
             _ => line.speaker.clone(),
         };
-        text.push_str(&format!("[{}] {speaker}: {}\n", clock(&local), line.text));
+        rows.push((format!("[{}] {speaker}: {}", clock(&local), line.text), Some(index)));
     }
-    text
+    rows
 }
 
 /// E.g. "Oct 30, 14:05" in local time.

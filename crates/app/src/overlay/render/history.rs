@@ -19,7 +19,7 @@ use super::{
 };
 use crate::overlay::{
     field::Field,
-    finder::{session_apps, session_length, Period, TextBox, Who, EXAMPLES},
+    finder::{session_apps, session_length, Period, TextBox, Transcript, Who, EXAMPLES},
     render::Icon,
     rows::Rows,
     view::{Action, Dropdown, Extent, Regions, ScrollArea, Target},
@@ -93,7 +93,8 @@ impl Renderer {
     }
 
     /// How far back and whose lines, on the right; on the left how many lines were found, with buttons to
-    /// copy them all or ask Claude about them, or how many sessions there are. Returns where the who box is.
+    /// copy them all, ask Claude about them or delete them, or how many sessions there are. Deleting asks
+    /// once more, with how many lines go. Returns where the who box is.
     fn draw_filters(&mut self, panel: &Panel, area: D2D_RECT_F, middle: f32, regions: &mut Regions) -> Result<D2D_RECT_F> {
         let finder = &panel.view.finder;
         let periods: Vec<_> = Period::ALL.iter().map(|&p| (p.name(), p == finder.period, (p != finder.period).then_some(Action::SetPeriod(p)))).collect();
@@ -105,11 +106,18 @@ impl Renderer {
             true => format!("{} line{}", found.total, if found.total == 1 { "" } else { "s" }),
             false => format!("{} session{}", panel.view.saved.len(), if panel.view.saved.len() == 1 { "" } else { "s" }),
         };
-        let count = self.single_line(&self.fonts.small, &count, who.left - area.left - 12.0)?;
+        let showing = finder.searching() && !found.lines.is_empty();
+        let mut count_right = who.left - 12.0;
+        if showing && finder.deleting_found {
+            let label = format!("Delete {} line{}", found.total, if found.total == 1 { "" } else { "s" });
+            count_right = self.draw_text_button(&label, Some(Icon::Trash), Action::DeleteFound, Emphasis::Danger, who.left - 8.0, middle, panel, regions)? - 8.0;
+        }
+        let count = self.single_line(&self.fonts.small, &count, count_right - area.left)?;
         self.draw_layout(&count, area.left + 4.0, middle - height_of(&count)? / 2.0, self.palette.text_dim)?;
-        if finder.searching() && !found.lines.is_empty() {
+        if showing && !finder.deleting_found {
             let mut x = area.left + 8.0 + metrics(&count)?.width;
-            for (icon, action, tone) in [(Icon::Copy, Action::CopyResults, Tone::Dim), (Icon::Sparkles, Action::ShareResults, Tone::Accent)] {
+            let buttons = [(Icon::Copy, Action::CopyResults, Tone::Dim), (Icon::Sparkles, Action::ShareResults, Tone::Accent), (Icon::Trash, Action::DeleteFound, Tone::Dim)];
+            for (icon, action, tone) in buttons {
                 if x + BUTTON > who.left - 4.0 {
                     break;
                 }
@@ -180,8 +188,8 @@ impl Renderer {
     }
 
     /// What the search found, newest first: each line's text from shortly before its first match, the
-    /// search words marked, over who said it and when. Under the pointer a line shows buttons to copy it or
-    /// ask Claude about it; clicking it opens its session there.
+    /// search words marked, over who said it and when. Under the pointer a line shows buttons to copy it, ask
+    /// Claude about it or delete it; clicking it opens its session there.
     fn draw_results(&mut self, panel: &Panel, body: D2D_RECT_F, regions: &mut Regions) -> Result<()> {
         let (finder, palette) = (&panel.view.finder, self.palette.clone());
         let lines = &finder.found.lines;
@@ -203,7 +211,7 @@ impl Renderer {
                 self.hairline(area.left + 8.0, area.right - 8.0, y)?;
             }
             let row = rect(area.left, y + 2.0, area.right, y + LIST_ROW - 2.0);
-            let actions = [Action::OpenResult(index), Action::CopyResult(index), Action::ShareResult(index)];
+            let actions = [Action::OpenResult(index), Action::CopyResult(index), Action::ShareResult(index), Action::DeleteLine(line.id)];
             let hovered = panel.view.hovered.is_some_and(|action| actions.contains(&action));
             if hovered {
                 self.fill_rounded(row, RADIUS_CONTROL, palette.hover)?;
@@ -211,8 +219,8 @@ impl Renderer {
             regions.targets.push((clipped(row, area), Target::Click(Action::OpenResult(index))));
             let mut right = row.right - 8.0;
             if hovered {
-                let buttons = vec![(Icon::Copy, actions[1], Tone::Dim), (Icon::Sparkles, actions[2], Tone::Accent)];
-                right = self.clipped_toolbar(&[buttons], row.right - TOOLBAR_INSET, (row.top + row.bottom) / 2.0, area, panel, regions)? - 6.0;
+                let groups = [vec![(Icon::Copy, actions[1], Tone::Dim), (Icon::Sparkles, actions[2], Tone::Accent)], vec![(Icon::Trash, actions[3], Tone::Dim)]];
+                right = self.clipped_toolbar(&groups, row.right - TOOLBAR_INSET, (row.top + row.bottom) / 2.0, area, panel, regions)? - 6.0;
             }
             let speaker = match &line.talking_to {
                 Some(app) if line.you => format!("{} (to {app})", line.speaker),
@@ -400,39 +408,33 @@ impl Renderer {
 
     /// One past session's lines under its title. One opened from the search starts with that line in view
     /// and marked; the search words are marked wherever they show.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw_saved_file(
-        &mut self,
-        panel: &Panel,
-        session: i64,
-        title: &str,
-        lines: &[String],
-        focus: Option<usize>,
-        content: D2D_RECT_F,
-        regions: &mut Regions,
-    ) -> Result<()> {
-        let body_top = self.draw_screen_header(title, Action::ShowSaved, content, panel, regions)?;
+    pub(super) fn draw_saved_file(&mut self, panel: &Panel, transcript: &Transcript, content: D2D_RECT_F, regions: &mut Regions) -> Result<()> {
+        let body_top = self.draw_screen_header(&transcript.title, Action::ShowSaved, content, panel, regions)?;
         let area = rect(content.left, body_top, content.right, content.bottom);
-        // Reopening the running session shows its new lines.
-        let key = (session, lines.len());
-        let mut rows = match self.saved_rows.take() {
-            Some((open, rows)) if open == key => rows,
-            _ => {
-                let font_size = unsafe { self.fonts.body.GetFontSize() };
-                let mut rows = Rows::default();
-                lines.iter().for_each(|line| rows.push_estimate(estimated_height(line.len(), font_size, width(&area))));
-                rows
-            }
-        };
-        let drawn = self.draw_saved_lines(&mut rows, lines, focus, area, panel, regions);
-        self.saved_rows = Some((key, rows));
+        // After lines are deleted their rows go, and the rest keep their measured heights, so nothing on screen moves.
+        let kept = self.saved_rows.take().and_then(|(session, shown, mut rows)| {
+            (session == transcript.session && (shown == transcript.ids || keep_rows(&shown, &transcript.ids, &mut rows))).then_some((shown, rows))
+        });
+        // Another session, or the running one reopened with new lines.
+        let (mut shown, mut rows) = kept.unwrap_or_else(|| {
+            let font_size = unsafe { self.fonts.body.GetFontSize() };
+            let mut rows = Rows::default();
+            transcript.rows.iter().for_each(|row| rows.push_estimate(estimated_height(row.len(), font_size, width(&area))));
+            (Vec::new(), rows)
+        });
+        if shown != transcript.ids {
+            shown.clone_from(&transcript.ids);
+        }
+        let drawn = self.draw_saved_lines(&mut rows, transcript, area, panel, regions);
+        self.saved_rows = Some((transcript.session, shown, rows));
         drawn
     }
 
     /// Measures the lines that show until none on screen is an estimate, then draws them. Opened at a line and
     /// not scrolled yet, it shows from a little above that line, and says where that was for the view to keep.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_saved_lines(&self, rows: &mut Rows, lines: &[String], focus: Option<usize>, area: D2D_RECT_F, panel: &Panel, regions: &mut Regions) -> Result<()> {
+    /// Under the pointer a line shows a button to delete it.
+    fn draw_saved_lines(&mut self, rows: &mut Rows, transcript: &Transcript, area: D2D_RECT_F, panel: &Panel, regions: &mut Regions) -> Result<()> {
+        let (lines, focus) = (&transcript.rows, transcript.focus_row());
         let (text_width, viewport) = (width(&area), height(&area));
         rows.set_width(text_width);
         let reveal = focus.filter(|_| !panel.view.scrolls.contains_key(&ScrollArea::SavedFile));
@@ -462,10 +464,24 @@ impl Renderer {
             if focus == Some(row) {
                 self.fill_rounded(rect(area.left - 6.0, y - 2.0, area.right + 2.0, y + rows.height(row) + 2.0), RADIUS_CONTROL - 2.0, with_alpha(palette.accent, 0.14))?;
             }
+            let delete = transcript.ids[row].map(Action::DeleteLine);
+            let hovered = delete.is_some() && (panel.view.hovered_row == Some(row) || panel.view.hovered == delete);
+            if hovered {
+                // Only its own row: lines sit close together.
+                self.fill_rounded(rect(area.left - 6.0, y, area.right + 2.0, y + rows.height(row)), RADIUS_CONTROL - 2.0, palette.hover)?;
+            }
             for mark in finder.matches(&lines[row]) {
                 self.fill_text_range(&layout, mark.start, mark.end, area.left, y, with_alpha(palette.accent, 0.3))?;
             }
             self.draw_layout(&layout, area.left, y, palette.text)?;
+            if delete.is_some() {
+                regions.targets.push((clipped(rect(area.left, y, area.right, y + rows.height(row)), area), Target::Row(row)));
+            }
+            if let (true, Some(delete)) = (hovered, delete) {
+                // Level with the line's first row of text.
+                let middle = y + rows.height(row).min(BODY_SIZE * 1.4) / 2.0;
+                self.clipped_toolbar(&[vec![(Icon::Trash, delete, Tone::Dim)]], area.right - TOOLBAR_INSET, middle, area, panel, regions)?;
+            }
         }
         self.pop_clip();
         self.draw_scroll_thumb(area.right + THUMB_OFFSET, area, extent, top)
@@ -477,6 +493,22 @@ fn caret_at(layout: &IDWriteTextLayout, position: u32) -> Result<(f32, f32, f32)
     let (mut x, mut y, mut hit) = (0.0, 0.0, DWRITE_HIT_TEST_METRICS::default());
     unsafe { layout.HitTestTextPosition(position, false, &mut x, &mut y, &mut hit)? };
     Ok((x, y, hit.height))
+}
+
+/// Takes out of `rows`, measured for the rows that showed the lines `shown` (by id), those of lines no longer
+/// `there`, when all that changed is that lines went. Date rows show no line and are all one text line tall,
+/// so which of them is kept doesn't matter. Returns whether `rows` now matches `there`.
+fn keep_rows(shown: &[Option<i64>], there: &[Option<i64>], rows: &mut Rows) -> bool {
+    if shown.len() != rows.len() {
+        return false;
+    }
+    let mut kept = there.iter().peekable();
+    let gone: Vec<usize> = (0..shown.len()).filter(|&index| kept.next_if(|&&id| id == shown[index]).is_none()).collect();
+    if kept.peek().is_some() {
+        return false;
+    }
+    gone.into_iter().rev().for_each(|index| rows.remove(index));
+    true
 }
 
 /// The rows of a list `row` tall that show when it is scrolled to `top`.

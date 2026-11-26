@@ -271,6 +271,27 @@ impl History {
         Ok(deleted)
     }
 
+    /// Deletes lines by id, saved by hand or not, and the sessions they leave empty once those have
+    /// ended. Returns how many lines were deleted: ids already gone don't count.
+    pub fn delete_lines(&mut self, ids: &[i64]) -> Result<usize> {
+        let transaction = self.connection.transaction()?;
+        let mut deleted = 0;
+        {
+            let mut delete = transaction.prepare_cached("DELETE FROM lines WHERE id = ?1 RETURNING session")?;
+            let mut forget = transaction.prepare_cached(
+                "DELETE FROM sessions WHERE id = ?1 AND ended IS NOT NULL AND NOT EXISTS (SELECT 1 FROM lines WHERE lines.session = ?1)",
+            )?;
+            for &id in ids {
+                if let Some(session) = delete.query_row([id], |row| row.get::<_, i64>(0)).optional()? {
+                    deleted += 1;
+                    forget.execute([session])?;
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(deleted)
+    }
+
     /// Gives the space of deleted lines back to the disk, when that is worth it and quick: see
     /// [`RECLAIM_FREE_SHARE`]. Deleted space is otherwise reused for new lines. Returns whether it did.
     pub fn reclaim_space(&self) -> Result<bool> {
@@ -652,6 +673,28 @@ mod tests {
         assert!(history.sessions().unwrap().is_empty() && history.query(&Query::default()).unwrap().is_empty());
         assert!(history.query(&Query { text: Some("old".into()), ..Default::default() }).unwrap().is_empty(), "they leave the search index too");
         assert_eq!(history.latest_session().unwrap(), Some(running), "the running session keeps saving into its row");
+    }
+
+    #[test]
+    fn lines_are_deleted_one_by_one_and_an_ended_session_they_empty_goes_too() {
+        let mut history = database("delete-lines");
+        let (ended, running) = (history.start_session().unwrap(), history.start_session().unwrap());
+        let now = SystemTime::now();
+        let kept = NewLine { by_hand: true, ..line(now, false, "Discord", None, "saved by hand") };
+        history.add(ended, &[line(now, false, "Discord", None, "thermal paste"), kept]).unwrap();
+        history.add(running, &[line(now, true, "You", None, "still talking")]).unwrap();
+        history.end_session(ended).unwrap();
+        let ids = |history: &History| history.query(&Query::default()).unwrap().iter().map(|line| line.id).collect::<Vec<_>>();
+        let [paste, by_hand, talking] = ids(&history)[..] else { panic!("three lines") };
+
+        assert_eq!(history.delete_lines(&[paste, paste]).unwrap(), 1, "a line already gone isn't counted twice");
+        assert!(history.query(&Query { text: Some("thermal".into()), ..Default::default() }).unwrap().is_empty(), "it leaves the search index");
+        assert_eq!(history.sessions().unwrap().len(), 2, "its session still has a line");
+
+        assert_eq!(history.delete_lines(&[by_hand, talking]).unwrap(), 2, "saved by hand or not");
+        assert!(ids(&history).is_empty());
+        let rows = |sql: &str| history.read_sql(sql, 10).unwrap().rows;
+        assert_eq!(rows("SELECT id FROM sessions"), [[running.to_string()]], "the ended session goes, the running one keeps saving into its row");
     }
 
     #[test]

@@ -101,6 +101,12 @@ impl Rows {
         self.rows.truncate(len);
     }
 
+    /// Takes row `index` out; the rows after it move up into its place.
+    pub fn remove(&mut self, index: usize) {
+        let Some(gone) = self.rows.remove(index) else { return };
+        self.rows.range_mut(index..).for_each(|row| row.start -= gone.height as f64);
+    }
+
     fn origin(&self) -> f64 {
         self.rows.front().map_or(0.0, |first| first.start)
     }
@@ -194,6 +200,18 @@ mod tests {
         rows.truncate(1);
         rows.push_estimate(5.0);
         assert_eq!(rows.total(), 25.0);
+    }
+
+    #[test]
+    fn a_row_taken_out_moves_those_after_it_up_and_keeps_their_heights() {
+        let mut rows = rows(&[10.0, 20.0, 30.0]);
+        rows.set_width(100.0);
+        rows.set_measured(2, 35.0);
+        rows.remove(1);
+        assert_eq!((rows.len(), rows.top(1), rows.height(1), rows.total()), (2, 10.0, 35.0, 45.0));
+        assert_eq!(rows.estimated_between(0.0, 45.0), [0], "the measured row stays measured");
+        rows.remove(0);
+        assert_eq!((rows.top(0), rows.total()), (0.0, 35.0), "the first row too");
     }
 
     #[test]
